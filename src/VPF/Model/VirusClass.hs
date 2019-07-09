@@ -109,7 +109,7 @@ runModel vpfModel metagenomes = do
           runExceptT $
           runSafeT $
           L.purely P.fold
-              (L.prefilter (\row -> view HMM.sequenceEValue row < thr)
+              (L.prefilter (\row -> view HMM.sequenceEValue row <= thr)
                            gatherHits)
               hitRows
 
