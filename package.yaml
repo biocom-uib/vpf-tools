@@ -1,0 +1,84 @@
+name:                vpf
+version:             0.1.0.0
+github:              "bielr/vpf"
+license:             BSD3
+author:              "Gabriel Riera"
+maintainer:          "gabriel.riera@uib.es"
+copyright:           "2019 Gabriel Riera"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+synopsis:            Virus Protein Family tools
+category:            Bioinformatics
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/xcv-/vpf#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- Frames
+- bytestring
+- containers
+- directory
+- exceptions
+- extensible-effects
+- foldl
+- lens
+- monad-control
+- optparse-applicative
+- pipes
+- pipes-parse
+- pipes-safe
+- primitive
+- tagged
+- temporary
+- text
+- transformers
+- transformers-base
+- typed-process
+- vector
+- vinyl
+
+default-extensions:
+- BangPatterns
+- DataKinds
+- FlexibleContexts
+- FlexibleInstances
+- GADTs
+- MultiParamTypeClasses
+- PolyKinds
+- RankNTypes
+- ScopedTypeVariables
+- TypeApplications
+- TypeFamilies
+- TypeOperators
+
+library:
+  source-dirs: src
+
+executables:
+  vpf-class:
+    main:                Main.hs
+    source-dirs:         app/vpf-class
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - vpf
+
+tests:
+  vpf-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - vpf
