@@ -1,6 +1,6 @@
-name:                vpf
+name:                vpf-tools
 version:             0.1.0.0
-github:              "bielr/vpf"
+github:              "biocom-uib/vpf"
 license:             BSD3
 author:              "Gabriel Riera"
 maintainer:          "gabriel.riera@uib.es"
@@ -8,7 +8,6 @@ copyright:           "2019 Gabriel Riera"
 
 extra-source-files:
 - README.md
-- ChangeLog.md
 
 # Metadata used when publishing your package
 synopsis:            Virus Protein Family tools
@@ -17,7 +16,7 @@ category:            Bioinformatics
 # To avoid duplicated efforts in documentation and dealing with the
 # complications of embedding Haddock markup inside cabal files, it is
 # common to point users to the README.md file.
-description:         Please see the README on GitHub at <https://github.com/xcv-/vpf#readme>
+description:         Please see the README on GitHub at <https://github.com/biocom-uib/vpf-tools#readme>
 
 dependencies:
 - base >= 4.7 && < 5
@@ -70,7 +69,7 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - vpf
+    - vpf-tools
 
 tests:
   vpf-test:
@@ -81,4 +80,4 @@ tests:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - vpf
+    - vpf-tools
