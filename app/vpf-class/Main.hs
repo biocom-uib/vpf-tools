@@ -51,12 +51,12 @@ main = OptP.execParser opts >>= classify
 
 classify :: Config -> IO ()
 classify cfg =
-    runLift $ ignoreFail $ do
+    runLift $ ignoreFail $ handleParseErrors $ do
         let modelCfg = VC.ModelConfig
               { VC.modelEValueThreshold = Opts.evalueThreshold cfg
               }
 
-        hitCounts <- runReader modelCfg $ handleParseErrors $
+        hitCounts <- runReader modelCfg $
             case Opts.inputFiles cfg of
               Opts.GivenHitsFile hitsFile ->
                   VC.runModel (VC.GivenHitsFile hitsFile)
@@ -67,7 +67,7 @@ classify cfg =
                       withHMMSearchCfg cfg $
                         VC.runModel (VC.GivenGenomes workDir vpfModels genomes)
 
-        cls <- lift Cls.loadClassification
+        cls <- Cls.loadClassification (Opts.vpfClassFile cfg)
 
         let predictedCls = VC.predictClassification hitCounts cls
 
@@ -75,7 +75,7 @@ classify cfg =
                                    predictedCls
                             & D.reorder @RawOutputCols
 
-            tsvOpts = DSV.defWriterOptions "\t"
+            tsvOpts = DSV.defWriterOptions '\t'
 
         lift $
           case Opts.outputFile cfg of
@@ -149,6 +149,8 @@ handleParseErrors m = do
 
     case res of
       Right a -> return a
-      Left (DSV.RowParseError _ row) -> do
-        lift $ putStrLn $ "could not parse row: " ++ show row
+      Left (DSV.RowParseError ctx row) -> do
+        lift $ do
+          putStrLn $ "could not parse row " ++ show row
+          putStrLn $ " within " ++ show ctx
         die

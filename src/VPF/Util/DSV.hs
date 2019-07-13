@@ -82,7 +82,7 @@ instance Show ParseCtx where
             colNames = columnHeaders (Proxy @(Record cols))
             colsDesc = intercalate ", " colNames
         in
-            "file " ++ show (untag fp) ++ " with columns " ++ colsDesc ++
+            "file " ++ show (untag fp) ++ " with expected columns " ++ colsDesc ++
             " (separated by " ++ show sep ++ ")"
 
 
@@ -95,12 +95,12 @@ data RowParseError = RowParseError { parseErrorCtx :: ParseCtx, parseErrorRow ::
 instance Exception RowParseError
 
 
-defRowTokenizer :: CSV.Separator -> RowTokenizer
+defRowTokenizer :: Char -> RowTokenizer
 defRowTokenizer sep =
-    CSV.tokenizeRow CSV.defaultParser { CSV.columnSeparator = sep }
+    CSV.tokenizeRow CSV.defaultParser { CSV.columnSeparator = T.singleton sep }
 
 
-defParserOptions :: CSV.Separator -> ParserOptions
+defParserOptions :: Char -> ParserOptions
 defParserOptions sep = ParserOptions
     { hasHeader = True
     , isComment = const False -- T.all isSpace
@@ -140,7 +140,6 @@ produceEitherRows fp opts =
     ?parseRowCtx = ParseCtx fp
 
 
-
 throwLeftsM :: (Exception e, MonadThrow m) => Pipe (Either e a) a m ()
 throwLeftsM = P.mapM (either throwM return)
 
@@ -172,12 +171,12 @@ readFrameExc fp opts =
 
 data WriterOptions = WriterOptions
     { writeHeader    :: Bool
-    , writeSeparator :: CSV.Separator
+    , writeSeparator :: Char
     }
   deriving (Eq, Ord, Show)
 
 
-defWriterOptions :: CSV.Separator -> WriterOptions
+defWriterOptions :: Char -> WriterOptions
 defWriterOptions sep = WriterOptions
     { writeHeader    = True
     , writeSeparator = sep
@@ -200,7 +199,7 @@ pipeDSVLines :: forall cols m.
              -> Pipe (Record cols) Text m ()
 pipeDSVLines opts = do
     let headers = map T.pack (columnHeaders (Proxy @(Record cols)))
-        sep     = writeSeparator opts
+        sep     = T.singleton (writeSeparator opts)
 
     when (writeHeader opts) $
       P.yield (T.intercalate sep headers)

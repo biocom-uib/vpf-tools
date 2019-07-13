@@ -14,29 +14,35 @@ import Data.Vector (Vector)
 import Data.Vinyl (ElField(..), Rec(..), (=:))
 import Data.Vinyl.Lens (rlens)
 
-import Frames (Record, RecordColumns, type (:->))
+import Frames (Record, type (:->))
 import Frames.InCore (VectorFor)
 import Frames.TH (declareColumn, RowGen(..), rowGen, tableTypes')
 
 
-tableTypes' (rowGen "../data/classification.tsv")
-    { rowTypeName = "RawClassification"
-    , columnNames =
-        [ "model_name"
-        , "balt_clas"
-        , "balt_cat"
-        , "fam_clas"
-        , "fam_cat"
-        , "host_clas"
-        , "host_cat"
-        , "host_fam_clas"
-        , "host_fam_cat"
-        ]
-    , separator = "\t"
-    }
+declareColumn "model_name" ''Text
 
-type RawClassificationCols = RecordColumns RawClassification
+declareColumn "balt_class"     ''Text
+declareColumn "balt_cat"       ''Int
+declareColumn "fam_class"      ''Text
+declareColumn "fam_cat"        ''Int
+declareColumn "host_class"     ''Text
+declareColumn "host_cat"       ''Int
+declareColumn "host_fam_class" ''Text
+declareColumn "host_fam_cat"   ''Int
 
+type RawClassificationCols =
+    '[ ModelName
+     , BaltClass
+     , BaltCat
+     , FamClass
+     , FamCat
+     , HostClass
+     , HostCat
+     , HostFamClass
+     , HostFamCat
+     ]
+
+type RawClassification = Record RawClassificationCols
 
 
 data Class = HomogClass !Text !Int
@@ -94,21 +100,21 @@ asClass =
 fromRawClassification :: RawClassification -> Classification
 fromRawClassification rc
     =  rc ^. rlens @ModelName
-    :& #balt     =: mkClass (rc^.baltClas)    (rc^.baltCat)
-    :& #fam      =: mkClass (rc^.famClas)     (rc^.famCat)
-    :& #host     =: mkClass (rc^.hostClas)    (rc^.hostCat)
-    :& #host_fam =: mkClass (rc^.hostFamClas) (rc^.hostFamCat)
+    :& #balt     =: mkClass (rc^.baltClass)    (rc^.baltCat)
+    :& #fam      =: mkClass (rc^.famClass)     (rc^.famCat)
+    :& #host     =: mkClass (rc^.hostClass)    (rc^.hostCat)
+    :& #host_fam =: mkClass (rc^.hostFamClass) (rc^.hostFamCat)
     :& RNil
 
 toRawClassification :: Classification -> RawClassification
 toRawClassification cls
     =  cls ^. rlens @ModelName
-    :& #balt_clas     =: className (cls^.balt)
-    :& #balt_cat      =: classCat  (cls^.balt)
-    :& #fam_clas      =: className (cls^.fam)
-    :& #fam_cat       =: classCat  (cls^.fam)
-    :& #host_clas     =: className (cls^.host)
-    :& #host_cat      =: classCat  (cls^.host)
-    :& #host_fam_clas =: className (cls^.hostFam)
-    :& #host_fam_cat  =: classCat  (cls^.hostFam)
+    :& #balt_class     =: className (cls^.balt)
+    :& #balt_cat       =: classCat  (cls^.balt)
+    :& #fam_class      =: className (cls^.fam)
+    :& #fam_cat        =: classCat  (cls^.fam)
+    :& #host_class     =: className (cls^.host)
+    :& #host_cat       =: classCat  (cls^.host)
+    :& #host_fam_class =: className (cls^.hostFam)
+    :& #host_fam_cat   =: classCat  (cls^.hostFam)
     :& RNil

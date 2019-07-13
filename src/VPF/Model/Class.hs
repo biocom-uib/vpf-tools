@@ -10,7 +10,10 @@ module VPF.Model.Class
   , RawClassificationCols
   ) where
 
+import Control.Eff
+import Control.Eff.Exception (Exc)
 import Control.Lens (Iso', from, iso, (^.))
+import Control.Monad.IO.Class (MonadIO)
 
 import Frames (Frame, inCoreAoS)
 import Frames.CSV (readTableOpt)
@@ -21,25 +24,39 @@ import Pipes.Safe (MonadSafe)
 
 import VPF.Model.Class.Cols (Classification, RawClassification,
                              ClassificationCols, RawClassificationCols,
-                             rawClassificationParser,
                              fromRawClassification,
                              toRawClassification)
 
+import VPF.Formats
+import qualified VPF.Util.DSV as DSV
 
 
 rawClassification :: Iso' Classification RawClassification
 rawClassification = iso toRawClassification fromRawClassification
 
 
-rawClassificationStream :: MonadSafe m => Producer RawClassification m ()
-rawClassificationStream = readTableOpt rawClassificationParser "../data/classification.tsv"
+rawClassificationStream :: (MonadIO m, MonadSafe m)
+                        => Path (DSV "\t" RawClassificationCols)
+                        -> Producer RawClassification m ()
+rawClassificationStream fp =
+    DSV.produceEitherRows fp opts >-> DSV.throwLeftsM
+  where
+    opts = (DSV.defParserOptions '\t') { DSV.hasHeader = False }
 
-loadRawClassification :: IO (Frame RawClassification)
-loadRawClassification = inCoreAoS rawClassificationStream
+loadRawClassification :: (Lifted IO r, Member (Exc DSV.RowParseError) r)
+                      => Path (DSV "\t" RawClassificationCols)
+                      -> Eff r (Frame RawClassification)
+loadRawClassification = DSV.inCoreAoSExc . rawClassificationStream
 
 
-classificationStream :: MonadSafe m => Producer Classification m ()
-classificationStream = rawClassificationStream >-> P.map (^. from rawClassification)
+classificationStream :: MonadSafe m
+                     => Path (DSV "\t" RawClassificationCols)
+                     -> Producer Classification m ()
+classificationStream fp =
+    rawClassificationStream fp >-> P.map (^. from rawClassification)
 
-loadClassification :: IO (Frame Classification)
-loadClassification = inCoreAoS classificationStream
+
+loadClassification :: (Lifted IO r, Member (Exc DSV.RowParseError) r)
+                   => Path (DSV "\t" RawClassificationCols)
+                   -> Eff r (Frame Classification)
+loadClassification = DSV.inCoreAoSExc . classificationStream

@@ -7,6 +7,7 @@ import Options.Applicative
 import VPF.Formats
 import VPF.Ext.HMMER (HMMERConfig(HMMERConfig))
 import VPF.Ext.HMMER.Search (ProtSearchHitCols)
+import VPF.Model.Class (RawClassificationCols)
 
 
 data ArgPath t = FSPath (Path t) | StdDevice
@@ -26,6 +27,7 @@ data Config outfmt = Config
   , prodigalPath    :: FilePath
   , evalueThreshold :: Double
   , inputFiles      :: InputFiles
+  , vpfClassFile    :: Path (DSV "\t" RawClassificationCols)
   , outputFile      :: ArgPath outfmt
   , workDir         :: Maybe (Path Directory)
   }
@@ -65,6 +67,12 @@ configParser = do
         <> help "Generate temporary files in DIR instead of creating a temporary one"
 
     inputFiles <- givenSequences <|> givenHitsFile
+
+    vpfClassFile <- strOption $
+        long "vpf-class"
+        <> short 'c'
+        <> metavar "CLASS_FILE"
+        <> help "Tab-separated file containing the classification of the VPFs"
 
     outputFile <- option argPathReader $
         long "output"
