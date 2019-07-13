@@ -34,15 +34,16 @@ First, install stack using
 curl -sSL https://get.haskellstack.org/ | sh
 ```
 
-Then `cd` into `vpf-tools` and run
+Then run
 ```sh
+git clone https://github.com/biocom-uib/vpf-tools
+cd vpf-tools
 stack build
 ```
-
-to compile all targets. The first time this can take a while as `stack` also
-needs to install GHC and compile all the dependencies. Once it has finished,
-you should be able to run any of the tools prefixing them with `stack
-exec --`, for instance,
+to clone the repository and compile all targets. The first time this can take a
+while as `stack` also needs to install GHC and compile all the dependencies.
+Once it has finished, you should be able to run any of the tools from this
+directory by prefixing them with `stack exec --`, for instance,
 ```sh
 stack exec -- vpf-class --help
 ```
