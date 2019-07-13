@@ -1,29 +1,30 @@
 {-# language ApplicativeDo #-}
+{-# language BlockArguments #-}
+{-# language OverloadedLabels #-}
 {-# language OverloadedStrings #-}
+{-# language StrictData #-}
 module VPF.Model.VirusClass where
 
 import Control.Eff
-import Control.Eff.Reader.Strict
-import Control.Eff.Exception
-import Control.Lens (view, toListOf)
+import Control.Eff.Reader.Strict (Reader, reader)
+import Control.Eff.Exception (Exc)
+import Control.Lens (view, toListOf, (%~))
 import Control.Monad.Trans.Except (ExceptT, runExceptT)
 import qualified Control.Foldl as L
 
-import Data.Function (on)
-import Data.Map (Map)
-import qualified Data.Map as Map
-import Data.Maybe (fromJust)
+import Data.Kind (Type)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Vinyl (Rec(..))
-import Data.Vinyl.TypeLevel (type (++))
 
-import Frames (Frame, FrameRec, Record, RecordColumns, toFrame)
+import qualified Data.Vinyl           as V
+import qualified Data.Vinyl.TypeLevel as V
+
+import Frames (Frame, FrameRec, RecordColumns, frameLength)
+import Frames.InCore (RecVec)
 import Frames.Joins (innerJoin)
-import Frames.Melt (RDeleteAll)
 
 import Pipes (Producer, (>->))
-import Pipes.Safe (SafeT, runSafeT)
+import Pipes.Safe (SafeT)
 import qualified Pipes.Prelude as P
 
 import VPF.Eff.Cmd (Cmd)
@@ -33,151 +34,101 @@ import qualified VPF.Ext.HMMER.Search.Cols as HMM
 import qualified VPF.Ext.HMMER.TableFormat as Tbl
 
 import VPF.Formats
-import VPF.Model.Class (Classification)
+import VPF.Model.Class (ClassificationCols, RawClassificationCols)
 import qualified VPF.Model.Cols as M
 
-import VPF.Util.Tagged
-import VPF.Util.Vinyl
+import VPF.Util.Dplyr ((|.))
+import qualified VPF.Util.Dplyr as D
 import VPF.Util.FS (emptyTmpFile)
+import qualified VPF.Util.DSV as DSV
+
+
+data ModelInput (r :: [Type -> Type]) where
+    GivenHitsFile :: Path (HMMERTable ProtSearchHitCols)
+                  -> ModelInput r
+
+    GivenGenomes :: (Lifted IO r, '[Cmd HMMSearch, Cmd Prodigal] <:: r)
+                 => { workDir   :: Path Directory
+                    , vpfModels :: Path HMMERModel
+                    , genomes   :: Path (FASTA Nucleotide)
+                    }
+                 -> ModelInput r
 
 
 data ModelConfig = ModelConfig
-    { modelWorkDir         :: Path Directory
-    , modelEValueThreshold :: Double
+    { modelEValueThreshold :: Double
     }
 
-newtype ModelHits = ModelHits
-    { getModelHits ::  Map (Field M.ModelName) (Field M.NumHits)
-    }
-  deriving (Eq, Ord, Show)
 
-data MetagenomeHits = MetagenomeHits
-    { metagenomeModelHits  :: !ModelHits
-    , metagenomeBestEValue :: !(Field HMM.SequenceEValue)
-    }
-  deriving (Eq, Ord, Show)
+produceHits :: Member (Reader ModelConfig) r
+            => ModelInput r
+            -> Eff r (Producer ProtSearchHit (SafeT IO) ())
+produceHits input = do
+    hitsFile <- case input of
+        GivenHitsFile hitsFile -> return hitsFile
 
-type MetagenomeHitsRec = Record
-    '[ M.VirusName
-     , M.ModelName
-     , M.NumHits
-     ]
+        GivenGenomes wd vpfModel genomes -> do
+            aminoacidFile <- emptyTmpFile @(FASTA Aminoacid) wd "proteins.faa"
+            prodigal genomes aminoacidFile Nothing
 
+            hitsFile <- emptyTmpFile @(HMMERTable ProtSearchHitCols) wd "hits.txt"
+            hmmsearch vpfModel aminoacidFile hitsFile
 
-produceHits :: ( Lifted IO r
-               , '[ Reader ModelConfig
-                  , Cmd HMMSearch
-                  , Cmd Prodigal
-                  ] <:: r
-               )
-         => Path HMMERModel
-         -> Path (FASTA Nucleotide)
-         -> Eff r (Producer ProtSearchHit
-                            (SafeT (ExceptT Tbl.RowParseError IO))
-                            ())
-produceHits vpfModel metagenomes = do
-    wd <- reader modelWorkDir
+            return hitsFile
 
-    aminoacidFile <- emptyTmpFile @(FASTA Aminoacid) wd "temp_proteins.faa"
-    prodigal metagenomes aminoacidFile Nothing
-
-    hitsFile <- emptyTmpFile @(WithComments (HMMERTable ProtSearchHitCols)) wd "temp_hits.txt"
-    --let hitsFile = "../data/test.tblout"
-    hmmsearch vpfModel aminoacidFile hitsFile
-
-    return (Tbl.produceTableRows hitsFile)
-
-
+    return (Tbl.produceRows hitsFile)
 
 
 runModel :: ( Lifted IO r
             , '[ Reader ModelConfig
-               , Exc Tbl.RowParseError
-               , Cmd HMMSearch
-               , Cmd Prodigal
+               , Exc DSV.RowParseError
                ] <:: r
             )
-         => Path HMMERModel
-         -> Path (FASTA Nucleotide)
-         -> Eff r (Map (Field M.VirusName) MetagenomeHits)
-runModel vpfModel metagenomes = do
-    hitRows <- produceHits vpfModel metagenomes
-
+         => ModelInput r
+         -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
+runModel modelInput = do
+    hitRows <- produceHits modelInput
     thr <- reader modelEValueThreshold
 
-    er <- lift $
-          runExceptT $
-          runSafeT $
-          L.purely P.fold
-              (L.prefilter (\row -> view HMM.sequenceEValue row <= thr)
-                           gatherHits)
-              hitRows
+    hitsFrame <- DSV.inCoreAoSExc $
+        hitRows
+        >-> P.filter (\row -> view HMM.sequenceEValue row <= thr)
 
-    liftEither er
+    return (countHits hitsFrame)
   where
-    gatherHits :: L.Fold ProtSearchHit (Map (Field M.VirusName) MetagenomeHits)
-    gatherHits =
-        L.groupBy (metagenomeName . rgetTagged)
-                  metagenomeHits
+    countHits :: Frame ProtSearchHit -> FrameRec '[M.VirusName, M.ModelName, M.NumHits]
+    countHits = D.cat
+        |. D.mutate1 @M.VirusName (virusName . V.rget)
+        |. D.fixing1 @M.VirusName do
+             D.cat
+               |. D.grouping1 @HMM.TargetName do
+                    D.top1 @HMM.SequenceEValue 1
+               |. D.summarizing1 @HMM.QueryName do
+                    D.summary1 @M.NumHits frameLength
+        |. D.rename @HMM.QueryName @M.ModelName
+        |. D.copyAoS
 
-    metagenomeHits :: L.Fold ProtSearchHit MetagenomeHits
-    metagenomeHits = do
-      bestHits <- L.groupBy (view HMM.targetName) proteinBestHit
-
-      pure $ flip L.fold bestHits $ do
-        hits       <- L.groupBy (retagFieldTo @M.ModelName . rgetTagged @HMM.QueryName)
-                                (Tagged <$> L.length)
-
-        bestEValue <- fromJust <$> L.premap rgetTagged
-                                            L.minimum
-
-        pure (MetagenomeHits (ModelHits hits) bestEValue)
-
-    proteinBestHit :: L.Fold ProtSearchHit ProtSearchHit
-    proteinBestHit =
-        fromJust <$>
-          L.minimumBy (compare `on` view HMM.sequenceEValue)
-
-    metagenomeName :: Field HMM.TargetName -> Field M.VirusName
-    metagenomeName (Tagged t) =
-        let (metagenome_, protein) = T.breakOnEnd "_" t
+    virusName :: V.ElField HMM.TargetName -> Text
+    virusName (V.Field t) =
+        let (name_, protein) = T.breakOnEnd "_" t
         in
-          case T.stripSuffix "_" metagenome_ of
-            Just metagenome -> Tagged metagenome
+          case T.stripSuffix "_" name_ of
+            Just name -> name
             Nothing -> error (
                 "unrecognized protein naming scheme in hmmsearch result "
                 ++ T.unpack t)
 
 
-hitCountsToFrame :: Map (Field M.VirusName) MetagenomeHits
-                 -> Frame MetagenomeHitsRec
-hitCountsToFrame =
-    mconcat
-    . map (\(name, hits) ->
-        let fname = elfield name
-        in  fmap (fname :&) (hitsToFrame hits))
-    . Map.toAscList
-  where
-    hitsToFrame :: MetagenomeHits -> FrameRec '[M.ModelName, M.NumHits]
-    hitsToFrame =
-        toFrame
-        . map (\(query, cnt) -> elfield query :& elfield cnt :& RNil)
-        . Map.toAscList
-        . getModelHits
-        . metagenomeModelHits
+type PredictedCols rs = rs V.++ V.RDelete M.ModelName ClassificationCols
+type RawPredictedCols rs = rs V.++ V.RDelete M.ModelName RawClassificationCols
 
 
-type PredictedClassificationCols =
-     '[ M.VirusName
-      , M.ModelName
-      , M.NumHits
-      ]
-     ++
-     RDeleteAll '[M.ModelName]
-                (RecordColumns Classification)
-
-predictClassification :: Frame MetagenomeHitsRec
-                      -> Frame Classification
-                      -> FrameRec PredictedClassificationCols
+predictClassification ::
+                      ( V.RElem M.ModelName rs (V.RIndex M.ModelName rs)
+                      , rs V.<: PredictedCols rs
+                      , RecVec rs
+                      , RecVec (PredictedCols rs)
+                      )
+                      => FrameRec rs -> FrameRec ClassificationCols -> FrameRec (PredictedCols rs)
 predictClassification hits cls =
     innerJoin @'[M.ModelName] hits cls

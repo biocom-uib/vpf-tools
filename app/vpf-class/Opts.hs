@@ -5,6 +5,8 @@ module Opts where
 import Options.Applicative
 
 import VPF.Formats
+import VPF.Ext.HMMER (HMMERConfig(HMMERConfig))
+import VPF.Ext.HMMER.Search (ProtSearchHitCols)
 
 
 data ArgPath t = FSPath (Path t) | StdDevice
@@ -15,13 +17,16 @@ instance Show (ArgPath t) where
   show StdDevice  = "\"-\""
 
 
-data Config input outputCols = Config
-  { hmmsearchPath   :: FilePath
+data InputFiles =
+    GivenSequences { vpfModelsFile :: Path HMMERModel, genomesFile :: Path (FASTA Nucleotide) }
+  | GivenHitsFile { hitsFile :: Path (HMMERTable ProtSearchHitCols) }
+
+data Config outfmt = Config
+  { hmmerConfig     :: HMMERConfig
   , prodigalPath    :: FilePath
   , evalueThreshold :: Double
-  , hmmerModelFile  :: Path HMMERModel
-  , inputSequences  :: Path input
-  , outputFile      :: ArgPath outputCols
+  , inputFiles      :: InputFiles
+  , outputFile      :: ArgPath outfmt
   , workDir         :: Maybe (Path Directory)
   }
 
@@ -33,7 +38,7 @@ argPathReader = maybeReader $ \s ->
       _   -> Just (FSPath (Tagged s))
 
 
-configParser :: Parser (Config input outputCols)
+configParser :: Parser (Config outfmt)
 configParser = do
     prodigalPath <- strOption $
         long "prodigal"
@@ -41,18 +46,17 @@ configParser = do
         <> value "prodigal"
         <> help "Path to the prodigal executable (or in $PATH)"
 
-    hmmsearchPath <- strOption $
-        long "hmmsearch"
-        <> metavar "HMMSEARCH"
-        <> value "hmmsearch"
-        <> help "Path to the hmmsearch executable (or in $PATH)"
+    hmmerConfig <- fmap HMMERConfig $ optional $ strOption $
+        long "hmmer-prefix"
+        <> metavar "HMMER"
+        <> help "Prefix to the HMMER installation (e.g. HMMER/bin/hmmsearch should exist)"
 
     evalueThreshold <- option auto $
         long "evalue"
         <> short 'E'
         <> metavar "THRESHOLD"
         <> value 1e-3
-        <> help "Accept hits with e-value <= THRESHOLD"
+        <> help "Accept hits with e-value <= THRESHOLD (1e-3)"
 
     workDir <- optional $ fmap Tagged $ strOption $
         long "workdir"
@@ -60,13 +64,7 @@ configParser = do
         <> metavar "DIR"
         <> help "Generate temporary files in DIR instead of creating a temporary one"
 
-    hmmerModelFile <- strArgument $
-        metavar "HMM_FILE"
-        <> help ".hmm file containing VPF models"
-
-    inputSequences <- strArgument $
-        metavar "SEQS_FILE"
-        <> help "FASTA file containg metagenomic search sequences"
+    inputFiles <- givenSequences <|> givenHitsFile
 
     outputFile <- option argPathReader $
         long "output"
@@ -77,3 +75,29 @@ configParser = do
 
     pure Config {..}
 
+  where
+    givenSequences :: Parser InputFiles
+    givenSequences = do
+      vpfModelsFile <- strOption $
+          long "vpf-models"
+          <> short 'm'
+          <> metavar "VPF_HMM"
+          <> help ".hmms file containing query VPF models"
+
+      genomesFile <- strOption $
+          long "input-seqs"
+          <> short 'i'
+          <> metavar "SEQS_FILE"
+          <> help "FASTA file containg full input sequences"
+
+      pure GivenSequences {..}
+
+    givenHitsFile :: Parser InputFiles
+    givenHitsFile = do
+        hitsFile <- strOption $
+           long "hits"
+           <> short 'h'
+           <> metavar "HITS_FILE"
+           <> help "HMMER tblout file containing protein search hits against the VPF models"
+
+        pure GivenHitsFile {..}

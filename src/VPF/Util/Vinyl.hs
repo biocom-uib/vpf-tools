@@ -18,7 +18,7 @@ import Data.Vinyl (ElField(..), Rec, (<+>))
 import Data.Vinyl.Derived (KnownField)
 import Data.Vinyl.Lens (RecElem, RecElemFCtx, RecSubsetFCtx,
                         rlens', type (<:), type (:~:), rcast)
-import Data.Vinyl.TypeLevel (Fst, Snd, RIndex, type (++))
+import Data.Vinyl.TypeLevel
 
 import Frames.Melt (RDeleteAll)
 

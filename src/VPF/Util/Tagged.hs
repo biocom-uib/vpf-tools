@@ -10,11 +10,11 @@ module VPF.Util.Tagged
 
 import GHC.TypeLits (KnownSymbol)
 
+import Data.Coerce (coerce)
+import Data.Tagged (Tagged(..), untag)
 import Data.Vinyl (ElField(..), type (∈))
 import Data.Vinyl.Derived (KnownField, FieldRec)
 import Data.Vinyl.TypeLevel (Fst, Snd)
-import Data.Coerce (coerce)
-import Data.Tagged
 
 import Frames (rgetField)
 

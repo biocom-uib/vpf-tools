@@ -17,10 +17,9 @@ import qualified Data.ByteString.Lazy as BL (toStrict)
 import Data.Function (fix, (&))
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
-import qualified Data.Text.IO as T
 
 import Control.Eff
-import Control.Eff.Exception
+import Control.Eff.Exception (Exc, throwError)
 
 import System.Exit (ExitCode(..))
 import qualified System.Process.Typed as Proc
@@ -31,13 +30,11 @@ import VPF.Util.FS (resolveExecutable)
 
 
 
-
 data Prodigal a where
-  Prodigal ::
-           { inputFile           :: Path (FASTA Nucleotide)
-           , outputAminoacidFile :: Path (FASTA Aminoacid)
-           , outputGenBankFile   :: Maybe (Path GenBank)
-           }
+  Prodigal :: { inputFile           :: Path (FASTA Nucleotide)
+              , outputAminoacidFile :: Path (FASTA Aminoacid)
+              , outputGenBankFile   :: Maybe (Path GenBank)
+              }
            -> Prodigal ()
 
 deriving instance Eq (Prodigal a)
@@ -61,7 +58,8 @@ data ProdigalError
 type instance CmdEff Prodigal r = (Member (Exc ProdigalError) r, Lifted IO r)
 
 
-prodigalConfig :: (Member (Exc ProdigalError) r, Lifted IO r) => FilePath -> [String] -> Eff r ProdigalConfig
+prodigalConfig :: (Member (Exc ProdigalError) r, Lifted IO r)
+               => FilePath -> [String] -> Eff r ProdigalConfig
 prodigalConfig path defaultArgs = do
   mpath' <- lift $ resolveExecutable path
 

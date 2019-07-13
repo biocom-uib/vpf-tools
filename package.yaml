@@ -26,6 +26,7 @@ dependencies:
 - directory
 - exceptions
 - extensible-effects
+- filepath
 - foldl
 - lens
 - monad-control
@@ -41,10 +42,12 @@ dependencies:
 - transformers-base
 - typed-process
 - vector
+- vector-algorithms
 - vinyl
 
 default-extensions:
 - BangPatterns
+- ConstraintKinds
 - DataKinds
 - FlexibleContexts
 - FlexibleInstances
@@ -53,12 +56,15 @@ default-extensions:
 - PolyKinds
 - RankNTypes
 - ScopedTypeVariables
+- StandaloneDeriving
 - TypeApplications
 - TypeFamilies
 - TypeOperators
 
 library:
   source-dirs: src
+  ghc-options:
+  - -fsimpl-tick-factor=150
 
 executables:
   vpf-class:

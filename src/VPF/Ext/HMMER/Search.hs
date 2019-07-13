@@ -1,5 +1,6 @@
 {-# language RecordWildCards #-}
 {-# language StandaloneDeriving #-}
+{-# language StrictData #-}
 module VPF.Ext.HMMER.Search
   ( Cmd
   , HMMSearch
@@ -21,25 +22,24 @@ import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
 import Control.Eff
-import Control.Eff.Exception
-import Control.Eff.Extend
+import Control.Eff.Exception (Exc, throwError)
 
 import System.Exit (ExitCode(..))
 import qualified System.Process.Typed as Proc
 
 import VPF.Eff.Cmd
 import VPF.Formats
+import VPF.Ext.HMMER (HMMERConfig, resolveHMMERTool)
 import VPF.Ext.HMMER.Search.Cols (ProtSearchHitCols, ProtSearchHit)
 import VPF.Util.FS (resolveExecutable)
 
 
 
 data HMMSearch a where
-  HMMSearch :: forall seq.
-            { inputModelFile :: !(Path HMMERModel)
-            , inputSeqsFile  :: !(Path (FASTA seq))
-            , outputFile     :: !(Path (WithComments (HMMERTable ProtSearchHitCols)))
-            }
+  HMMSearch :: { inputModelFile :: Path HMMERModel
+               , inputSeqsFile  :: Path (FASTA seq)
+               , outputFile     :: Path (HMMERTable ProtSearchHitCols)
+               }
             -> HMMSearch ()
 
 instance Eq (HMMSearch a) where
@@ -60,26 +60,27 @@ data HMMSearchConfig = HMMSearchConfig
 
 
 data HMMSearchError
-    = HMMSearchError    { cmd :: HMMSearch (), exitCode :: !Int, stderr :: !Text }
-    | HMMSearchNotFound { search :: FilePath }
+    = HMMSearchError    { cmd :: HMMSearch (), exitCode :: Int, stderr :: Text }
+    | HMMSearchNotFound { hmmerConfig :: HMMERConfig }
   deriving (Eq, Ord, Show)
 
 
 type instance CmdEff HMMSearch r = (Member (Exc HMMSearchError) r, Lifted IO r)
 
 
-hmmsearchConfig :: (Member (Exc HMMSearchError) r, Lifted IO r) => FilePath -> [String] -> Eff r HMMSearchConfig
-hmmsearchConfig path defaultArgs = do
-  mpath' <- lift $ resolveExecutable path
+hmmsearchConfig :: (Member (Exc HMMSearchError) r, Lifted IO r)
+                => HMMERConfig -> [String] -> Eff r HMMSearchConfig
+hmmsearchConfig cfg defaultArgs = do
+  mpath' <- lift $ resolveHMMERTool cfg "hmmsearch"
 
   case mpath' of
-    Nothing    -> throwError (HMMSearchNotFound path)
+    Nothing    -> throwError (HMMSearchNotFound cfg)
     Just path' -> return (HMMSearchConfig path' defaultArgs)
 
 hmmsearch :: Member (Cmd HMMSearch) r
           => Path HMMERModel
           -> Path (FASTA seq)
-          -> Path (WithComments (HMMERTable ProtSearchHitCols))
+          -> Path (HMMERTable ProtSearchHitCols)
           -> Eff r ()
 hmmsearch inputModelFile inputSeqsFile outputFile = exec HMMSearch {..}
 

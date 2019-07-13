@@ -1,58 +1,47 @@
-{-# language DeriveDataTypeable #-}
 {-# language OverloadedStrings #-}
 module VPF.Ext.HMMER.TableFormat where
 
-import Control.Monad.Primitive (PrimMonad)
-import Control.Monad.Trans.Except (ExceptT(..), runExceptT)
-import Control.Monad.IO.Class (MonadIO)
-import Control.Monad.Catch (MonadMask)
-
+import Data.Coerce (coerce)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Typeable (Typeable)
-import qualified Data.Vector as V (Vector)
+import Data.Vector (Vector)
 
-import Data.Vinyl (Rec, ElField, rtraverse)
-import Data.Vinyl.Functor (Compose(..), (:.))
-import Data.Vinyl.Lens (type (<:), rcast)
-import Data.Vinyl.TypeLevel (NatToInt(natToInt), RLength)
+import qualified Data.Vinyl.TypeLevel as V
 
-import Frames (Record, FrameRec)
+import Frames (Record)
 import qualified Frames                as Fr
 import qualified Frames.ColumnTypeable as CSV
 import qualified Frames.CSV            as CSV
-import qualified Frames.InCore         as FiC
+import qualified Frames.ShowCSV        as CSV
+import Frames.InCore (VectorFor)
 
-import Pipes ((>->), Pipe, Producer)
-import qualified Pipes as P
-import qualified Pipes.Prelude as P
-import qualified Pipes.Parse as P
-import Pipes.Safe (MonadSafe, SafeT)
-import qualified Pipes.Safe.Prelude as Safe
+import Pipes ((>->), Producer)
+import Pipes.Safe (MonadSafe)
 
 
 import VPF.Formats
+import qualified VPF.Util.DSV as DSV
 
 
 data Accession = NoAccession | Accession Text
   deriving (Eq, Ord)
 
-instance Show Accession where
-  show NoAccession   = "-"
-  show (Accession t) = show t
-
 instance Fr.Readable Accession where
-  fromText s
-    | s == "-"  = return NoAccession
-    | otherwise = return (Accession s)
+    fromText s
+      | s == "-"  = return NoAccession
+      | otherwise = return (Accession s)
 
 instance CSV.Parseable Accession
 
-type instance FiC.VectorFor Accession = V.Vector
+instance Show Accession where
+    show NoAccession   = "-"
+    show (Accession t) = show t
 
+instance CSV.ShowCSV Accession where
+    showCSV NoAccession   = "-"
+    showCSV (Accession t) = CSV.showCSV t
 
-newtype RowParseError = RowParseError Text
-  deriving (Eq, Ord, Show)
+type instance VectorFor Accession = Vector
 
 
 tokenizeRowWithMaxCols :: Int -> Text -> [Text]
@@ -73,72 +62,38 @@ tokenizeRowWithMaxCols = iterBreak
           (a, b)  -> a : iterBreak (maxCols-1) b
 
 
+tblParserOptions :: Int -> DSV.ParserOptions
+tblParserOptions maxCols = DSV.ParserOptions
+    { DSV.isComment    = T.isPrefixOf "#"
+    , DSV.hasHeader    = False
+    , DSV.rowTokenizer = tokenizeRowWithMaxCols maxCols
+    }
 
-readTableRow :: forall rs. (NatToInt (RLength rs), CSV.ReadRec rs)
-              => Text -> Rec (Either Text :. ElField) rs
-readTableRow = CSV.readRec . tokenizeRowWithMaxCols maxCols
+
+tableAsDSV :: Path (HMMERTable rs) -> Path (DSV " " rs)
+tableAsDSV = coerce
+
+
+produceEitherRows :: forall rs m.
+                  ( MonadSafe m
+                  , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
+                  )
+                  => Path (HMMERTable rs)
+                  -> Producer (Either DSV.RowParseError (Record rs)) m ()
+produceEitherRows fp =
+    DSV.produceEitherRows (tableAsDSV fp) (tblParserOptions maxCols)
   where
-    maxCols = natToInt @(RLength rs)
+    maxCols = V.natToInt @(V.RLength rs)
 
 
-pipeEitherTableRows :: (Monad m, NatToInt (RLength rs), CSV.ReadRec rs)
-                    => Pipe Text (Either RowParseError (Record rs)) m ()
-pipeEitherTableRows = P.map $ \row ->
-    case rtraverse getCompose (readTableRow row) of
-        Left  _   -> Left (RowParseError row)
-        Right rec -> Right rec
-
-
-produceEitherTableRows :: (MonadSafe m, NatToInt (RLength rs), CSV.ReadRec rs)
-                       => Path (WithComments (HMMERTable rs))
-                       -> Producer (Either RowParseError (Record rs)) m ()
-produceEitherTableRows fp =
-    CSV.produceTextLines (untag fp)
-    >-> P.filter (\row -> not ("#" `T.isPrefixOf` row))
-    >-> pipeEitherTableRows
-
-
-produceTableRows :: forall rs m.
-                 ( NatToInt (RLength rs)
-                 , CSV.ReadRec rs
-                 , MonadIO m
-                 , MonadMask m
-                 )
-                 => Path (WithComments (HMMERTable rs))
-                 -> Producer (Record rs) (SafeT (ExceptT RowParseError m)) ()
-produceTableRows fp =
-    produceEitherTableRows fp
-    >-> P.mapM throwLefts
-  where
-    throwLefts :: Either e a -> SafeT (ExceptT e m) a
-    throwLefts = P.lift . ExceptT . return
-
-
-inCoreEitherAoS :: forall m rs.
-                ( FiC.RecVec rs
-                , MonadIO m
-                , MonadMask m
-                , PrimMonad m
-                )
-                => Producer (Record rs) (SafeT (ExceptT RowParseError m)) ()
-                -> m (Either RowParseError (FrameRec rs))
-inCoreEitherAoS = runExceptT . Fr.inCoreAoS
-
-
-readAsFrame :: forall rs rs' m.
-            ( NatToInt (RLength rs)
-            , CSV.ReadRec rs
-            , FiC.RecVec rs'
-            , rs' <: rs
-            , MonadIO m
-            , MonadMask m
-            , PrimMonad m
+produceRows :: forall rs m.
+            ( MonadSafe m
+            , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
             )
-            => Path (WithComments (HMMERTable rs))
-            -> Pipe (Record rs) (Record rs') m ()
-            -> m (Either RowParseError (FrameRec rs'))
-readAsFrame fp pipe =
-    inCoreEitherAoS (produceTableRows fp >-> P.map rcast)
+            => Path (HMMERTable rs)
+            -> Producer (Record rs) m ()
+produceRows fp =
+    DSV.produceEitherRows (tableAsDSV fp) (tblParserOptions maxCols)
+    >-> DSV.throwLeftsM
   where
-    pipe' :: Pipe (Record rs) (Record rs') (SafeT (ExceptT Text m)) ()
-    pipe' = P.hoist P.lift (P.hoist P.lift pipe)
+    maxCols = V.natToInt @(V.RLength rs)

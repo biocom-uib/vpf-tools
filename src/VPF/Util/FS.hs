@@ -1,6 +1,5 @@
 module VPF.Util.FS where
 
-import Control.Monad.Base (liftBase)
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Control (MonadBaseControl(..), liftBaseOp)
@@ -35,7 +34,7 @@ resolveExecutable path = do
 
       if exists then
         return (Just path)
-      else do
+      else
         D.findExecutable path
 
     hasPermission :: FilePath -> IO Bool

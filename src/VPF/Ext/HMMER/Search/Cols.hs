@@ -10,27 +10,29 @@ import Frames.TH (declareColumn)
 import VPF.Ext.HMMER.TableFormat (Accession)
 
 
-declareColumn "target name"      ''Text
-declareColumn "target accession" ''Accession
-declareColumn "query name"       ''Text
-declareColumn "query accession"  ''Accession
+declareColumn "target_name"      ''Text
+declareColumn "target_accession" ''Accession
+declareColumn "query_name"       ''Text
+declareColumn "query_accession"  ''Accession
 
-declareColumn "sequence E-value" ''Double
-declareColumn "sequence score"   ''Double
-declareColumn "sequence bias"    ''Double
+declareColumn "sequence_e_value" ''Double
+declareColumn "sequence_score"   ''Double
+declareColumn "sequence_bias"    ''Double
 
-declareColumn "domain E-value" ''Double
-declareColumn "domain score"   ''Double
-declareColumn "domain bias"    ''Double
+declareColumn "domain_e_value" ''Double
+declareColumn "domain_score"   ''Double
+declareColumn "domain_bias"    ''Double
 
-declareColumn "exp estimation" ''Double
-declareColumn "reg estimation" ''Int
-declareColumn "clu estimation" ''Int
-declareColumn "ov estimation"  ''Int
-declareColumn "env estimation" ''Int
-declareColumn "dom estimation" ''Int
-declareColumn "rep estimation" ''Int
-declareColumn "inc estimation" ''Int
+declareColumn "exp_estimation" ''Double
+declareColumn "reg_estimation" ''Int
+declareColumn "clu_estimation" ''Int
+declareColumn "ov_estimation"  ''Int
+declareColumn "env_estimation" ''Int
+declareColumn "dom_estimation" ''Int
+declareColumn "rep_estimation" ''Int
+declareColumn "inc_estimation" ''Int
+
+declareColumn "description" ''Text
 
 
 type ProtSearchHitCols =
@@ -55,6 +57,8 @@ type ProtSearchHitCols =
      , DomEstimation
      , RepEstimation
      , IncEstimation
+
+     , Description
      ]
 
 type ProtSearchHit = Record ProtSearchHitCols

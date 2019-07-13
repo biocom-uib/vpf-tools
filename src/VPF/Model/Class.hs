@@ -4,8 +4,10 @@ module VPF.Model.Class
   , loadRawClassification
   , classificationStream
   , loadClassification
-  , RawClassification
   , Classification
+  , ClassificationCols
+  , RawClassification
+  , RawClassificationCols
   ) where
 
 import Control.Lens (Iso', from, iso, (^.))
@@ -18,6 +20,7 @@ import qualified Pipes.Prelude as P
 import Pipes.Safe (MonadSafe)
 
 import VPF.Model.Class.Cols (Classification, RawClassification,
+                             ClassificationCols, RawClassificationCols,
                              rawClassificationParser,
                              fromRawClassification,
                              toRawClassification)

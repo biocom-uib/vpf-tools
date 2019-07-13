@@ -1,15 +1,24 @@
 {-# language ConstraintKinds #-}
 {-# language UndecidableInstances #-}
-module VPF.Eff.Cmd where
+module VPF.Eff.Cmd
+  ( Cmd
+  , CmdEff
+  , Impl
+  , runImpl
+  , getImpl
+  , exec
+  , withCmd
+  , runCmd
+  ) where
 
 import Data.Kind (Constraint, Type)
 import Data.Function (fix)
 
-import Control.Eff
 import Control.Eff.Extend
 
 import Control.Monad.Base (MonadBase(..))
 import Control.Monad.Trans.Control (MonadBaseControl(..), RunInBase)
+
 
 data Cmd cmd a where
   Cmd :: cmd a -> Cmd cmd a
@@ -18,7 +27,7 @@ data Cmd cmd a where
 
 type family CmdEff (cmd :: Type -> Type) (r :: [Type -> Type]) :: Constraint
 
-data Impl cmd = Impl { runImpl :: forall r a. CmdEff cmd r => cmd a -> Eff r a }
+newtype Impl cmd = Impl { runImpl :: forall r a. CmdEff cmd r => cmd a -> Eff r a }
 
 
 exec :: Member (Cmd cmd) r => cmd a -> Eff r a

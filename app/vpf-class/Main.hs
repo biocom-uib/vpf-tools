@@ -3,28 +3,25 @@
 module Main where
 
 import Control.Applicative ((<**>))
-import Control.Eff
-import Control.Eff.Reader.Strict
-import Control.Eff.Exception
-import Control.Lens (Lens', view, over, mapped)
-import Control.Monad.IO.Class (liftIO)
-
-import qualified Data.Foldable as F
-import qualified Data.Text.IO as T
-
-import Frames.CSV (produceCSV, consumeTextLines)
+import Control.Eff (Eff, Member, Lifted, LiftedBase, lift, runLift)
+import Control.Eff.Reader.Strict (runReader)
+import Control.Eff.Exception (Exc, runError, Fail, die, ignoreFail)
+import Control.Lens (view, over, mapped, (&))
 
 import qualified Options.Applicative as OptP
 
-import VPF.Eff.Cmd
-import VPF.Ext.HMMER.Search
-import VPF.Ext.HMMER.TableFormat (RowParseError(..))
-import VPF.Ext.Prodigal
+import VPF.Eff.Cmd (Cmd, runCmd)
+import VPF.Ext.HMMER.Search (HMMSearch, HMMSearchError, hmmsearchConfig, execHMMSearch)
+import VPF.Ext.Prodigal (Prodigal, ProdigalError, prodigalConfig, execProdigal)
+
 import VPF.Formats
-import VPF.Model.Class
-import VPF.Model.VirusClass
-import VPF.Util.Frames (produceDSV)
-import VPF.Util.FS (withTmpDir)
+import qualified VPF.Model.Class      as Cls
+import qualified VPF.Model.Cols       as M
+import qualified VPF.Model.VirusClass as VC
+
+import qualified VPF.Util.Dplyr as D
+import qualified VPF.Util.DSV   as DSV
+import qualified VPF.Util.FS    as FS
 import VPF.Util.Vinyl (rsubset')
 
 import Pipes ((>->))
@@ -37,7 +34,10 @@ import qualified System.Directory as D
 import qualified Opts
 
 
-type Config = Opts.Config (FASTA Nucleotide) PredictedClassificationCols
+type OutputCols = VC.PredictedCols '[M.VirusName, M.ModelName, M.NumHits]
+type RawOutputCols = VC.RawPredictedCols '[M.VirusName, M.ModelName, M.NumHits]
+
+type Config = Opts.Config (DSV "\t" OutputCols)
 
 
 main :: IO ()
@@ -51,76 +51,64 @@ main = OptP.execParser opts >>= classify
 
 classify :: Config -> IO ()
 classify cfg =
-    case Opts.workDir cfg of
-      Nothing ->
-          withTmpDir "." "vpf-work" (classifyIn cfg)
-
-      Just wd -> do
-          D.createDirectoryIfMissing True (untag wd)
-          classifyIn cfg wd
-
-
-classifyIn :: Config  -> Path Directory -> IO ()
-classifyIn cfg workDir =
     runLift $ ignoreFail $ do
-        let modelCfg = ModelConfig
-              { modelWorkDir         = workDir
-              , modelEValueThreshold = Opts.evalueThreshold cfg
+        let modelCfg = VC.ModelConfig
+              { VC.modelEValueThreshold = Opts.evalueThreshold cfg
               }
 
-        hitCounts <- runModelEff cfg $ runReader modelCfg $
-            runModel (Opts.hmmerModelFile cfg)
-                     (Opts.inputSequences cfg)
+        hitCounts <- runReader modelCfg $ handleParseErrors $
+            case Opts.inputFiles cfg of
+              Opts.GivenHitsFile hitsFile ->
+                  VC.runModel (VC.GivenHitsFile hitsFile)
 
-        let hitCountsFrame = hitCountsToFrame hitCounts
+              Opts.GivenSequences vpfModels genomes ->
+                  withCfgWorkDir cfg $ \workDir ->
+                    withProdigalCfg cfg $
+                      withHMMSearchCfg cfg $
+                        VC.runModel (VC.GivenGenomes workDir vpfModels genomes)
 
-        cls <- lift loadClassification
+        cls <- lift Cls.loadClassification
 
-        let predictedCls = predictClassification hitCountsFrame cls
+        let predictedCls = VC.predictClassification hitCounts cls
 
-            rawPredictedCls = over (mapped.rsubset') (view rawClassification)
+            rawPredictedCls = over (mapped.rsubset') (view Cls.rawClassification)
                                    predictedCls
+                            & D.reorder @RawOutputCols
 
-            tsvProducer = produceDSV "\t" rawPredictedCls
+            tsvOpts = DSV.defWriterOptions "\t"
 
-
-        lift $ P.runSafeT $ P.runEffect $
+        lift $
           case Opts.outputFile cfg of
-            Opts.StdDevice -> tsvProducer >-> P.mapM_ (liftIO . T.putStrLn)
-            Opts.FSPath p  -> tsvProducer >-> consumeTextLines (untag p)
+            Opts.StdDevice ->
+                DSV.writeDSV tsvOpts DSV.stdoutWriter rawPredictedCls
+            Opts.FSPath fp ->
+                P.runSafeT $
+                  DSV.writeDSV tsvOpts (DSV.fileWriter (untag fp)) rawPredictedCls
 
 
-runModelEff :: (Lifted IO r, Member Fail r)
-            => Config
-            -> Eff (Exc RowParseError
-                    ': Cmd HMMSearch
-                    ': Cmd Prodigal
-                    ': Exc HMMSearchError
-                    ': Exc ProdigalError
-                    ': r)
-                   a
-            -> Eff r a
-runModelEff cfg m =
-    handleProdigalErrors $
-      handleHMMSearchErrors $ do
-        prodigalCfg <- prodigalConfig (Opts.prodigalPath cfg) []
-        hmmsearchCfg <- hmmsearchConfig (Opts.hmmsearchPath cfg) []
+withCfgWorkDir :: LiftedBase IO r
+               => Config
+               -> (Path Directory -> Eff r a)
+               -> Eff r a
+withCfgWorkDir cfg fm =
+    case Opts.workDir cfg of
+      Nothing ->
+          FS.withTmpDir "." "vpf-work" fm
 
-        execProdigal prodigalCfg $
-          execHMMSearch hmmsearchCfg $
-            handleParseErrors m
+      Just wd -> do
+          lift $ D.createDirectoryIfMissing True (untag wd)
+          fm wd
+
+
+withProdigalCfg :: (Lifted IO r, Member Fail r)
+               => Config
+               -> Eff (Cmd Prodigal ': Exc ProdigalError ': r) a
+               -> Eff r a
+withProdigalCfg cfg m = do
+    handleProdigalErrors $ do
+      prodigalCfg <- prodigalConfig (Opts.prodigalPath cfg) []
+      execProdigal prodigalCfg m
   where
-    handleParseErrors :: (Lifted IO r, Member Fail r)
-                      => Eff (Exc RowParseError ': r) a -> Eff r a
-    handleParseErrors m = do
-        res <- runError m
-
-        case res of
-          Right a -> return a
-          Left (RowParseError row) -> do
-            lift $ putStrLn $ "could not parse row: " ++ show row
-            die
-
     handleProdigalErrors :: (Lifted IO r, Member Fail r)
                          => Eff (Exc ProdigalError ': r) a -> Eff r a
     handleProdigalErrors m = do
@@ -132,6 +120,16 @@ runModelEff cfg m =
             lift $ putStrLn $ "prodigal error: " ++ show e
             die
 
+
+withHMMSearchCfg :: (Lifted IO r, Member Fail r)
+                 => Config
+                 -> Eff (Cmd HMMSearch ': Exc HMMSearchError ': r) a
+                 -> Eff r a
+withHMMSearchCfg cfg m = do
+    handleHMMSearchErrors $ do
+      hmmsearchCfg <- hmmsearchConfig (Opts.hmmerConfig cfg) []
+      execHMMSearch hmmsearchCfg m
+  where
     handleHMMSearchErrors :: (Lifted IO r, Member Fail r)
                           => Eff (Exc HMMSearchError ': r) a -> Eff r a
     handleHMMSearchErrors m = do
@@ -143,3 +141,14 @@ runModelEff cfg m =
             lift $ putStrLn $ "hmmsearch error: " ++ show e
             die
 
+
+handleParseErrors :: (Lifted IO r, Member Fail r)
+                  => Eff (Exc DSV.RowParseError ': r) a -> Eff r a
+handleParseErrors m = do
+    res <- runError m
+
+    case res of
+      Right a -> return a
+      Left (DSV.RowParseError _ row) -> do
+        lift $ putStrLn $ "could not parse row: " ++ show row
+        die

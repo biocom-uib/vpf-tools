@@ -6,9 +6,11 @@ module VPF.Formats
   , FASTA
   , SeqType(..)
   , GenBank
-  , WithComments
   , HMMERModel
   , HMMERTable
+  , DSV
+  , CSV
+  , TSV
   ) where
 
 import GHC.TypeLits (Symbol)
@@ -16,16 +18,14 @@ import GHC.TypeLits (Symbol)
 import Data.Kind (Type)
 import Data.Tagged
 
-type Path tag = Tagged tag FilePath
 
+type Path tag = Tagged tag FilePath
 
 data Directory
 
 data FASTA (t :: SeqType)
 data SeqType = Nucleotide | Aminoacid
 data GenBank
-
-data WithComments f
 
 data HMMERModel
 data HMMERTable (cols :: [(Symbol, Type)])
