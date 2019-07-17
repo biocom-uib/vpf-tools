@@ -41,7 +41,7 @@ import VPF.Formats
 import VPF.Model.Class (ClassificationCols, RawClassificationCols)
 import qualified VPF.Model.Cols as M
 
-import VPF.Util.Concurrent (concurrentlyChunked)
+import VPF.Util.Concurrent (mapReduceChunks)
 import VPF.Util.Dplyr ((|.))
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
@@ -95,30 +95,25 @@ searchGenomeHits wd vpfsFile genomes = do
     return hitsFile
 
 
-produceHits :: forall r. Member (Reader ModelConfig) r
-            => ModelInput r
-            -> Eff r (Producer ProtSearchHit (SafeT IO) ())
-produceHits input = do
+produceHitsFiles :: forall r. Member (Reader ModelConfig) r
+                 => ModelInput r
+                 -> Eff r [Path (HMMERTable ProtSearchHitCols)]
+produceHitsFiles input = do
     case input of
       GivenHitsFile hitsFile ->
-          return $ Tbl.produceRows hitsFile
+          return [hitsFile]
 
       GivenGenomes wd vpfsFile genomesFile concOpts -> do
           let splitGenomes :: Producer [Text] (SafeT IO) ()
               splitGenomes = void $ FA.fastaGroups $ FS.fileReader (untag genomesFile)
 
-          hitsFiles <- concurrentlyChunked @(SafeT IO) @(Eff r)
+          mapReduceChunks
               (fastaChunkSize concOpts)
               (maxSearchingWorkers concOpts)
               (liftIO . runSafeT)
               splitGenomes
               (searchGenomeHits wd vpfsFile)
-
-          return $ flatten (hitsFiles >-> P.map Tbl.produceRows)
-  where
-    flatten :: Functor m => Producer (Producer a m ()) m () -> Producer a m ()
-    flatten p = P.for p id
-
+              (liftIO . runSafeT . P.toListM)
 
 
 runModel :: ( Lifted IO r
@@ -129,7 +124,9 @@ runModel :: ( Lifted IO r
          => ModelInput r
          -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
 runModel modelInput = do
-    hitRows <- produceHits modelInput
+    hitsFiles <- produceHitsFiles modelInput
+    let hitRows = foldMap Tbl.produceRows  hitsFiles
+
     thr <- reader modelEValueThreshold
 
     hitsFrame <- DSV.inCoreAoSExc $

@@ -1,5 +1,5 @@
 module VPF.Util.Concurrent
-  ( concurrentlyChunked
+  ( mapReduceChunks
   ) where
 
 import Control.Concurrent.Async (Async, Concurrently(..), async, wait)
@@ -49,23 +49,24 @@ liftWithBuffer buf fo fi =
         return (l, r)
 
 
-concurrentlyChunked :: forall m n a r.
-                    (MonadIO n, PS.MonadSafe m, MonadBaseControl IO n)
-                    => Int
-                    -> Int
-                    -> (forall x. m x -> n x)
-                    -> Producer a m ()
-                    -> (Producer a m () -> n r)
-                    -> n (Producer r m ())
-concurrentlyChunked chunkSize maxWorkers liftM producer worker = do
-    (_, p) <- liftWithBuffer (PC.bounded (2*maxWorkers))
+mapReduceChunks :: forall m n a r s.
+                (MonadIO n, PS.MonadSafe m, MonadBaseControl IO n)
+                => Int
+                -> Int
+                -> (forall x. m x -> n x)
+                -> Producer a m ()
+                -> (Producer a m () -> n r)
+                -> (Producer r m () -> n s)
+                -> n s
+mapReduceChunks chunkSize maxWorkers liftM producer transform reduce = do
+    (_, s) <- liftWithBuffer (PC.bounded (2*maxWorkers))
                 (\output' ->
                     liftWithBuffer (PC.bounded (2*maxWorkers))
                         (\output -> writeChunks output)
                         (\input -> workers input output'))
                 (\input' ->
-                    return (PC.fromInput input'))
-    return p
+                    reduce (PC.fromInput input'))
+    return s
   where
     chunks :: PG.FreeT (Producer a m) m ()
     chunks = producer ^. PG.chunksOf chunkSize
@@ -78,9 +79,6 @@ concurrentlyChunked chunkSize maxWorkers liftM producer worker = do
         PC.atomically (PC.send o b)
         return ()
 
-    chunkWriter :: PC.Output (Producer a m ()) -> Effect m ()
-    chunkWriter o = producers >-> P.mapM_ (writeChunk o)
-
     writeChunks :: PC.Output (Producer a m ()) -> n ()
     writeChunks o = do
         liftM $ P.runEffect $ producers >-> P.mapM_ (writeChunk o)
@@ -90,5 +88,5 @@ concurrentlyChunked chunkSize maxWorkers liftM producer worker = do
         liftWorkers maxWorkers $
             P.runEffect $ do
                 PC.fromInput input
-                  >-> P.mapM worker
+                  >-> P.mapM transform
                   >-> PC.toOutput output'
