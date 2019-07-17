@@ -41,7 +41,7 @@ import VPF.Formats
 import VPF.Model.Class (ClassificationCols, RawClassificationCols)
 import qualified VPF.Model.Cols as M
 
-import VPF.Util.Concurrent (mapReduceChunks)
+import qualified VPF.Util.Concurrent as Conc
 import VPF.Util.Dplyr ((|.))
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
@@ -107,13 +107,13 @@ produceHitsFiles input = do
           let splitGenomes :: Producer [Text] (SafeT IO) ()
               splitGenomes = void $ FA.fastaGroups $ FS.fileReader (untag genomesFile)
 
-          mapReduceChunks
-              (fastaChunkSize concOpts)
-              (maxSearchingWorkers concOpts)
-              (liftIO . runSafeT)
-              splitGenomes
-              (searchGenomeHits wd vpfsFile)
-              (liftIO . runSafeT . P.toListM)
+              workers = maxSearchingWorkers concOpts
+              chunkSize = fastaChunkSize concOpts
+              liftSafeTIO = liftIO . runSafeT
+
+          Conc.consumeWith (workers*2) (liftSafeTIO . P.toListM) $
+            Conc.parMap workers liftSafeTIO (searchGenomeHits wd vpfsFile) $
+              Conc.asyncProducer (Conc.chunked chunkSize splitGenomes)
 
 
 runModel :: ( Lifted IO r
