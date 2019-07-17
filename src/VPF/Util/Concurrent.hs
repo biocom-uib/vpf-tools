@@ -2,9 +2,9 @@ module VPF.Util.Concurrent
   ( concurrentlyChunked
   ) where
 
-import Control.Concurrent.Async (Async, async, wait)
+import Control.Concurrent.Async (Async, Concurrently(..), async, wait)
 import Control.Lens ((^.), to)
-import Control.Monad (forM, forever)
+import Control.Monad (forM, join)
 import Control.Monad.Trans.Control (MonadBaseControl(..), liftBaseDiscard)
 import Control.Monad.IO.Class (MonadIO(..))
 
@@ -19,10 +19,34 @@ import System.Mem (performGC)
 
 
 
-liftAsync :: MonadBaseControl IO m
-          => m a
-          -> m (Async (StM m a))
-liftAsync m = liftBaseWith (\runInBase -> async (runInBase m))
+liftWorkers :: forall m. MonadBaseControl IO m => Int -> m () -> m ()
+liftWorkers nworkers m =
+    restoreN $
+        liftBaseWith $ \runInBase ->
+            runConcurrently $ sequenceA (replicate nworkers (Concurrently (runInBase m)))
+  where
+    restore1 :: StM m () -> m ()
+    restore1 = restoreM
+
+    restoreN :: m [StM m ()] -> m ()
+    restoreN ms = ms >>= mapM_ restore1
+
+
+liftWithBuffer :: forall m a l r. MonadBaseControl IO m
+               => PC.Buffer a
+               -> (PC.Output a -> m l)
+               -> (PC.Input a -> m r)
+               -> m (l, r)
+liftWithBuffer buf fo fi =
+    restore2 $ liftBaseWith (\runInBase ->
+        PC.withBuffer buf (runInBase . fo) (runInBase . fi))
+  where
+    restore2 :: m (StM m l, StM m r) -> m (l, r)
+    restore2 mlr = do
+        (sl, sr) <- mlr
+        l <- restoreM sl
+        r <- restoreM sr
+        return (l, r)
 
 
 concurrentlyChunked :: forall m n a r.
@@ -34,25 +58,14 @@ concurrentlyChunked :: forall m n a r.
                     -> (Producer a m () -> n r)
                     -> n (Producer r m ())
 concurrentlyChunked chunkSize maxWorkers liftM producer worker = do
-    (as, input') <- do
-        (output, input) <- liftIO $ PC.spawn (PC.bounded (2*maxWorkers))
-        (output', input') <- liftIO $ PC.spawn (PC.bounded (2*maxWorkers))
-
-        as <- forM [1..maxWorkers] $ \_ ->
-                  liftAsync $ do
-                      P.runEffect $ do
-                          PC.fromInput input
-                            >-> P.mapM worker
-                            >-> PC.toOutput output'
-
-                          liftIO $ performGC
-
-        liftM $ P.runEffect $ chunkWriter output
-        liftIO performGC
-
-        return (as, input')
-
-    return (PC.fromInput input' `PS.finally` liftIO (mapM_ wait as))
+    (_, p) <- liftWithBuffer (PC.bounded (2*maxWorkers))
+                (\output' ->
+                    liftWithBuffer (PC.bounded (2*maxWorkers))
+                        (\output -> writeChunks output)
+                        (\input -> workers input output'))
+                (\input' ->
+                    return (PC.fromInput input'))
+    return p
   where
     chunks :: PG.FreeT (Producer a m) m ()
     chunks = producer ^. PG.chunksOf chunkSize
@@ -67,3 +80,15 @@ concurrentlyChunked chunkSize maxWorkers liftM producer worker = do
 
     chunkWriter :: PC.Output (Producer a m ()) -> Effect m ()
     chunkWriter o = producers >-> P.mapM_ (writeChunk o)
+
+    writeChunks :: PC.Output (Producer a m ()) -> n ()
+    writeChunks o = do
+        liftM $ P.runEffect $ producers >-> P.mapM_ (writeChunk o)
+
+    workers :: PC.Input (Producer a m ()) -> PC.Output r -> n ()
+    workers input output' =
+        liftWorkers maxWorkers $
+            P.runEffect $ do
+                PC.fromInput input
+                  >-> P.mapM worker
+                  >-> PC.toOutput output'
