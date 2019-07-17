@@ -6,9 +6,11 @@ import Control.Applicative ((<**>))
 import Control.Eff (Eff, Member, Lifted, LiftedBase, lift, runLift)
 import Control.Eff.Reader.Strict (runReader)
 import Control.Eff.Exception (Exc, runError, Fail, die, ignoreFail)
-import Control.Lens (view, over, mapped, (&))
+import Control.Lens (Lens, view, over, mapped, (&))
 
 import qualified Options.Applicative as OptP
+
+import Frames (FrameRec, Record)
 
 import VPF.Eff.Cmd (Cmd, runCmd)
 import VPF.Ext.HMMER.Search (HMMSearch, HMMSearchError, hmmsearchConfig, execHMMSearch)
@@ -16,13 +18,14 @@ import VPF.Ext.Prodigal (Prodigal, ProdigalError, prodigalConfig, execProdigal)
 
 import VPF.Formats
 import qualified VPF.Model.Class      as Cls
+import qualified VPF.Model.Class.Cols as Cls
 import qualified VPF.Model.Cols       as M
 import qualified VPF.Model.VirusClass as VC
 
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
 import qualified VPF.Util.FS    as FS
-import VPF.Util.Vinyl (rsubset')
+import VPF.Util.Vinyl (rsubseq', rsubset')
 
 import Pipes ((>->))
 import qualified Pipes.Core    as P
@@ -41,12 +44,15 @@ type Config = Opts.Config (DSV "\t" OutputCols)
 
 
 main :: IO ()
-main = OptP.execParser opts >>= classify
+main = do
+    parser <- Opts.configParserIO
+
+    OptP.execParser (opts parser) >>= classify
   where
-    opts = OptP.info (Opts.configParser <**> OptP.helper) $
+    opts parser = OptP.info (parser <**> OptP.helper) $
         OptP.fullDesc
-        <> OptP.progDesc "Classify virus metagenome from VPF models"
-        <> OptP.header "vpf-class: VPF-based virus classifier"
+        <> OptP.progDesc "Classify virus sequences using an existing VPF classification"
+        <> OptP.header "vpf-class: VPF-based virus sequence classifier"
 
 
 classify :: Config -> IO ()
@@ -61,17 +67,18 @@ classify cfg =
               Opts.GivenHitsFile hitsFile ->
                   VC.runModel (VC.GivenHitsFile hitsFile)
 
-              Opts.GivenSequences vpfModels genomes ->
+              Opts.GivenSequences vpfsFile genomesFile ->
                   withCfgWorkDir cfg $ \workDir ->
                     withProdigalCfg cfg $
-                      withHMMSearchCfg cfg $
-                        VC.runModel (VC.GivenGenomes workDir vpfModels genomes)
+                      withHMMSearchCfg cfg $ do
+                        let concOpts = Opts.concurrencyOpts cfg
+                        VC.runModel (VC.GivenGenomes workDir vpfsFile genomesFile concOpts)
 
         cls <- Cls.loadClassification (Opts.vpfClassFile cfg)
 
         let predictedCls = VC.predictClassification hitCounts cls
 
-            rawPredictedCls = over (mapped.rsubset') (view Cls.rawClassification)
+            rawPredictedCls = over (mapped.rsubseq') (view Cls.rawClassification)
                                    predictedCls
                             & D.reorder @RawOutputCols
 
@@ -80,10 +87,10 @@ classify cfg =
         lift $
           case Opts.outputFile cfg of
             Opts.StdDevice ->
-                DSV.writeDSV tsvOpts DSV.stdoutWriter rawPredictedCls
+                DSV.writeDSV tsvOpts FS.stdoutWriter rawPredictedCls
             Opts.FSPath fp ->
                 P.runSafeT $
-                  DSV.writeDSV tsvOpts (DSV.fileWriter (untag fp)) rawPredictedCls
+                  DSV.writeDSV tsvOpts (FS.fileWriter (untag fp)) rawPredictedCls
 
 
 withCfgWorkDir :: LiftedBase IO r

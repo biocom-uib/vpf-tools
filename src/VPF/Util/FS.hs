@@ -1,14 +1,24 @@
 module VPF.Util.FS where
 
-import Control.Monad.Catch (MonadMask)
+import Control.Monad (forever)
+import Control.Monad.Catch (MonadCatch, MonadMask, try)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Control (MonadBaseControl(..), liftBaseOp)
 
 import Data.Tagged (Tagged(..), untag)
+import Data.Text (Text)
+import qualified Data.Text.IO as TIO
+
+import Pipes (Producer, Consumer)
+import qualified Pipes              as P
+import qualified Pipes.Prelude      as P
+import qualified Pipes.Safe         as P
+import qualified Pipes.Safe.Prelude as P
 
 import qualified System.Directory as D
-import System.IO (Handle, hClose)
-import qualified System.IO.Temp as Temp
+import qualified System.IO        as IO
+import qualified System.IO.Error  as IO
+import qualified System.IO.Temp   as Temp
 
 import VPF.Formats (Path, Directory)
 
@@ -57,8 +67,8 @@ withTmpFile :: forall tag m n a. (MonadIO m, MonadMask m, MonadBaseControl m n)
             -> n a
 withTmpFile workdir template = liftBaseOp op
   where
-    hCloseM :: Handle -> m ()
-    hCloseM = liftIO . hClose
+    hCloseM :: IO.Handle -> m ()
+    hCloseM = liftIO . IO.hClose
 
     op :: (MonadIO m, MonadMask m) => (Path tag -> m b) -> m b
     op f = Temp.withTempFile (untag workdir) template $ \fp h -> do
@@ -70,3 +80,39 @@ emptyTmpFile :: forall tag m. MonadIO m
              => Path Directory -> String -> m (Path tag)
 emptyTmpFile workdir =
     liftIO . fmap Tagged . Temp.emptyTempFile (untag workdir)
+
+
+
+lineReader :: (MonadIO m, MonadCatch m) => IO Text -> Producer Text m ()
+lineReader get = loop
+  where
+    loop = do
+      line <- liftIO (try get)
+
+      case line of
+        Right t -> P.yield t >> loop
+
+        Left e | IO.isEOFError e -> return ()
+               | otherwise       -> P.throwM e
+
+
+stdinReader :: (MonadIO m, MonadCatch m) => Producer Text m ()
+stdinReader = lineReader (liftIO TIO.getLine)
+
+fileReader :: P.MonadSafe m => FilePath -> Producer Text m ()
+fileReader fp =
+    P.withFile fp IO.ReadMode $
+        lineReader . TIO.hGetLine
+
+
+stdoutWriter :: MonadIO m => Consumer Text m ()
+stdoutWriter = P.mapM_ (liftIO . TIO.putStrLn)
+
+fileWriter :: P.MonadSafe m => FilePath -> Consumer Text m ()
+fileWriter fp =
+    P.withFile fp IO.WriteMode $ \h ->
+        forever $ do
+          line <- P.await
+          liftIO (TIO.hPutStrLn h line)
+
+

@@ -69,7 +69,6 @@ type ClassificationCols =
 type Classification = Record ClassificationCols
 
 
-
 className :: Class -> Text
 className (HomogClass cn _) = cn
 className _                = ""
@@ -118,3 +117,4 @@ toRawClassification cls
     :& #host_fam_class =: className (cls^.hostFam)
     :& #host_fam_cat   =: classCat  (cls^.hostFam)
     :& RNil
+

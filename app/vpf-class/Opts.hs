@@ -2,12 +2,15 @@
 {-# language RecordWildCards #-}
 module Opts where
 
+import Control.Concurrent (getNumCapabilities)
 import Options.Applicative
 
 import VPF.Formats
 import VPF.Ext.HMMER (HMMERConfig(HMMERConfig))
 import VPF.Ext.HMMER.Search (ProtSearchHitCols)
 import VPF.Model.Class (RawClassificationCols)
+
+import qualified VPF.Model.VirusClass as VC
 
 
 data ArgPath t = FSPath (Path t) | StdDevice
@@ -19,8 +22,9 @@ instance Show (ArgPath t) where
 
 
 data InputFiles =
-    GivenSequences { vpfModelsFile :: Path HMMERModel, genomesFile :: Path (FASTA Nucleotide) }
+    GivenSequences { vpfsFile :: Path HMMERModel, genomesFile :: Path (FASTA Nucleotide) }
   | GivenHitsFile { hitsFile :: Path (HMMERTable ProtSearchHitCols) }
+
 
 data Config outfmt = Config
   { hmmerConfig     :: HMMERConfig
@@ -30,6 +34,7 @@ data Config outfmt = Config
   , vpfClassFile    :: Path (DSV "\t" RawClassificationCols)
   , outputFile      :: ArgPath outfmt
   , workDir         :: Maybe (Path Directory)
+  , concurrencyOpts :: VC.ConcurrencyOpts
   }
 
 
@@ -40,30 +45,48 @@ argPathReader = maybeReader $ \s ->
       _   -> Just (FSPath (Tagged s))
 
 
-configParser :: Parser (Config outfmt)
-configParser = do
+defaultConcurrencyOpts :: IO VC.ConcurrencyOpts
+defaultConcurrencyOpts = do
+    maxSearchingWorkers <- getNumCapabilities
+    let fastaChunkSize = 1
+
+    return VC.ConcurrencyOpts {..}
+
+
+configParserIO :: IO (Parser (Config outfmt))
+configParserIO = fmap configParser defaultConcurrencyOpts
+
+configParser :: VC.ConcurrencyOpts -> Parser (Config outfmt)
+configParser defConcOpts = do
     prodigalPath <- strOption $
         long "prodigal"
         <> metavar "PRODIGAL"
+        <> hidden
+        <> showDefault
         <> value "prodigal"
         <> help "Path to the prodigal executable (or in $PATH)"
 
     hmmerConfig <- fmap HMMERConfig $ optional $ strOption $
         long "hmmer-prefix"
         <> metavar "HMMER"
+        <> hidden
+        <> showDefault
         <> help "Prefix to the HMMER installation (e.g. HMMER/bin/hmmsearch should exist)"
 
     evalueThreshold <- option auto $
         long "evalue"
         <> short 'E'
         <> metavar "THRESHOLD"
+        <> hidden
+        <> showDefault
         <> value 1e-3
-        <> help "Accept hits with e-value <= THRESHOLD (1e-3)"
+        <> help "Accept hits with e-value <= THRESHOLD"
 
     workDir <- optional $ fmap Tagged $ strOption $
         long "workdir"
         <> short 'd'
         <> metavar "DIR"
+        <> hidden
         <> help "Generate temporary files in DIR instead of creating a temporary one"
 
     inputFiles <- givenSequences <|> givenHitsFile
@@ -79,18 +102,21 @@ configParser = do
         <> short 'o'
         <> metavar "OUTPUT"
         <> value StdDevice
-        <> help "Path of the output directory, stdout by default (-)"
+        <> showDefault
+        <> help "Output file or - for STDOUT"
+
+    concurrencyOpts <- concOpts
 
     pure Config {..}
 
   where
     givenSequences :: Parser InputFiles
     givenSequences = do
-      vpfModelsFile <- strOption $
-          long "vpf-models"
-          <> short 'm'
-          <> metavar "VPF_HMM"
-          <> help ".hmms file containing query VPF models"
+      vpfsFile <- strOption $
+          long "vpf"
+          <> short 'v'
+          <> metavar "VPF_HMMS"
+          <> help ".hmms file containing query VPF profiles"
 
       genomesFile <- strOption $
           long "input-seqs"
@@ -102,10 +128,31 @@ configParser = do
 
     givenHitsFile :: Parser InputFiles
     givenHitsFile = do
-        hitsFile <- strOption $
-           long "hits"
-           <> short 'h'
-           <> metavar "HITS_FILE"
-           <> help "HMMER tblout file containing protein search hits against the VPF models"
+      hitsFile <- strOption $
+          long "hits"
+          <> short 'h'
+          <> metavar "HITS_FILE"
+          <> help "HMMER tblout file containing protein search hits against the VPFs"
 
-        pure GivenHitsFile {..}
+      pure GivenHitsFile {..}
+
+
+    concOpts :: Parser VC.ConcurrencyOpts
+    concOpts = do
+      maxSearchingWorkers <- option auto $
+          long "workers"
+          <> metavar "NW"
+          <> value (VC.maxSearchingWorkers defConcOpts)
+          <> hidden
+          <> showDefault
+          <> help "Number of parallel workers (prodigal/hmmsearch) processing the FASTA file"
+
+      fastaChunkSize <- option auto $
+          long "chunk-size"
+          <> metavar "CHUNK_SZ"
+          <> value (VC.fastaChunkSize defConcOpts)
+          <> hidden
+          <> showDefault
+          <> help "Number of sequences to be processed at once by each parallel worker"
+
+      pure VC.ConcurrencyOpts {..}

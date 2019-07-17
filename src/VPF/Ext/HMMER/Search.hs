@@ -91,11 +91,8 @@ mockHMMSearch = runCmd $ \p@HMMSearch{} -> lift $ putStrLn $ "running " ++ show 
 execHMMSearch :: CmdEff HMMSearch r => HMMSearchConfig -> Eff (Cmd HMMSearch ': r) a -> Eff r a
 execHMMSearch cfg = runCmd $ \cmd@HMMSearch{..} -> do
     let args =
-          [
-           "--cut_tc",
-            "--tformat", "FASTA"
+          [ "--tformat", "FASTA"
           , "--tblout", untag outputFile
-          , "--cpu", "30"
           , untag inputModelFile
           , untag inputSeqsFile
           ]

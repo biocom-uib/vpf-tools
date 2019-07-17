@@ -19,8 +19,6 @@ module VPF.Util.DSV
   , defWriterOptions
   , produceFromFrame
   , pipeDSVLines
-  , stdoutWriter
-  , fileWriter
   , writeDSV
   ) where
 
@@ -220,12 +218,6 @@ produceDSVLinesFromFrame ::
 produceDSVLinesFromFrame opts frame =
     produceFromFrame frame >-> pipeDSVLines opts
 
-
-stdoutWriter :: MonadIO m => Consumer Text m ()
-stdoutWriter = P.mapM_ (liftIO . T.putStrLn)
-
-fileWriter :: (MonadIO m, MonadSafe m) => FilePath -> Consumer Text m ()
-fileWriter = CSV.consumeTextLines
 
 
 writeDSV ::
