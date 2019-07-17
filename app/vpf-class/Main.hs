@@ -25,7 +25,7 @@ import qualified VPF.Model.VirusClass as VC
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
 import qualified VPF.Util.FS    as FS
-import VPF.Util.Vinyl (rsubseq', rsubset')
+import VPF.Util.Vinyl (rsubset')
 
 import Pipes ((>->))
 import qualified Pipes.Core    as P
@@ -78,7 +78,7 @@ classify cfg =
 
         let predictedCls = VC.predictClassification hitCounts cls
 
-            rawPredictedCls = over (mapped.rsubseq') (view Cls.rawClassification)
+            rawPredictedCls = over (mapped.rsubset') (view Cls.rawClassification)
                                    predictedCls
                             & D.reorder @RawOutputCols
 
