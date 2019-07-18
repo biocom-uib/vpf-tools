@@ -76,14 +76,14 @@ data ModelConfig = ModelConfig
 searchGenomeHits :: (Lifted IO r, Member (Cmd HMMSearch) r, Member (Cmd Prodigal) r)
                  => Path Directory
                  -> Path HMMERModel
-                 -> Producer [Text] (SafeT IO) ()
+                 -> Producer FA.FastaEntry (SafeT IO) ()
                  -> Eff r (Path (HMMERTable ProtSearchHitCols))
 searchGenomeHits wd vpfsFile genomes = do
-    genomesFile <- FS.emptyTmpFile @(FASTA Nucleotide) wd "split-genomesFile.faa"
+    genomesFile <- FS.emptyTmpFile @(FASTA Nucleotide) wd "split-genomes.fna"
 
     liftIO $ runSafeT $ P.runEffect $
         genomes
-          >-> FA.ungroupFasta
+          >-> FA.fastaLines
           >-> FS.fileWriter (untag genomesFile)
 
     aminoacidsFile <- FS.emptyTmpFile @(FASTA Aminoacid) wd "split-proteins.faa"
@@ -104,8 +104,8 @@ produceHitsFiles input = do
           return [hitsFile]
 
       GivenGenomes wd vpfsFile genomesFile concOpts -> do
-          let splitGenomes :: Producer [Text] (SafeT IO) ()
-              splitGenomes = void $ FA.fastaGroups $ FS.fileReader (untag genomesFile)
+          let splitGenomes :: Producer FA.FastaEntry (SafeT IO) ()
+              splitGenomes = void $ FA.parseFastaEntries $ FS.fileReader (untag genomesFile)
 
               workers = maxSearchingWorkers concOpts
               chunkSize = fastaChunkSize concOpts
