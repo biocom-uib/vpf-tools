@@ -29,6 +29,7 @@ data ParseError
     = ExpectedNameLine     Text
     | ExpectedSequenceLine [Text]
 
+
 fastaSeqLength :: FastaEntry -> Int
 fastaSeqLength (FastaEntry _ seq) = sum (map T.length seq)
 
@@ -55,12 +56,14 @@ fastaParser = runExceptT $ do
 
   where
     parseNameLine = do
-      nameLines <- lift $ zoom (P.span isNameLine) P.drawAll
+      mline <- lift P.draw
 
-      case nameLines of
-        []         -> throwE Nothing -- finished parsing
-        [nameLine] -> return nameLine
-        (_:ls)     -> throwE (Just (ExpectedSequenceLine ls))
+      case mline of
+        Nothing -> throwE Nothing -- finished parsing
+
+        Just line
+          | isNameLine line -> return line
+          | otherwise       -> throwE (Just (ExpectedNameLine line))
 
     parseSequenceLines = do
       sequenceLines <- lift $ zoom (P.span isSequenceLine) P.drawAll
