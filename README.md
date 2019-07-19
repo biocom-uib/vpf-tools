@@ -18,10 +18,16 @@ stack exec -- vpf-class -c vpf-classes.tsv -h hits.hmmout -o classification.tsv
 
 Usage example 2: Given a `.fna` file, obtain the proteins of each virus with
 `prodigal`, then perform a `hmmsearch` against the given `hmms` file. Finally
-match the results against the classification of the VPF models (in `vpf-classes.tsv`).
+match the results against the classification of the VPFs (in `vpf-classes.tsv`).
 ```sh
-stack exec -- vpf-class -c vpf-classes.tsv -m final_test.hmms -i test.fna -o classification.tsv
+stack exec -- vpf-class -c vpf-classes.tsv -v final_test.hmms -i test.fna -o classification.tsv
 ```
+
+In this mode, concurrency options can be specified with `--workers` (number of
+workers running `prodigal` and/or `hmmsearch`) and `--chunk-size` (max number
+of genomes for each `prodigal`/`hmmsearch` process)
+
+If `-o` is not specified, the result is printed to the standard output.
 
 ## Installation
 
