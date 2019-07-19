@@ -5,7 +5,7 @@ module VPF.Util.DSV
   ( RowTokenizer
   , ParserOptions(..)
   , ParseCtx(..)
-  , RowParseError(..)
+  , ParseError(..)
   , defRowTokenizer
   , defParserOptions
   , parseEitherRow
@@ -87,10 +87,10 @@ instance Show ParseCtx where
 type HasParseCtx = (?parseRowCtx :: ParseCtx)
 
 
-data RowParseError = RowParseError { parseErrorCtx :: ParseCtx, parseErrorRow :: Text }
+data ParseError = ParseError { parseErrorCtx :: ParseCtx, parseErrorRow :: Text }
   deriving (Eq, Show, Typeable)
 
-instance Exception RowParseError
+instance Exception ParseError
 
 
 defRowTokenizer :: Char -> RowTokenizer
@@ -109,16 +109,16 @@ defParserOptions sep = ParserOptions
 parseEitherRow :: (HasParseCtx, CSV.ReadRec cols)
                => RowTokenizer
                -> Text
-               -> Either RowParseError (Record cols)
+               -> Either ParseError (Record cols)
 parseEitherRow tokenize row =
     case rtraverse getCompose (CSV.readRec (tokenize row)) of
-      Left _    -> Left RowParseError { parseErrorCtx = ?parseRowCtx, parseErrorRow = row }
+      Left _    -> Left ParseError { parseErrorCtx = ?parseRowCtx, parseErrorRow = row }
       Right rec -> Right rec
 
 
 pipeEitherRows :: forall m cols. (HasParseCtx, Monad m, CSV.ReadRec cols)
                => ParserOptions
-               -> Pipe Text (Either RowParseError (Record cols)) m ()
+               -> Pipe Text (Either ParseError (Record cols)) m ()
 pipeEitherRows opts =
     (if hasHeader opts then P.drop 1 else P.cat)
     >-> P.filter (not . isComment opts)
@@ -131,7 +131,7 @@ produceEitherRows ::
                   )
                   => Path (DSV sep cols)
                   -> ParserOptions
-                  -> Producer (Either RowParseError (Record cols)) m ()
+                  -> Producer (Either ParseError (Record cols)) m ()
 produceEitherRows fp opts =
     CSV.produceTextLines (untag fp) >-> pipeEitherRows opts
   where
@@ -145,19 +145,19 @@ throwLeftsM = P.mapM (either throwM return)
 inCoreAoSExc ::
              ( RecVec cols
              , Lifted IO r
-             , Member (Exc RowParseError) r
+             , Member (Exc ParseError) r
              )
              => Producer (Record cols) (SafeT IO) ()
              -> Eff r (FrameRec cols)
 inCoreAoSExc =
-    lift . try @RowParseError . inCoreAoS >=> liftEither
+    lift . try @ParseError . inCoreAoS >=> liftEither
 
 
 readFrameExc ::
              ( KnownSymbol sep, ColumnHeaders cols
              , CSV.ReadRec cols, RecVec cols
              , Lifted IO r
-             , Member (Exc RowParseError) r
+             , Member (Exc ParseError) r
              )
              => Path (DSV sep cols)
              -> ParserOptions

@@ -24,6 +24,7 @@ import qualified VPF.Model.VirusClass as VC
 
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
+import qualified VPF.Util.Fasta as FA
 import qualified VPF.Util.FS    as FS
 import VPF.Util.Vinyl (rsubset')
 
@@ -57,7 +58,7 @@ main = do
 
 classify :: Config -> IO ()
 classify cfg =
-    runLift $ ignoreFail $ handleParseErrors $ do
+    runLift $ ignoreFail $ handleDSVParseErrors $ do
         let modelCfg = VC.ModelConfig
               { VC.modelEValueThreshold = Opts.evalueThreshold cfg
               }
@@ -69,10 +70,11 @@ classify cfg =
 
               Opts.GivenSequences vpfsFile genomesFile ->
                   withCfgWorkDir cfg $ \workDir ->
-                    withProdigalCfg cfg $
-                      withHMMSearchCfg cfg $ do
-                        let concOpts = Opts.concurrencyOpts cfg
-                        VC.runModel (VC.GivenGenomes workDir vpfsFile genomesFile concOpts)
+                  withProdigalCfg cfg $
+                  withHMMSearchCfg cfg $
+                  handleFastaParseErrors $ do
+                    let concOpts = Opts.concurrencyOpts cfg
+                    VC.runModel (VC.GivenGenomes workDir vpfsFile genomesFile concOpts)
 
         cls <- Cls.loadClassification (Opts.vpfClassFile cfg)
 
@@ -149,14 +151,40 @@ withHMMSearchCfg cfg m = do
             die
 
 
-handleParseErrors :: (Lifted IO r, Member Fail r)
-                  => Eff (Exc DSV.RowParseError ': r) a -> Eff r a
-handleParseErrors m = do
+handleFastaParseErrors :: (Lifted IO r, Member Fail r)
+                       => Eff (Exc FA.ParseError ': r) a
+                       -> Eff r a
+handleFastaParseErrors m = do
     res <- runError m
 
     case res of
       Right a -> return a
-      Left (DSV.RowParseError ctx row) -> do
+
+      Left (FA.ExpectedNameLine found) -> do
+        lift $ putStrLn $
+          "FASTA parsing error: expected name line but found " ++ show found
+        die
+
+      Left (FA.ExpectedSequenceLine []) -> do
+        lift $ putStrLn $
+          "FASTA parsing error: expected sequence but found EOF"
+        die
+
+      Left (FA.ExpectedSequenceLine (l:_)) -> do
+        lift $ putStrLn $
+          "FASTA parsing error: expected sequence but found " ++ show l
+        die
+
+
+handleDSVParseErrors :: (Lifted IO r, Member Fail r)
+                     => Eff (Exc DSV.ParseError ': r) a
+                     -> Eff r a
+handleDSVParseErrors m = do
+    res <- runError m
+
+    case res of
+      Right a -> return a
+      Left (DSV.ParseError ctx row) -> do
         lift $ do
           putStrLn $ "could not parse row " ++ show row
           putStrLn $ " within " ++ show ctx

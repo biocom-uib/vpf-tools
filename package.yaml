@@ -30,6 +30,7 @@ dependencies:
 - filepath
 - foldl
 - lens
+- mmorph
 - monad-control
 - optparse-applicative
 - pipes

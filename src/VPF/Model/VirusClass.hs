@@ -1,20 +1,21 @@
 {-# language ApplicativeDo #-}
 {-# language BlockArguments #-}
-{-# language OverloadedLabels #-}
 {-# language OverloadedStrings #-}
 {-# language StrictData #-}
 module VPF.Model.VirusClass where
 
 import Control.Eff
 import Control.Eff.Reader.Strict (Reader, reader)
-import Control.Eff.Exception (Exc)
+import Control.Eff.Exception (Exc, throwError)
 import Control.Lens (view, toListOf, (%~))
 import Control.Monad.IO.Class (MonadIO(..))
-import Control.Monad.Trans.Except (ExceptT, runExceptT)
+import Control.Monad.Morph (hoist)
 import qualified Control.Foldl as L
 
-import Data.Kind (Type)
+import Data.Coerce (coerce)
 import Data.Functor (void)
+import Data.Kind (Type)
+import Data.Monoid (Ap(..))
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -31,9 +32,8 @@ import qualified Pipes         as P
 import qualified Pipes.Prelude as P
 
 import VPF.Eff.Cmd (Cmd)
-import qualified VPF.Ext.Fasta as FA
 import VPF.Ext.Prodigal (Prodigal, prodigal)
-import VPF.Ext.HMMER.Search (HMMSearch, hmmsearch, ProtSearchHit, ProtSearchHitCols)
+import qualified VPF.Ext.HMMER.Search      as HMM
 import qualified VPF.Ext.HMMER.Search.Cols as HMM
 import qualified VPF.Ext.HMMER.TableFormat as Tbl
 
@@ -41,10 +41,12 @@ import VPF.Formats
 import VPF.Model.Class (ClassificationCols, RawClassificationCols)
 import qualified VPF.Model.Cols as M
 
+import VPF.Util.Concurrent ((>|>))
 import qualified VPF.Util.Concurrent as Conc
 import VPF.Util.Dplyr ((|.))
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
+import qualified VPF.Util.Fasta as FA
 import qualified VPF.Util.FS    as FS
 
 
@@ -56,10 +58,16 @@ data ConcurrencyOpts = ConcurrencyOpts
 
 
 data ModelInput (r :: [Type -> Type]) where
-    GivenHitsFile :: Path (HMMERTable ProtSearchHitCols)
+    GivenHitsFile :: Path (HMMERTable HMM.ProtSearchHitCols)
                   -> ModelInput r
 
-    GivenGenomes :: (LiftedBase IO r, '[Cmd HMMSearch, Cmd Prodigal] <:: r)
+    GivenGenomes ::
+                 ( LiftedBase IO r
+                 , '[ Cmd HMM.HMMSearch
+                    , Cmd Prodigal
+                    , Exc FA.ParseError
+                    ] <:: r
+                 )
                  => { workDir         :: Path Directory
                     , vpfsFile        :: Path HMMERModel
                     , genomesFile     :: Path (FASTA Nucleotide)
@@ -73,11 +81,15 @@ data ModelConfig = ModelConfig
     }
 
 
-searchGenomeHits :: (Lifted IO r, Member (Cmd HMMSearch) r, Member (Cmd Prodigal) r)
+searchGenomeHits ::
+                 ( Lifted IO r
+                 , Member (Cmd HMM.HMMSearch) r
+                 , Member (Cmd Prodigal) r
+                 )
                  => Path Directory
                  -> Path HMMERModel
                  -> Producer FA.FastaEntry (SafeT IO) ()
-                 -> Eff r (Path (HMMERTable ProtSearchHitCols))
+                 -> Eff r (Path (HMMERTable HMM.ProtSearchHitCols))
 searchGenomeHits wd vpfsFile genomes = do
     genomesFile <- FS.emptyTmpFile @(FASTA Nucleotide) wd "split-genomes.fna"
 
@@ -89,36 +101,44 @@ searchGenomeHits wd vpfsFile genomes = do
     aminoacidsFile <- FS.emptyTmpFile @(FASTA Aminoacid) wd "split-proteins.faa"
     prodigal genomesFile aminoacidsFile Nothing
 
-    hitsFile <- FS.emptyTmpFile @(HMMERTable ProtSearchHitCols) wd "split-hits.txt"
-    hmmsearch vpfsFile aminoacidsFile hitsFile
+    hitsFile <- FS.emptyTmpFile @(HMMERTable HMM.ProtSearchHitCols) wd "split-hits.txt"
+    HMM.hmmsearch vpfsFile aminoacidsFile hitsFile
 
     return hitsFile
 
 
-produceHitsFiles :: forall r. Member (Reader ModelConfig) r
+produceHitsFiles :: Member (Reader ModelConfig) r
                  => ModelInput r
-                 -> Eff r [Path (HMMERTable ProtSearchHitCols)]
+                 -> Eff r [Path (HMMERTable HMM.ProtSearchHitCols)]
 produceHitsFiles input = do
     case input of
       GivenHitsFile hitsFile ->
           return [hitsFile]
 
       GivenGenomes wd vpfsFile genomesFile concOpts -> do
-          let splitGenomes :: Producer FA.FastaEntry (SafeT IO) ()
-              splitGenomes = void $ FA.parseFastaEntries $ FS.fileReader (untag genomesFile)
+          let chunkedGenomes :: Producer [FA.FastaEntry] (SafeT IO) (Either FA.ParseError ())
+              chunkedGenomes =
+                  Conc.bufferedChunks chunkSize $
+                    FA.parsedFastaEntries $
+                      FS.fileReader (untag genomesFile)
 
               workers = maxSearchingWorkers concOpts
               chunkSize = fastaChunkSize concOpts
-              liftSafeTIO = liftIO . runSafeT
 
-          Conc.consumeWith (workers*2) (liftSafeTIO . P.toListM) $
-            Conc.parMap workers liftSafeTIO (searchGenomeHits wd vpfsFile) $
-              Conc.asyncProducer (Conc.chunked chunkSize splitGenomes)
+          r <- Conc.runAsyncEffect (workers*2) $
+                  Conc.parFoldM Conc.toListM $
+                      Conc.parMapM_ workers (searchGenomeHits wd vpfsFile . P.each) $
+                          hoist (liftIO . runSafeT) $
+                              Conc.toAsyncProducer (fmap Ap chunkedGenomes)
+
+          case r of
+            (Ap (Left e), _) -> throwError e
+            (_, files)       -> return files
 
 
 runModel :: ( Lifted IO r
             , '[ Reader ModelConfig
-               , Exc DSV.RowParseError
+               , Exc DSV.ParseError
                ] <:: r
             )
          => ModelInput r

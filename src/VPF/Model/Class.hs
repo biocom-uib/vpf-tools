@@ -43,7 +43,7 @@ rawClassificationStream fp =
   where
     opts = (DSV.defParserOptions '\t') { DSV.hasHeader = False }
 
-loadRawClassification :: (Lifted IO r, Member (Exc DSV.RowParseError) r)
+loadRawClassification :: (Lifted IO r, Member (Exc DSV.ParseError) r)
                       => Path (DSV "\t" RawClassificationCols)
                       -> Eff r (Frame RawClassification)
 loadRawClassification = DSV.inCoreAoSExc . rawClassificationStream
@@ -56,7 +56,7 @@ classificationStream fp =
     rawClassificationStream fp >-> P.map (^. from rawClassification)
 
 
-loadClassification :: (Lifted IO r, Member (Exc DSV.RowParseError) r)
+loadClassification :: (Lifted IO r, Member (Exc DSV.ParseError) r)
                    => Path (DSV "\t" RawClassificationCols)
                    -> Eff r (Frame Classification)
 loadClassification = DSV.inCoreAoSExc . classificationStream

@@ -79,7 +79,7 @@ produceEitherRows :: forall rs m.
                   , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
                   )
                   => Path (HMMERTable rs)
-                  -> Producer (Either DSV.RowParseError (Record rs)) m ()
+                  -> Producer (Either DSV.ParseError (Record rs)) m ()
 produceEitherRows fp =
     DSV.produceEitherRows (tableAsDSV fp) (tblParserOptions maxCols)
   where
