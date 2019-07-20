@@ -17,7 +17,7 @@
 #
 # resolver: ./custom-snapshot.yaml
 # resolver: https://example.com/snapshots/2018-01-01.yaml
-resolver: lts-13.27
+resolver: lts-13.28
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -38,6 +38,7 @@ extra-deps:
 - Frames-0.6.1
 - discrimination-0.4
 - extensible-effects-5.0.0.1
+- mpi-hs-0.5.1.2
 
 # - acme-missiles-0.3
 # - git: https://github.com/commercialhaskell/stack.git

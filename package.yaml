@@ -32,6 +32,7 @@ dependencies:
 - lens
 - mmorph
 - monad-control
+- mpi-hs
 - optparse-applicative
 - pipes
 - pipes-concurrency
@@ -39,6 +40,7 @@ dependencies:
 - pipes-parse
 - pipes-safe
 - primitive
+- store
 - tagged
 - temporary
 - text
