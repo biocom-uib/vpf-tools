@@ -3,6 +3,8 @@
 module Opts where
 
 import Control.Concurrent (getNumCapabilities)
+import Data.Text (Text)
+import qualified Data.Text as T
 import Options.Applicative
 
 import VPF.Formats
@@ -31,6 +33,7 @@ data Config outfmt = Config
   , prodigalPath    :: FilePath
   , evalueThreshold :: Double
   , inputFiles      :: InputFiles
+  , virusNameRegex  :: Text
   , vpfClassFile    :: Path (DSV "\t" RawClassificationCols)
   , outputFile      :: ArgPath outfmt
   , workDir         :: Maybe (Path Directory)
@@ -90,6 +93,14 @@ configParser defConcOpts = do
         <> help "Generate temporary files in DIR instead of creating a temporary one"
 
     inputFiles <- givenSequences <|> givenHitsFile
+
+    virusNameRegex <- fmap T.pack $ strOption $
+        long "virus-pattern"
+        <> metavar "REGEX"
+        <> value "(.*)(?=_\\d+)"
+        <> hidden
+        <> showDefault
+        <> help "PCRE regex matching the virus identifier from a gene identifier (options PCRE_ANCHORED | PCRE_UTF8)"
 
     vpfClassFile <- strOption $
         long "vpf-class"

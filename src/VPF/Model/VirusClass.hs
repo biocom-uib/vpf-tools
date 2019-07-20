@@ -13,6 +13,7 @@ import Control.Monad.Morph (hoist)
 import qualified Control.Foldl as L
 
 import Data.Coerce (coerce)
+import Data.Function ((&))
 import Data.Functor (void)
 import Data.Kind (Type)
 import Data.Monoid (Ap(..))
@@ -77,7 +78,8 @@ data ModelInput (r :: [Type -> Type]) where
 
 
 data ModelConfig = ModelConfig
-    { modelEValueThreshold :: Double
+    { modelEValueThreshold    :: Double
+    , modelVirusNameExtractor :: Text -> Text
     }
 
 
@@ -147,19 +149,22 @@ runModel modelInput = do
     hitsFiles <- produceHitsFiles modelInput
     let hitRows = foldMap Tbl.produceRows  hitsFiles
 
+
     thr <- reader modelEValueThreshold
+    getVirusName <- reader modelVirusNameExtractor
 
     hitsFrame <- DSV.inCoreAoSExc $
         hitRows
         >-> P.filter (\row -> view HMM.sequenceEValue row <= thr)
         >-> P.map V.rcast
 
-    return (countHits hitsFrame)
+    return $ hitsFrame
+        & D.mutate1 @M.VirusName (getVirusName . view HMM.targetName)
+        & countHits
   where
-    countHits :: FrameRec '[HMM.TargetName, HMM.QueryName, HMM.SequenceScore]
+    countHits :: FrameRec '[M.VirusName, HMM.TargetName, HMM.QueryName, HMM.SequenceScore]
               -> FrameRec '[M.VirusName, M.ModelName, M.NumHits]
     countHits = D.cat
-        |. D.mutate1 @M.VirusName (virusName . V.rget)
         |. D.fixing1 @M.VirusName do
              D.cat
                |. D.grouping1 @HMM.TargetName do

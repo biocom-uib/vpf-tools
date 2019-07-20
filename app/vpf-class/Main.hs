@@ -8,6 +8,15 @@ import Control.Eff.Reader.Strict (runReader)
 import Control.Eff.Exception (Exc, runError, Fail, die, ignoreFail)
 import Control.Lens (Lens, view, over, mapped, (&))
 
+import qualified Data.Array                 as Array
+import qualified Data.ByteString            as BS
+import Data.Foldable (toList)
+import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Text (Text)
+import qualified Data.Text.Encoding         as T
+import qualified Text.Regex.Base            as PCRE
+import qualified Text.Regex.PCRE.ByteString as PCRE
+
 import qualified Options.Applicative as OptP
 
 import Frames (FrameRec, Record)
@@ -56,11 +65,34 @@ main = do
         <> OptP.header "vpf-class: VPF-based virus sequence classifier"
 
 
+compileRegex :: (Lifted IO r, Member Fail r) => Text -> Eff r (Text -> Maybe Text)
+compileRegex src = do
+    erx <- lift $ PCRE.compile (PCRE.compUTF8 + PCRE.compAnchored)
+                               (PCRE.execAnchored + PCRE.execNoUTF8Check)
+                               (T.encodeUtf8 src)
+    case erx of
+      Left (_, err) -> do
+          lift $ putStrLn $ "Could not compile the regex " ++ show src ++ ": " ++ err
+          die
+
+      Right rx -> return $ \text -> do
+          let btext = T.encodeUtf8 text
+          arr <- PCRE.matchOnce rx btext
+          (off, len) <- listToMaybe (toList arr)
+
+          return (T.decodeUtf8 (BS.drop off (BS.take len btext)))
+
+
 classify :: Config -> IO ()
 classify cfg =
     runLift $ ignoreFail $ handleDSVParseErrors $ do
+        virusNameExtractor <- compileRegex (Opts.virusNameRegex cfg)
+
         let modelCfg = VC.ModelConfig
-              { VC.modelEValueThreshold = Opts.evalueThreshold cfg
+              { VC.modelEValueThreshold    = Opts.evalueThreshold cfg
+              , VC.modelVirusNameExtractor = \protName ->
+                  fromMaybe (error $ "Could not extract virus name from protein: " ++ show protName)
+                            (virusNameExtractor protName)
               }
 
         hitCounts <- runReader modelCfg $

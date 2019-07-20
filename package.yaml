@@ -21,6 +21,7 @@ description:         Please see the README on GitHub at <https://github.com/bioc
 dependencies:
 - base >= 4.7 && < 5
 - Frames
+- array
 - async
 - bytestring
 - containers
@@ -39,6 +40,8 @@ dependencies:
 - pipes-parse
 - pipes-safe
 - primitive
+- regex-base
+- regex-pcre-builtin
 - tagged
 - temporary
 - text
