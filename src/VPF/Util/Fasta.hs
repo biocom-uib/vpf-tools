@@ -1,3 +1,4 @@
+{-# language DeriveGeneric #-}
 {-# language OverloadedStrings #-}
 {-# language StrictData #-}
 module VPF.Util.Fasta
@@ -8,11 +9,14 @@ module VPF.Util.Fasta
   , fastaLines
   ) where
 
+import GHC.Generics (Generic)
+
 import Control.Lens (zoom)
 import Control.Monad.Catch (MonadThrow, throwM)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 
+import Data.Store (Store)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Void
@@ -24,10 +28,14 @@ import qualified Pipes.Prelude as P
 
 
 data FastaEntry = FastaEntry Text [Text]
+  deriving (Generic)
+
+instance Store FastaEntry
 
 data ParseError
     = ExpectedNameLine     Text
     | ExpectedSequenceLine [Text]
+  deriving Show
 
 
 fastaSeqLength :: FastaEntry -> Int

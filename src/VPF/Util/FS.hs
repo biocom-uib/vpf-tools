@@ -105,10 +105,10 @@ fileReader fp =
         lineReader . TIO.hGetLine
 
 
-stdoutWriter :: MonadIO m => Consumer Text m ()
+stdoutWriter :: MonadIO m => Consumer Text m r
 stdoutWriter = P.mapM_ (liftIO . TIO.putStrLn)
 
-fileWriter :: P.MonadSafe m => FilePath -> Consumer Text m ()
+fileWriter :: P.MonadSafe m => FilePath -> Consumer Text m r
 fileWriter fp =
     P.withFile fp IO.WriteMode $ \h ->
         forever $ do

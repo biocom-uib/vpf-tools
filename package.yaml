@@ -40,6 +40,7 @@ dependencies:
 - pipes-parse
 - pipes-safe
 - primitive
+- stm
 - store
 - tagged
 - temporary
@@ -78,6 +79,16 @@ executables:
   vpf-class:
     main:                Main.hs
     source-dirs:         app/vpf-class
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - vpf-tools
+
+  mpi-test:
+    main:                Main.hs
+    source-dirs:         app/mpi-test
     ghc-options:
     - -threaded
     - -rtsopts
