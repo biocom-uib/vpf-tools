@@ -12,14 +12,16 @@ import qualified Control.Concurrent.STM.TBQueue as TBQ
 import qualified Control.Concurrent.STM.TMVar   as TMVar
 import qualified Control.Distributed.MPI.Store  as MPI
 import qualified Control.Monad.Catch as MC
+import Control.Exception (SomeException)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.STM (atomically)
 import Control.Monad.Trans.Class (lift)
 import qualified Control.Monad.STM as STM
 
+import Data.Monoid (Alt(..))
+import Data.List (genericLength)
 import Data.Store (Store)
 import qualified Data.Set as Set
-import qualified Data.Vector as V
 import Numeric.Natural (Natural)
 
 import Pipes (Producer, Pipe, Consumer, (>->))
@@ -55,7 +57,7 @@ messagesFrom rank tag comm = loop
 
     loop :: Producer a m ()
     loop = do
-      msg <- liftIO $ MPI.recv_ rank tag' comm
+      msg <- liftIO $ MC.mask_ $ MPI.recv_ rank tag' comm
 
       case msg of
         StreamItem a -> do
@@ -70,7 +72,7 @@ messagesTo :: forall tag m a. (Enum tag, PS.MonadSafe m, Store a)
            -> MPI.Comm
            -> Consumer a m ()
 messagesTo rank tag comm = do
-    P.mapM_ (\s -> liftIO $ MPI.send (StreamItem s) rank tag' comm)
+    P.mapM_ (\s -> liftIO $ MC.mask_ $ MPI.send (StreamItem s) rank tag' comm)
       `PS.finally` sendStreamEnd
   where
     tag' :: MPI.Tag
@@ -101,44 +103,67 @@ delegate :: forall m a b tag tag' r. (PS.MonadSafe m, Enum tag, Enum tag', Store
          -> JobTags tag tag' a b
          -> MPI.Comm
          -> Natural
-         -> Pipe a b m r
-delegate []    _                      _    _         = error "delegate called with no workers"
-delegate ranks (JobTags tagIn tagOut) comm queueSize = do
+         -> Producer a m r
+         -> Producer b m r
+delegate []    _                      _    _         _        = error "delegate called with no workers"
+delegate ranks (JobTags tagIn tagOut) comm queueSize producer = do
   done <- liftIO $ TMVar.newEmptyTMVarIO
 
   jobs <- liftIO $ TBQ.newTBQueueIO queueSize
-  results <- liftIO $ TBQ.newTBQueueIO queueSize
+  results <- liftIO $ TBQ.newTBQueueIO (genericLength ranks)
 
-  PS.bracket (liftIO $ V.mapM (startRankSend jobs results done)
-                              (V.fromList ranks))
-             (liftIO . mapM_ Async.cancel) $ \senders -> do
+  r <- PS.bracket (setupSenders jobs results done) cancelSenders $ \senders -> do
+           r <- insertJobs jobs results
+           finishSenders results done senders
+           return r
 
-    r <- insertJobs jobs results
+  lastResults <- liftIO $ atomically $ TBQ.flushTBQueue results
+  P.each lastResults
 
-    lastResults <- liftIO $ do
-        atomically $ do
-          TMVar.putTMVar done ()
-          mapM_ Async.waitSTM senders
-          TBQ.flushTBQueue results
-
-    P.each lastResults
-
-    return r
+  return r
   where
     tagIn', tagOut' :: MPI.Tag
     tagIn'  = MPI.toTag tagIn
     tagOut' = MPI.toTag tagOut
 
-    insertJobs :: TBQ.TBQueue a -> TBQ.TBQueue b -> Pipe a b m r
-    insertJobs jobs results =
-        P.for P.cat $ \a -> do
-          newResults <- liftIO $ atomically $
-              STM.orElse (do TBQ.writeTBQueue jobs a
-                             return [])
-                         (do STM.check . not =<< TBQ.isEmptyTBQueue results
-                             TBQ.flushTBQueue results)
+    insertJobs :: TBQ.TBQueue a -> TBQ.TBQueue b -> Producer b m r
+    insertJobs jobs results = do
+        r <- P.for producer $ \a -> do
+            newResults <- liftIO $ atomically $ TBQ.flushTBQueue results
+            P.each newResults
+            liftIO $ atomically $ TBQ.writeTBQueue jobs a
 
-          P.each newResults
+        return r
+
+
+    setupSenders :: TBQ.TBQueue a -> TBQ.TBQueue b -> TMVar.TMVar () -> PS.Base m [Async.Async ()]
+    setupSenders jobs results done =
+        liftIO $ mapM (startRankSend jobs results done) ranks
+
+
+    finishSenders :: TBQ.TBQueue b -> TMVar.TMVar () -> [Async.Async ()] -> Producer b m ()
+    finishSenders results done senders = do
+        liftIO $ atomically $ TMVar.putTMVar done ()
+
+        let consumeAndWait :: Async.Async () -> Producer b m ()
+            consumeAndWait sender = do
+              status <- liftIO $ Async.poll sender
+              case status of
+                Nothing -> do
+                    bs <- liftIO $ atomically $ TBQ.flushTBQueue results
+                    P.each bs
+                    consumeAndWait sender
+                Just r ->
+                    case r of
+                      Left e   -> MC.throwM e
+                      Right () -> return ()
+
+        mapM_ consumeAndWait senders
+
+
+    cancelSenders :: [Async.Async ()] -> PS.Base m ()
+    cancelSenders = liftIO . mapM_ Async.cancel
+
 
     startRankSend :: TBQ.TBQueue a
                   -> TBQ.TBQueue b
@@ -147,7 +172,7 @@ delegate ranks (JobTags tagIn tagOut) comm queueSize = do
                   -> IO (Async.Async ())
     startRankSend jobs results done rank =
         Async.async $
-            loop `MC.finally` MPI.send (StreamEnd @a) rank tagOut' comm
+            loop `MC.finally` MC.mask_ (MPI.send (StreamEnd @a) rank tagOut' comm)
       where
         loop :: IO ()
         loop = do
@@ -157,7 +182,7 @@ delegate ranks (JobTags tagIn tagOut) comm queueSize = do
 
           case newJob of
             Just job -> do
-              result <- MPI.sendrecv_ (StreamItem job) rank tagIn' rank tagOut' comm
+              result <- MC.mask_ $ MPI.sendrecv_ (StreamItem job) rank tagIn' rank tagOut' comm
 
               case result of
                 StreamItem r -> do
@@ -166,5 +191,4 @@ delegate ranks (JobTags tagIn tagOut) comm queueSize = do
 
                 StreamEnd -> return ()
 
-            Nothing -> do
-              return ()
+            Nothing -> return ()
