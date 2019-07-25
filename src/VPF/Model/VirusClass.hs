@@ -41,8 +41,8 @@ import VPF.Formats
 import VPF.Model.Class (ClassificationCols, RawClassificationCols)
 import qualified VPF.Model.Cols as M
 
-import VPF.Util.Concurrent ((>|>))
-import qualified VPF.Util.Concurrent as Conc
+import VPF.Concurrency.Pipes ((>|>))
+import qualified VPF.Concurrency.Pipes as Conc
 import VPF.Util.Dplyr ((|.))
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
