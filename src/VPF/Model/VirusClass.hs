@@ -11,7 +11,7 @@ import Control.Lens (view, toListOf, (%~))
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Morph (hoist)
 import qualified Control.Monad.Trans.Class as MT
-import Control.Monad.Trans.Control (control)
+import Control.Monad.Trans.Control (liftBaseWith)
 import qualified Control.Foldl as L
 
 import Data.Coerce (coerce)
@@ -134,11 +134,12 @@ produceHitsFiles input = do
 
           let f = searchGenomeHits wd vpfsFile . P.each
 
-          p <- Conc.workStealingWith (workers+1) (workers+1) workers
-                (>-> P.mapM f)
-                (hoist (lift . runSafeT) chunkedGenomes)
+          p <- liftBaseWith $ \runInBase ->
+                 Conc.workStealing (workers+1) (workers+1) workers
+                   (>-> P.mapM (MT.lift . runInBase . f))
+                   chunkedGenomes
 
-          r <- P.toListM' p
+          r <- P.toListM' (Conc.restoreProducerWith (lift . runSafeT) p)
 
           case r of
             (_,     Left e)  -> throwError e

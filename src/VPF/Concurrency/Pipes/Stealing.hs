@@ -2,6 +2,7 @@
 module VPF.Concurrency.Pipes.Stealing where
 
 import qualified Control.Concurrent.Async       as Async
+import qualified Control.Concurrent.MVar        as MVar
 import qualified Control.Concurrent.STM.TBQueue as STM
 import qualified Control.Concurrent.STM.TMVar   as STM
 import qualified Control.Concurrent.STM.TVar    as STM
@@ -29,7 +30,6 @@ import qualified Pipes.Prelude    as P
 import qualified Pipes.Safe       as PS
 
 
-
 restoreProducerWith :: (Monad m, MonadBaseControl IO n)
                     => (forall x. m x -> n x)
                     -> Producer (StM n a) m r
@@ -37,33 +37,27 @@ restoreProducerWith :: (Monad m, MonadBaseControl IO n)
 restoreProducerWith f producer = hoist f producer >-> P.mapM restoreM
 
 
+workStealing :: forall m n s a b r. (MonadBaseControl IO m, PS.MonadSafe m, MonadBaseControl IO n, PS.MonadSafe n, Semigroup s)
+             => Natural
+             -> Natural
+             -> Natural
+             -> (Producer a m r -> Producer b n s)
+             -> Producer a m r
+             -> IO (Producer b n s)
+workStealing _ _ threads _ _ | threads <= 0 = error "workStealing: threads must be > 0"
+workStealing splitQueueSize joinQueueSize threads f aproducer = do
+    aproducer' <- stealingBufferedProducer splitQueueSize aproducer
 
-workStealingWith :: forall m n s a b r. (MonadBaseControl IO m, PS.MonadSafe m, MonadBaseControl IO n, Semigroup s)
-                 => Natural
-                 -> Natural
-                 -> Natural
-                 -> (forall x. m x -> n x)
-                 -> (Producer a m r -> Producer b n s)
-                 -> Producer a m r
-                 -> n (Producer b n s)
-workStealingWith _ _ threads _ _ _ | threads <= 0 = error "workStealing: threads must be > 0"
-workStealingWith splitQueueSize joinQueueSize threads liftM f aproducer =
-    (>>= restoreM @IO @n) $
-      liftM $ liftBaseWith $ \runN ->
-        runN $ liftM $ liftBaseWith $ \runM -> do
-            stm_aproducer' <- runM $ stealingBufferedProducer splitQueueSize aproducer
-            let aproducer' = join $ lift $ restoreM @IO @m stm_aproducer'
+    let bproducers' = NE.fromList $ replicate (fromIntegral threads)
+                                              (f aproducer')
 
-            let bproducers' = NE.fromList $ replicate (fromIntegral threads)
-                                                      (f aproducer')
-
-            runN $ joinProducersAsync joinQueueSize bproducers'
+    joinProducersAsync joinQueueSize bproducers'
 
 
 stealingBufferedProducer :: (MonadBaseControl IO m, PS.MonadSafe m)
                          => Natural
                          -> Producer a m r
-                         -> m (Producer a m r)
+                         -> IO (Producer a m r)
 stealingBufferedProducer queueSize producer = do
     producer' <- joinProducersAsync queueSize (fmap First producer NE.:| [])
     return (fmap getFirst producer')
@@ -72,27 +66,21 @@ stealingBufferedProducer queueSize producer = do
 joinProducersAsync :: forall a m r. (MonadBaseControl IO m, PS.MonadSafe m, Semigroup r)
                    => Natural
                    -> NE.NonEmpty (Producer a m r)
-                   -> m (Producer a m r)
+                   -> IO (Producer a m r)
 joinProducersAsync queueSize producers = do
-    begin <- liftIO $ STM.newEmptyTMVarIO
-    ndone <- liftIO $ STM.newTVarIO 0
-    values <- liftIO $ STM.newTBQueueIO queueSize
+    threadsVar <- MVar.newMVar []
+    values <- STM.newTBQueueIO queueSize
+    ndone <- STM.newTVarIO 0
 
-    MC.mask_ $ do
-      threads <- liftBaseWith $ \runInBase ->
-                   forM producers $ \producer -> Async.async $ runInBase $
-                       feed begin values producer
-                         `PS.finally` incDone ndone
-      return $ do
-          signal begin
+    return $
+      PS.mask $ \restore -> do
+        threads <- lift $ startFeed threadsVar values ndone
 
-          PS.onException do readValues values ndone
-                            lift $ waitRestoreAll threads
-                         do liftIO $ mapM_ Async.cancel threads
+        PS.finally (restore $ do
+                      readValues values ndone
+                      lift $ waitRestoreAll threads)
+                   (liftIO $ mapM_ Async.cancel threads)
   where
-    signal :: MonadIO n => STM.TMVar () -> n ()
-    signal var = liftIO $ STM.atomically $ STM.putTMVar var ()
-
     incDone :: MonadIO n => STM.TVar Int -> n ()
     incDone ndone = liftIO $ STM.atomically $ STM.modifyTVar' ndone (1+)
 
@@ -102,11 +90,25 @@ joinProducersAsync queueSize producers = do
     nproducers :: Int
     nproducers = length producers
 
-    feed :: STM.TMVar () -> STM.TBQueue a -> Producer a m r -> m r
-    feed begin values producer =  do
-      () <- liftIO $ STM.atomically $ STM.readTMVar begin
-      P.runEffect $
-        producer >-> P.mapM_ (liftIO . STM.atomically . STM.writeTBQueue values)
+    startFeed :: MVar.MVar [Async.Async (StM m r)]
+              -> STM.TBQueue a
+              -> STM.TVar Int
+              -> m (NE.NonEmpty (Async.Async (StM m r)))
+    startFeed threadsVar values ndone =
+        liftBaseWith $ \runInBase ->
+          MVar.modifyMVar threadsVar $ \threads ->
+            case threads of
+              (t:ts) -> return (threads, t NE.:| ts)
+              []    -> do
+                  threads' <- forM producers $ \producer -> Async.async $ runInBase $
+                                feed values producer
+                                  `PS.finally` incDone ndone
+                  return (NE.toList threads', threads')
+
+    feed :: STM.TBQueue a -> Producer a m r -> m r
+    feed values producer =
+        P.runEffect $
+          producer >-> P.mapM_ (liftIO . STM.atomically . STM.writeTBQueue values)
 
     readValues :: STM.TBQueue a -> STM.TVar Int -> Producer a m ()
     readValues values ndone = fix $ \loop -> do
