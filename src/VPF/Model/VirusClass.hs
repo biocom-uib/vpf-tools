@@ -10,11 +10,15 @@ import Control.Eff.Exception (Exc, throwError)
 import Control.Lens (view, toListOf, (%~))
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Morph (hoist)
+import qualified Control.Monad.Trans.Class as MT
+import Control.Monad.Trans.Control (control)
 import qualified Control.Foldl as L
 
 import Data.Coerce (coerce)
+import Data.Function ((&))
 import Data.Functor (void)
 import Data.Kind (Type)
+import qualified Data.List.NonEmpty as NE
 import Data.Monoid (Ap(..))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -43,6 +47,7 @@ import qualified VPF.Model.Cols as M
 
 import VPF.Concurrency.Pipes ((>|>))
 import qualified VPF.Concurrency.Pipes as Conc
+import qualified VPF.Concurrency.Pipes.Stealing as Conc
 import VPF.Util.Dplyr ((|.))
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
@@ -107,7 +112,7 @@ searchGenomeHits wd vpfsFile genomes = do
     return hitsFile
 
 
-produceHitsFiles :: Member (Reader ModelConfig) r
+produceHitsFiles :: forall r. Member (Reader ModelConfig) r
                  => ModelInput r
                  -> Eff r [Path (HMMERTable HMM.ProtSearchHitCols)]
 produceHitsFiles input = do
@@ -122,18 +127,22 @@ produceHitsFiles input = do
                     FA.parsedFastaEntries $
                       FS.fileReader (untag genomesFile)
 
-              workers = maxSearchingWorkers concOpts
+              workers :: Num a => a
+              workers = fromIntegral $ maxSearchingWorkers concOpts
+
               chunkSize = fastaChunkSize concOpts
 
-          r <- Conc.runAsyncEffect (workers*2) $
-                  Conc.parFoldM Conc.toListM $
-                      Conc.parMapM_ workers (searchGenomeHits wd vpfsFile . P.each) $
-                          hoist (liftIO . runSafeT) $
-                              Conc.toAsyncProducer (fmap Ap chunkedGenomes)
+          let f = searchGenomeHits wd vpfsFile . P.each
+
+          p <- Conc.workStealingWith (workers+1) (workers+1) workers
+                (>-> P.mapM f)
+                (hoist (lift . runSafeT) chunkedGenomes)
+
+          r <- P.toListM' p
 
           case r of
-            (Ap (Left e), _) -> throwError e
-            (_, files)       -> return files
+            (_,     Left e)  -> throwError e
+            (files, _     )  -> return files
 
 
 runModel :: ( Lifted IO r

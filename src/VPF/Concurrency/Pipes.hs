@@ -100,6 +100,10 @@ data AsyncEffect n t where
                 -> AsyncConsumer a m' () n s
                 -> AsyncEffect n (r, s)
 
+
+
+
+
 toAsyncProducer :: (Monad m, Monoid r) => Producer a m r -> AsyncProducer a m m r
 toAsyncProducer producer = AsyncProducer $
     P.runEffect . (producer >->) . ($> mempty)
