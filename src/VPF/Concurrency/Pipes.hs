@@ -1,132 +1,40 @@
-{-# language InstanceSigs #-}
-{-# language DeriveFunctor #-}
-module VPF.Concurrency.Pipes
-  ( AsyncProducer(..)
-  , AsyncConsumer(..)
-  , AsyncEffect
-  , toAsyncProducer
-  , toAsyncConsumer
-  , asyncProducer
-  , asyncConsumer
-  , toListM
-  , bufferedChunks
-  , (>|>)
-  , (<|<)
-  , parFoldM
-  , runAsyncEffect
-  -- , parMapM
-  -- , parMapM_
-  -- , parForM
-  -- , parForM_
-  ) where
+{-# language QuantifiedConstraints #-}
+{-# language BlockArguments #-}
+module VPF.Concurrency.Pipes where
 
-import Data.Coerce (coerce)
-import Data.Functor (($>))
-import Data.Maybe (catMaybes)
+import qualified Control.Concurrent.Async.Lifted.Safe as Async
 
-import Control.Applicative (liftA2)
-import Control.Concurrent.Async (concurrently, replicateConcurrently)
-import Control.Lens ((%~))
-import Control.Monad.Morph (MFunctor(..))
-import Control.Monad.IO.Class (MonadIO(..))
-import Control.Monad.Trans.Control (MonadBaseControl(..))
+import qualified Control.Concurrent.MVar        as MVar
+import qualified Control.Concurrent.STM.TBQueue as STM
+import qualified Control.Concurrent.STM.TMVar   as STM
+import qualified Control.Concurrent.STM.TVar    as STM
+import qualified Control.Monad.STM              as STM
 
-import Pipes (Producer, Consumer, (>->))
+import Control.Lens (alaf, (%~))
+import Control.Monad ((<=<))
+import qualified Control.Monad.Catch as MC
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Morph (hoist)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Base (MonadBase, liftBase)
+import Control.Monad.Trans.Control (MonadBaseControl, StM, liftBaseWith, restoreM)
+
+import Data.Function (fix)
+import qualified Data.List.NonEmpty as NE
+import Data.Monoid (Ap(..))
+import Data.Semigroup (First(..))
+import Data.Semigroup.Foldable (foldMap1)
+import Data.Semigroup.Traversable (Traversable1)
+import Data.Traversable (forM)
+import Numeric.Natural (Natural)
+
+import Pipes (Producer, Pipe, (>->))
 import qualified Pipes            as P
-import qualified Pipes.Concurrent as PC
-import qualified Pipes.Group      as PG
 import qualified Pipes.Prelude    as P
+import qualified Pipes.Group      as PG
+import qualified Pipes.Safe       as PS
 
-
-
-restore2 :: forall b m a a'. MonadBaseControl b m => m (StM m a, StM m a') -> m (a, a')
-restore2 maa' = do
-    (sa, sa') <- maa'
-    a  <- restoreM sa
-    a' <- restoreM sa'
-    return (a, a')
-
-
-restoreN :: forall b m a. MonadBaseControl b m => m [StM m a] -> m [a]
-restoreN ms = ms >>= mapM restore1
-  where
-    restore1 :: StM m a -> m a
-    restore1 = restoreM
-
-
-liftConcurrently2 :: forall m a b c. MonadBaseControl IO m => (a -> b -> c) -> m a -> m b -> m c
-liftConcurrently2 f ma mb =
-    fmap (uncurry f) $
-        restore2 $ liftBaseWith $ \runInBase ->
-            concurrently (runInBase ma) (runInBase mb)
-
-liftReplicateConcurrently :: forall m a. MonadBaseControl IO m => Int -> m a -> m [a]
-liftReplicateConcurrently n m =
-    restoreN $ liftBaseWith $ \runInBase ->
-        replicateConcurrently n (runInBase m)
-
-
-liftWithBuffer :: forall m a l r. MonadBaseControl IO m
-               => PC.Buffer a
-               -> (PC.Output a -> m l)
-               -> (PC.Input a -> m r)
-               -> m (l, r)
-liftWithBuffer buf fo fi =
-    restore2 $ liftBaseWith $ \runInBase ->
-        PC.withBuffer buf (runInBase . fo) (runInBase . fi)
-
-
-newtype AsyncProducer a m n s = AsyncProducer { feedFrom :: forall r. Consumer a m r -> n s }
-  deriving Functor
-
-instance MonadBaseControl IO m => Applicative (AsyncProducer a m m) where
-    pure :: b -> AsyncProducer a m m b
-    pure b = AsyncProducer $ \consumer -> do
-        P.runEffect $ return b >-> (b <$ consumer)
-
-    AsyncProducer pfs <*> AsyncProducer ps = AsyncProducer $ \consumer ->
-        liftConcurrently2 ($) (pfs consumer) (ps consumer)
-
-
-newtype AsyncConsumer a m r n s = AsyncConsumer { feedTo   :: Producer a m r -> n s }
-  deriving Functor
-
-instance MFunctor (AsyncProducer a m)   where hoist f (AsyncProducer p) = AsyncProducer (f . p)
-instance MFunctor (AsyncConsumer a m r) where hoist f (AsyncConsumer c) = AsyncConsumer (f . c)
-
-data AsyncEffect n t where
-    AsyncEffect :: (MonadIO m, MonadIO m')
-                => AsyncProducer a m n r
-                -> AsyncConsumer a m' () n s
-                -> AsyncEffect n (r, s)
-
-
-
-
-
-toAsyncProducer :: (Monad m, Monoid r) => Producer a m r -> AsyncProducer a m m r
-toAsyncProducer producer = AsyncProducer $
-    P.runEffect . (producer >->) . ($> mempty)
-
-toAsyncConsumer :: (Monad m, Monoid r) => Consumer a m r -> AsyncConsumer a m r0 m r
-toAsyncConsumer consumer = AsyncConsumer $
-    P.runEffect . (>-> consumer) . ($> mempty)
-
--- ensure that the Producer is actually run
-asyncConsumer :: forall n a s. Monad n
-              => (forall m r. Monad m => Producer a m r -> m (s, r))
-              -> AsyncConsumer a n () n s
-asyncConsumer f = AsyncConsumer (fmap fst . f @n)
-
--- ensure that the Consumer is actually run
-asyncProducer :: forall n a s. Monad n
-              => (forall m r. Monad m => Consumer a m r -> m (s, r))
-              -> AsyncProducer a n n s
-asyncProducer f = AsyncProducer (fmap fst . f @n)
-
-
-toListM :: Monad m => AsyncConsumer a m () m [a]
-toListM = asyncConsumer P.toListM'
+import VPF.Concurrency.Async (MonadAsync, AsyncProducer(..), premapProducer)
 
 
 bufferedChunks :: Monad m => Int -> Producer a m r -> Producer [a] m r
@@ -137,80 +45,182 @@ bufferedChunks chunkSize =
       return f
 
 
-(>|>) :: (MonadIO m, MonadIO m')
-      => AsyncProducer a m n r
-      -> AsyncConsumer a m' () n s
-      -> AsyncEffect n (r, s)
-(>|>) = AsyncEffect
-
-(<|<) :: (MonadIO m, MonadIO m')
-      => AsyncConsumer a m' () n s
-      -> AsyncProducer a m n r
-      -> AsyncEffect n (r, s)
-(<|<) = flip (>|>)
+restoreProducerWith :: (Monad m, MonadBaseControl IO n)
+                    => (forall x. m x -> n x)
+                    -> Producer (StM n a) m r
+                    -> Producer a n r
+restoreProducerWith f producer = hoist f producer >-> P.mapM restoreM
 
 
-parFoldM :: (MonadIO m, MonadIO m')
-         => AsyncConsumer a m' () n s
-         -> AsyncProducer a m n r
-         -> AsyncEffect n (r, s)
-parFoldM = (<|<)
+workStealingP :: (Traversable1 t, MonadAsync m, PS.MonadSafe m, Semigroup r)
+              => Natural
+              -> Natural
+              -> t (Pipe a b m r)
+              -> Producer a m r
+              -> IO (Producer b m r)
+workStealingP splitQueueSize joinQueueSize pipes =
+    workStealing splitQueueSize joinQueueSize (fmap (\p -> (>-> p)) pipes)
 
 
-runAsyncEffect :: MonadBaseControl IO n => Int -> AsyncEffect n r -> n r
-runAsyncEffect bufSize (AsyncEffect aproducer aconsumer) = do
-    liftWithBuffer (PC.bounded bufSize)
-      (feedFrom aproducer . PC.toOutput)
-      (feedTo aconsumer . PC.fromInput)
+workStealing ::
+             ( Traversable1 t
+             , MonadAsync m, PS.MonadSafe m
+             , MonadAsync n, PS.MonadSafe n
+             , Semigroup s
+             )
+             => Natural
+             -> Natural
+             -> t (Producer a m r -> Producer b n s)
+             -> Producer a m r
+             -> IO (Producer b n s)
+workStealing splitQueueSize joinQueueSize fs aproducer = MC.mask_ $ do
+  aproducer' <- stealingBufferedProducer splitQueueSize aproducer
+
+  synchronizedQueue joinQueueSize $ fmap ($ aproducer') fs
 
 
+-- convert a Producer to an asynchronous producer via work stealing
+-- an AsyncProducer is less flexible than a producer, but the API is safer
+toAsyncProducer :: (MonadAsync m, PS.MonadSafe m)
+                => Natural
+                -> Producer a m r
+                -> IO (AsyncProducer a m r m r)
+toAsyncProducer queueSize producer = do
+    producer' <- stealingBufferedProducer queueSize producer
 
-parMapM maxWorkers f aproducer = traverse aproducer (replicate maxWorkers f)
+    return $ AsyncProducer (\c -> P.runEffect (producer' >-> c))
 
--- parMapM :: forall m n a b r s.
---         (Monoid s, MonadIO m, MonadIO n, MonadBaseControl IO n)
---         => Int
---         -> (a -> n b)
---         -> AsyncProducer a m () n r
---         -> AsyncProducer b n s  n (r, s)
--- parMapM maxWorkers f aproducer =
---     AsyncProducer $ \consumer ->
---         runAsyncEffect (2*maxWorkers) $
---             aproducer >|> workers consumer
---   where
---     workers :: Consumer b n s -> AsyncConsumer a n () n s
---     workers consumer = AsyncConsumer $ \input ->
---         fmap (mconcat . catMaybes) $
---           liftReplicateConcurrently maxWorkers $
---             P.runEffect $
---                 (input $> Nothing)
---                   >-> P.mapM f
---                   >-> fmap Just consumer
---
---
--- parMapM_ :: forall m n a r r'.
---          (MonadIO m, MonadIO n, MonadBaseControl IO n)
---          => Int
---          -> (a -> n r)
---          -> AsyncProducer a m () n r'
---          -> AsyncProducer r n () n r'
--- parMapM_ maxWorkers f = fmap fst . parMapM maxWorkers f
---
---
--- parForM :: forall m n a r r' s.
---         (Monoid s, MonadIO m, MonadIO n, MonadBaseControl IO n)
---         => Int
---         -> AsyncProducer a m () n r'
---         -> (a -> n r)
---         -> AsyncProducer r n s  n (r', s)
--- parForM maxWorkers = flip (parMapM maxWorkers)
---
---
--- parForM_ :: forall m n a r r'.
---          (MonadIO m, MonadIO n, MonadBaseControl IO n)
---          => Int
---          -> AsyncProducer a m () n r'
---          -> (a -> n r)
---          -> AsyncProducer r n () n r'
--- parForM_ maxWorkers = flip (parMapM_ maxWorkers)
---
+toAsyncProducer_ :: (MonadAsync m, PS.MonadSafe m, Monoid r)
+                 => Natural
+                 -> Producer a m r
+                 -> IO (AsyncProducer a m () m r)
+toAsyncProducer_ queueSize = fmap (premapProducer (mempty <$)) . toAsyncProducer queueSize
+
+
+stealingBufferedProducer :: (MonadAsync m, PS.MonadSafe m)
+                         => Natural
+                         -> Producer a m r
+                         -> IO (Producer a m r)
+stealingBufferedProducer queueSize producer =
+    synchronize queueSize $
+        AsyncProducer (\c -> P.runEffect $ (producer >-> c))
+
+
+synchronize :: forall a m r n s.
+            (MonadIO m, MonadAsync n, PS.MonadSafe n)
+            => Natural
+            -> AsyncProducer a m r n s
+            -> IO (Producer a n s)
+synchronize queueSize aproducer = do
+    threadVar <- MVar.newMVar Nothing
+    values <- STM.newTBQueueIO queueSize
+    done <- STM.newEmptyTMVarIO
+
+    return $
+        PS.mask $ \restore -> do
+          thread <- lift $ startFeed threadVar values done
+
+          PS.onException
+              (restore $ do
+                readValues values done
+                lift $ Async.wait thread)
+              (liftIO $ Async.cancel thread)
+  where
+    signalDone :: STM.TMVar () -> n ()
+    signalDone done = liftIO $ STM.atomically $ STM.putTMVar done ()
+
+    startFeed :: MVar.MVar (Maybe (Async.Async s))
+              -> STM.TBQueue a
+              -> STM.TMVar ()
+              -> n (Async.Async s)
+    startFeed threadVar values done =
+        MC.bracketOnError (liftIO $ MVar.takeMVar threadVar)
+                          (liftIO . MVar.putMVar threadVar) $ \thread ->
+          case thread of
+            Just t -> do
+              liftIO $ MVar.putMVar threadVar thread
+              return t
+
+            Nothing -> do
+              thread' <- Async.async $ feed values `MC.finally` signalDone done
+              liftIO $ MVar.putMVar threadVar (Just thread')
+              return thread'
+
+    feed :: STM.TBQueue a -> n s
+    feed values =
+        feedFrom aproducer $ P.mapM_ (liftIO . STM.atomically . STM.writeTBQueue values)
+
+    readValues :: STM.TBQueue a -> STM.TMVar () -> Producer a n ()
+    readValues values done = fix $ \loop -> do
+      na <- liftIO $ STM.atomically $
+                STM.orElse (Just    <$> STM.readTBQueue values)
+                           (Nothing <$  STM.readTMVar done)
+
+      case na of
+        Nothing -> return ()
+        Just a  -> P.yield a >> loop
+
+
+synchronizedQueue :: forall t a m r.
+                   (Traversable1 t, MonadAsync m, PS.MonadSafe m, Semigroup r)
+                   => Natural
+                   -> t (Producer a m r)
+                   -> IO (Producer a m r)
+synchronizedQueue queueSize producers = do
+    threadsVar <- MVar.newMVar Nothing
+    values <- STM.newTBQueueIO queueSize
+    ndone <- STM.newTVarIO 0
+
+    return $
+        PS.mask $ \restore -> do
+          threads <- lift $ startFeed threadsVar values ndone
+
+          PS.onException
+              (restore $ do
+                readValues values ndone
+                lift $ waitRestoreAll threads)
+              (liftIO $ mapM_ Async.cancel threads)
+  where
+    incDone :: MonadIO n => STM.TVar Int -> n ()
+    incDone ndone = liftIO $ STM.atomically $ STM.modifyTVar' ndone succ
+
+    testTVar :: STM.TVar x -> (x -> Bool) -> STM.STM ()
+    testTVar var pred = STM.check . pred =<< STM.readTVar var
+
+    nproducers :: Int
+    nproducers = length producers
+
+    startFeed :: MVar.MVar (Maybe (t (Async.Async r)))
+              -> STM.TBQueue a
+              -> STM.TVar Int
+              -> m (t (Async.Async r))
+    startFeed threadsVar values ndone =
+        MC.bracketOnError (liftIO $ MVar.takeMVar threadsVar)
+                          (liftIO . MVar.putMVar threadsVar) $ \threads ->
+          case threads of
+            Just ts -> do
+              liftIO $ MVar.putMVar threadsVar threads
+              return ts
+            Nothing -> do
+              threads' <- forM producers $ \producer -> Async.async $
+                              feed values producer `MC.finally` incDone ndone
+              liftIO $ MVar.putMVar threadsVar (Just threads')
+              return threads'
+
+    feed :: STM.TBQueue a -> Producer a m r -> m r
+    feed values producer =
+        P.runEffect $
+            producer >-> P.mapM_ (liftIO . STM.atomically . STM.writeTBQueue values)
+
+    readValues :: STM.TBQueue a -> STM.TVar Int -> Producer a m ()
+    readValues values ndone = fix $ \loop -> do
+      ma <- liftIO $ STM.atomically $
+                STM.orElse (Just    <$> STM.readTBQueue values)
+                           (Nothing <$  testTVar ndone (>= nproducers))
+
+      case ma of
+        Nothing -> return ()
+        Just a  -> P.yield a >> loop
+
+    waitRestoreAll :: t (Async.Async r) -> m r
+    waitRestoreAll = getAp . foldMap1 (Ap . Async.wait)

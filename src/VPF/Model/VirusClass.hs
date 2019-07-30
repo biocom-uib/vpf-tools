@@ -45,15 +45,13 @@ import VPF.Formats
 import VPF.Model.Class (ClassificationCols, RawClassificationCols)
 import qualified VPF.Model.Cols as M
 
-import VPF.Concurrency.Pipes ((>|>))
+import qualified VPF.Concurrency.Async as Conc
 import qualified VPF.Concurrency.Pipes as Conc
-import qualified VPF.Concurrency.Pipes.Stealing as Conc
 import VPF.Util.Dplyr ((|.))
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
 import qualified VPF.Util.Fasta as FA
 import qualified VPF.Util.FS    as FS
-
 
 
 data ConcurrencyOpts = ConcurrencyOpts
@@ -127,17 +125,18 @@ produceHitsFiles input = do
                     FA.parsedFastaEntries $
                       FS.fileReader (untag genomesFile)
 
-              workers :: Num a => a
-              workers = fromIntegral $ maxSearchingWorkers concOpts
+              nworkers :: Num a => a
+              nworkers = fromIntegral $ maxSearchingWorkers concOpts
 
               chunkSize = fastaChunkSize concOpts
 
           let f = searchGenomeHits wd vpfsFile . P.each
 
           p <- liftBaseWith $ \runInBase ->
-                 Conc.workStealing (workers+1) (workers+1) workers
-                   (>-> P.mapM (MT.lift . runInBase . f))
-                   chunkedGenomes
+                 let
+                   pipes = NE.fromList $ replicate nworkers $ P.mapM (MT.lift . runInBase . f)
+                 in
+                   Conc.workStealingP (nworkers+1) (nworkers+1) pipes chunkedGenomes
 
           r <- P.toListM' (Conc.restoreProducerWith (lift . runSafeT) p)
 

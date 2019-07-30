@@ -28,7 +28,7 @@ import qualified Pipes.Prelude as P
 
 
 data FastaEntry = FastaEntry Text [Text]
-  deriving (Generic)
+  deriving (Eq, Ord, Show, Generic)
 
 instance Store FastaEntry
 
