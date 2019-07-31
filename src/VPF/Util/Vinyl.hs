@@ -1,6 +1,8 @@
 {-# language AllowAmbiguousTypes #-}
+{-# language UndecidableInstances #-}
 module VPF.Util.Vinyl
-  ( over_rsubset'
+  ( ElFieldStore(..), VinylStore(..)
+  , over_rsubset'
   , rsubset'
   , rreordered
   , rrename
@@ -13,14 +15,51 @@ module VPF.Util.Vinyl
 import GHC.TypeLits (KnownSymbol)
 
 import Control.Lens (Iso, Iso', iso, over, Setter, sets)
+import Control.Monad (liftM2)
 
-import Data.Vinyl (ElField(..), Rec, (<+>))
+import Data.Functor.Contravariant (contramap)
+import Data.Store (Store, Size(..))
+import qualified Data.Store as Store
+
+import Data.Vinyl (ElField(..), Rec(..), (<+>))
 import Data.Vinyl.Derived (KnownField)
 import Data.Vinyl.Lens (RecElem, RecElemFCtx, RecSubsetFCtx,
                         rlens', type (<:), type (:~:), rcast)
 import Data.Vinyl.TypeLevel
 
 import Frames.Melt (RDeleteAll)
+
+
+newtype ElFieldStore rs = ElFieldStore (ElField rs)
+newtype VinylStore record f rs = VinylStore (record f rs)
+
+instance (KnownField rs, Store (Snd rs)) => Store (ElFieldStore rs) where
+    size = contramap (\(ElFieldStore (Field a)) -> a)  Store.size
+    peek = fmap (ElFieldStore . Field) Store.peek
+    poke (ElFieldStore (Field a)) = Store.poke a
+
+instance Store (VinylStore Rec f '[]) where
+    size = ConstSize 0
+    peek = return (VinylStore RNil)
+    poke _ = return ()
+
+
+instance (Store (f r), Store (VinylStore Rec f rs)) => Store (VinylStore Rec f (r ': rs)) where
+    size =
+        case (Store.size, Store.size) of
+          (VarSize f, VarSize g)     -> VarSize (\(VinylStore (r :& rs)) -> f r + g (VinylStore rs))
+          (VarSize f, ConstSize m)   -> VarSize (\(VinylStore (r :& _))  -> f r + m)
+          (ConstSize n, VarSize g)   -> VarSize (\(VinylStore (_ :& rs)) -> n + g (VinylStore rs))
+          (ConstSize n, ConstSize m) -> ConstSize (n + m)
+
+    peek = do
+      r <- Store.peek
+      VinylStore rs <- Store.peek
+      return (VinylStore (r :& rs))
+
+    poke (VinylStore (r :& rs)) = do
+      Store.poke r
+      Store.poke (VinylStore rs)
 
 
 over_rsubset' :: forall ss ss' rs f.

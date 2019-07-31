@@ -1,16 +1,22 @@
 {-# language AllowAmbiguousTypes #-}
+{-# language GeneralizedNewtypeDeriving #-}
 module VPF.Util.Dplyr where
 
 import Prelude hiding (filter)
 
+import GHC.Generics (Generic)
 import GHC.TypeLits (KnownSymbol)
 
 import qualified Control.Foldl as L
 
+import Data.Coerce (coerce)
 import qualified Data.Foldable as F
 import Data.Function (on)
+import Data.Functor.Contravariant (contramap)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Store (Store, Size(..))
+import qualified Data.Store as Store
 import Data.Traversable (Traversable)
 
 import qualified Data.Vector                 as Vec
@@ -26,7 +32,21 @@ import qualified Data.Vinyl.TypeLevel as V
 import Frames (Frame(..), FrameRec, Record, filterFrame, rgetField)
 import Frames.InCore (RecVec)
 
-import VPF.Util.Vinyl (rrename)
+import VPF.Util.Vinyl (rrename, VinylStore(..), ElFieldStore(..))
+
+
+newtype FrameRowStore row = FrameRowStore (Vec.Vector row)
+  deriving (Store)
+
+
+fromFrameRowStore :: FrameRowStore row -> Frame row
+fromFrameRowStore (FrameRowStore v) = rowVecToFrame v
+
+toFrameRowStore :: Frame row -> FrameRowStore row
+toFrameRowStore = FrameRowStore . rowsVec
+
+toFrameRecRowStore :: FrameRec rs -> FrameRowStore (VinylStore V.Rec ElFieldStore rs)
+toFrameRecRowStore = toFrameRowStore . coerce
 
 
 cat :: a -> a
@@ -54,18 +74,28 @@ singleRow row = Frame { frameLength = 1, frameRow = const row }
 {-# inline singleRow #-}
 
 
+rowsVec :: Frame row -> Vec.Vector row
+rowsVec df = Vec.generate (frameLength df) (frameRow df)
+{-# inline rowsVec #-}
+
+
 copyAoS :: Frame rows -> Frame rows
-copyAoS df = df { frameRow = (rowsVec Vec.!) }
+copyAoS df = df { frameRow = (rv Vec.!) }
   where
-    rowsVec = Vec.generate (frameLength df) (frameRow df)
-{-# inline copyAoS #-}
+    rv = rowsVec df
 
 
-toFrameN :: Foldable f => Int -> f (Record cols) -> FrameRec cols
-toFrameN n fr =
-    Frame { frameLength = n, frameRow = (v Vec.!) }
+rowVecToFrame :: Vec.Vector row -> Frame row
+rowVecToFrame rows =
+    Frame { frameLength = length rows, frameRow = (rows Vec.!) }
+{-# inline rowVecToFrame #-}
+
+
+toFrameN :: Foldable f => Int -> f row -> Frame row
+toFrameN n fr = rowVecToFrame v
   where
     v = Vec.fromListN n (F.toList fr)
+{-# inline toFrameN #-}
 
 
 desc :: (a -> a -> Ordering) -> a -> a -> Ordering
