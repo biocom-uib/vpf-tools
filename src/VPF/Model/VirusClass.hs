@@ -8,18 +8,19 @@ import Control.Eff
 import Control.Eff.Reader.Strict (Reader, reader)
 import Control.Eff.Exception (Exc, throwError)
 import Control.Lens (view, toListOf, (%~))
+import Control.Monad ((<=<))
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Morph (hoist)
 import qualified Control.Monad.Trans.Class as MT
-import Control.Monad.Trans.Control (liftBaseWith)
+import Control.Monad.Trans.Control (StM, liftBaseWith, restoreM, control)
 import qualified Control.Foldl as L
 
-import Data.Coerce (coerce)
 import Data.Function ((&))
-import Data.Functor (void)
 import Data.Kind (Type)
 import qualified Data.List.NonEmpty as NE
 import Data.Monoid (Ap(..))
+import Data.Semigroup (stimes)
+import Data.Semigroup.Foldable (foldMap1)
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -45,8 +46,10 @@ import VPF.Formats
 import VPF.Model.Class (ClassificationCols, RawClassificationCols)
 import qualified VPF.Model.Cols as M
 
+import VPF.Concurrency.Async ((>||>), (>|->), (>-|>))
 import qualified VPF.Concurrency.Async as Conc
 import qualified VPF.Concurrency.Pipes as Conc
+
 import VPF.Util.Dplyr ((|.))
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
@@ -54,9 +57,9 @@ import qualified VPF.Util.Fasta as FA
 import qualified VPF.Util.FS    as FS
 
 
-data ConcurrencyOpts = ConcurrencyOpts
-    { fastaChunkSize      :: Int
-    , maxSearchingWorkers :: Int
+data ConcurrencyOpts m = ConcurrencyOpts
+    { fastaChunkSize  :: Int
+    , pipelineWorkers :: forall r. NE.NonEmpty (Pipe [FA.FastaEntry] (FrameRec '[M.VirusName, M.ModelName, M.NumHits]) m r)
     }
 
 
@@ -65,16 +68,13 @@ data ModelInput (r :: [Type -> Type]) where
                   -> ModelInput r
 
     GivenGenomes ::
-                 ( LiftedBase IO r
-                 , '[ Cmd HMM.HMMSearch
+                 ( '[ Cmd HMM.HMMSearch
                     , Cmd Prodigal
                     , Exc FA.ParseError
                     ] <:: r
                  )
-                 => { workDir         :: Path Directory
-                    , vpfsFile        :: Path HMMERModel
-                    , genomesFile     :: Path (FASTA Nucleotide)
-                    , concurrencyOpts :: ConcurrencyOpts
+                 => { genomesFile     :: Path (FASTA Nucleotide)
+                    , concurrencyOpts :: ConcurrencyOpts (Eff r)
                     }
                  -> ModelInput r
 
@@ -110,51 +110,16 @@ searchGenomeHits wd vpfsFile genomes = do
     return hitsFile
 
 
-produceHitsFiles :: forall r. Member (Reader ModelConfig) r
-                 => ModelInput r
-                 -> Eff r [Path (HMMERTable HMM.ProtSearchHitCols)]
-produceHitsFiles input = do
-    case input of
-      GivenHitsFile hitsFile ->
-          return [hitsFile]
-
-      GivenGenomes wd vpfsFile genomesFile concOpts -> do
-          let chunkedGenomes :: Producer [FA.FastaEntry] (SafeT IO) (Either FA.ParseError ())
-              chunkedGenomes =
-                  Conc.bufferedChunks chunkSize $
-                    FA.parsedFastaEntries $
-                      FS.fileReader (untag genomesFile)
-
-              nworkers :: Num a => a
-              nworkers = fromIntegral $ maxSearchingWorkers concOpts
-
-              chunkSize = fastaChunkSize concOpts
-
-          let f = searchGenomeHits wd vpfsFile . P.each
-
-          p <- liftBaseWith $ \runInBase ->
-                 let
-                   pipes = NE.fromList $ replicate nworkers $ P.mapM (MT.lift . runInBase . f)
-                 in
-                   Conc.workStealingP (nworkers+1) (nworkers+1) pipes chunkedGenomes
-
-          r <- P.toListM' (Conc.restoreProducerWith (lift . runSafeT) p)
-
-          case r of
-            (_,     Left e)  -> throwError e
-            (files, _     )  -> return files
-
-
-runModel :: ( Lifted IO r
-            , '[ Reader ModelConfig
-               , Exc DSV.ParseError
-               ] <:: r
-            )
-         => ModelInput r
-         -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
-runModel modelInput = do
-    hitsFiles <- produceHitsFiles modelInput
-    let hitRows = foldMap Tbl.produceRows  hitsFiles
+processHMMOut ::
+              ( Lifted IO r
+              , '[ Reader ModelConfig
+                 , Exc DSV.ParseError
+                 ] <:: r
+              )
+              => Path (HMMERTable HMM.ProtSearchHitCols)
+              -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
+processHMMOut hitsFile = do
+    let hitRows = Tbl.produceRows hitsFile
 
     thr <- reader modelEValueThreshold
 
@@ -187,6 +152,53 @@ runModel modelInput = do
             Nothing -> error (
                 "unrecognized protein naming scheme in hmmsearch result "
                 ++ T.unpack t)
+
+
+runModel :: forall r.
+         ( LiftedBase IO r
+         , '[ Reader ModelConfig
+            , Exc DSV.ParseError
+            ] <:: r
+         )
+         => ModelInput r
+         -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
+runModel input =
+    case input of
+        GivenHitsFile hitsFile -> processHMMOut hitsFile
+
+        GivenGenomes genomesFile concOpts -> do
+          let -- producer
+              chunkSize = fastaChunkSize concOpts
+
+              chunkedGenomes :: Producer [FA.FastaEntry] (SafeT IO) (Either FA.ParseError ())
+              chunkedGenomes =
+                  Conc.bufferedChunks chunkSize $
+                    FA.parsedFastaEntries $
+                      FS.fileReader (untag genomesFile)
+
+              asyncGenomeChunkProducer :: Conc.AsyncProducer [FA.FastaEntry] (SafeT IO) () (Eff r) ()
+              asyncGenomeChunkProducer =
+                  Conc.mapProducer (either throwError return) $
+                    hoist (lift . runSafeT) $
+                      fmap getAp (Conc.duplicatingAsyncProducer (fmap Ap chunkedGenomes))
+
+              -- consumer
+              workers = pipelineWorkers concOpts
+
+              nworkers :: Num a => a
+              nworkers = fromIntegral $ length workers
+
+              -- worker fastaEntries = do
+              --     hitsFile <- searchGenomeHits wd vpfsFile (P.each fastaEntries)
+              --     processHMMOut hitsFile
+
+
+          ((), df) <- Conc.runAsyncEffect (nworkers+1) $
+              asyncGenomeChunkProducer
+              >||>
+              foldMap1 (\worker -> worker >-|> Conc.asyncFold L.mconcat) workers
+
+          return df
 
 
 type PredictedCols rs = rs V.++ V.RDelete M.ModelName ClassificationCols

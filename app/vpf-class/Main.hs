@@ -7,6 +7,7 @@ import Control.Eff (Eff, Member, Lifted, LiftedBase, lift, runLift)
 import Control.Eff.Reader.Strict (runReader)
 import Control.Eff.Exception (Exc, runError, Fail, die, ignoreFail)
 import Control.Lens (Lens, view, over, mapped, (&))
+import Control.Monad ((<=<))
 
 import qualified Options.Applicative as OptP
 
@@ -22,6 +23,8 @@ import qualified VPF.Model.Class.Cols as Cls
 import qualified VPF.Model.Cols       as M
 import qualified VPF.Model.VirusClass as VC
 
+import VPF.Concurrency.Async (replicate1)
+
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
 import qualified VPF.Util.Fasta as FA
@@ -29,6 +32,7 @@ import qualified VPF.Util.FS    as FS
 import VPF.Util.Vinyl (rsubset')
 
 import Pipes ((>->))
+import qualified Pipes         as P
 import qualified Pipes.Core    as P
 import qualified Pipes.Prelude as P
 import qualified Pipes.Safe    as P
@@ -73,8 +77,13 @@ classify cfg =
                   withProdigalCfg cfg $
                   withHMMSearchCfg cfg $
                   handleFastaParseErrors $ do
-                    let concOpts = Opts.concurrencyOpts cfg
-                    VC.runModel (VC.GivenGenomes workDir vpfsFile genomesFile concOpts)
+                    let concOpts = VC.ConcurrencyOpts
+                         { VC.fastaChunkSize  = Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
+                         , VC.pipelineWorkers = replicate1 (fromIntegral $ Opts.numWorkers (Opts.concurrencyOpts cfg))
+                                                           (P.mapM (VC.processHMMOut <=< VC.searchGenomeHits workDir vpfsFile . P.each))
+                         }
+
+                    VC.runModel (VC.GivenGenomes genomesFile concOpts)
 
         cls <- Cls.loadClassification (Opts.vpfClassFile cfg)
 

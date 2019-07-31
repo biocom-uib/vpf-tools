@@ -1,7 +1,6 @@
 module Main where
 
-import Data.List (genericLength)
-import Data.Monoid (Ap(..))
+import Data.Monoid (Alt(..))
 import Data.Text (Text)
 import Data.Semigroup.Foldable (foldMap1)
 import qualified Data.Text.IO as T
@@ -68,17 +67,15 @@ main = MPI.mainMPI $ do
 rootMain :: NE.NonEmpty MPI.Rank -> MPI.Comm -> IO (Maybe FA.ParseError)
 rootMain slaves comm = do
     PS.runSafeT $ do
-        -- asyncFastaProducer <- liftIO $ Conc.toAsyncProducerAlt (nslaves+1) fastaProducer
-
         let workers :: NE.NonEmpty (Conc.Worker [FA.FastaEntry] [Text])
             workers = Conc.mpiWorkers slaves jobTags comm
 
             asyncPrinter :: Conc.AsyncConsumer' [Text] (PS.SafeT IO) ()
             asyncPrinter = Conc.asyncFoldM (L.handlesM folded $ L.mapM_ (liftIO . T.putStrLn))
 
-        fmap fst $
+        fmap (getAlt . fst) $
           Conc.runAsyncEffect (nslaves+1) $
-              Conc.duplicatingAsyncProducer fastaProducer
+              Conc.duplicatingAsyncProducer (fmap Alt fastaProducer)
               >||>
               foldMap1 (\worker -> Conc.workerToPipe_ worker >-|> asyncPrinter)
                        workers

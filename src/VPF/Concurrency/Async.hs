@@ -9,11 +9,15 @@ module VPF.Concurrency.Async
   , AsyncConsumer'
   , AsyncEffect
   , premapProducer
+  , mapProducer
   , premapConsumer
+  , mapConsumer
   , duplicatingAsyncProducer
   , asyncProducer
   , asyncConsumer
   , toListM
+  , toListM'
+  , asyncFold
   , asyncFoldM
   , asyncFoldM'
   , (>||>), (<||<)
@@ -25,20 +29,20 @@ module VPF.Concurrency.Async
 
 import GHC.Stack (HasCallStack)
 
-import Data.Constraint ((\\))
-import Data.Constraint.Forall (Forall, inst)
+-- import Data.Constraint ((\\))
+-- import Data.Constraint.Forall (Forall, inst)
 import Data.Functor (($>))
 import Data.Functor.Apply (Apply(..))
 import Data.List (foldl')
 import qualified Data.List.NonEmpty as NE
-import Data.Semigroup.Foldable (foldMap1)
+import Data.Semigroup.Foldable (Foldable1, foldMap1)
 import Data.Semigroup.Traversable (Traversable1, traverse1)
 import Numeric.Natural (Natural)
 
 import Control.Applicative (Alternative, empty)
-import qualified Control.Concurrent.Async.Lifted.Safe as Async
+import qualified Control.Concurrent.Async.Lifted as Async
 import qualified Control.Foldl as L
-import Control.Monad (void)
+import Control.Monad (void, (<=<), (<=<))
 import Control.Monad.Morph (MFunctor(..))
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Trans.Control (MonadBaseControl(..))
@@ -49,7 +53,7 @@ import qualified Pipes.Concurrent as PC
 import qualified Pipes.Prelude    as P
 
 
-type MonadAsync m = (MonadBaseControl IO m, Forall (Async.Pure m))
+type MonadAsync m = (MonadBaseControl IO m) -- , Forall (Async.Pure m))
 
 
 replicate1 :: HasCallStack => Natural -> a -> NE.NonEmpty a
@@ -85,6 +89,9 @@ premapProducer :: (Consumer a' m' r' -> Consumer a m r)
                -> AsyncProducer a' m' r' n s
 premapProducer f (AsyncProducer p) = AsyncProducer (p . f)
 
+mapProducer :: Monad n => (s -> n t) -> AsyncProducer a m r n s -> AsyncProducer a m r n t
+mapProducer f (AsyncProducer p) = AsyncProducer (f <=< p)
+
 
 newtype AsyncConsumer a m r n s = AsyncConsumer { feedTo :: Producer a m r -> n s }
   deriving Functor
@@ -113,6 +120,9 @@ premapConsumer :: (Producer a' m' r' -> Producer a m r)
                -> AsyncConsumer a  m  r  n s
                -> AsyncConsumer a' m' r' n s
 premapConsumer f (AsyncConsumer c) = AsyncConsumer (c . f)
+
+mapConsumer :: Monad n => (s -> n t) -> AsyncConsumer a m r n s -> AsyncConsumer a m r n t
+mapConsumer f (AsyncConsumer c) = AsyncConsumer (f <=< c)
 
 
 data AsyncEffect a m m' n rs where
@@ -148,8 +158,14 @@ asyncProducer :: forall n a r s. Monad n
               -> AsyncProducer a n r n (s, r)
 asyncProducer f = AsyncProducer (f @n)
 
-toListM :: Monad m => AsyncConsumer a m r m ([a], r)
-toListM = AsyncConsumer P.toListM'
+toListM :: Monad m => AsyncConsumer a m r m [a]
+toListM = fmap fst toListM'
+
+toListM' :: Monad m => AsyncConsumer a m r m ([a], r)
+toListM' = AsyncConsumer P.toListM'
+
+asyncFold :: Monad m => L.Fold a b -> AsyncConsumer a m r m b
+asyncFold fold = AsyncConsumer (L.purely P.fold fold . void)
 
 asyncFoldM :: Monad m => L.FoldM m a b -> AsyncConsumer a m r m b
 asyncFoldM fold = AsyncConsumer (L.impurely P.foldM fold . void)
@@ -187,13 +203,17 @@ runAsyncEffect :: forall a m m' n r s.
                (MonadIO m, MonadIO m', MonadAsync n)
                => Natural
                -> AsyncEffect a m m' n (r, s) -> n (r, s)
-runAsyncEffect bufSize (AsyncEffect aproducer aconsumer) =
-    liftBaseWith $ \runInBase ->
+runAsyncEffect bufSize (AsyncEffect aproducer aconsumer) = do
+    (str, sts) <- liftBaseWith $ \runInBase ->
         PC.withBuffer (PC.bounded (fromIntegral bufSize))
             (runInBase . feedFrom aproducer . PC.toOutput)
             (runInBase . feedTo aconsumer . PC.fromInput)
-          \\ inst @(Async.Pure n) @r
-          \\ inst @(Async.Pure n) @s
+          -- \\ inst @(Async.Pure n) @r
+          -- \\ inst @(Async.Pure n) @s
+
+    r <- restoreM str
+    s <- restoreM sts
+    return (r, s)
 
 
 asyncMapM :: forall t a b m n r s.
@@ -203,3 +223,11 @@ asyncMapM :: forall t a b m n r s.
           -> AsyncProducer b m r n (t s)
 asyncMapM fs ap =
     traverse1 (\f -> premapProducer (P.mapM f >->) ap) fs
+
+asyncFoldMapM :: forall t a b m n r s.
+              (Foldable1 t, Monad m, MonadAsync n, Semigroup s)
+              => t (a -> m b)
+              -> AsyncProducer a m r n s
+              -> AsyncProducer b m r n s
+asyncFoldMapM fs ap =
+    foldMap1 (\f -> ap >|-> P.mapM f) fs
