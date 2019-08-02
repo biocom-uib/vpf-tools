@@ -21,7 +21,7 @@ description:         Please see the README on GitHub at <https://github.com/bioc
 dependencies:
 - base >= 4.7 && < 5
 - Frames
-- lifted-async
+- array
 - bytestring
 - constraints
 - containers
@@ -31,6 +31,7 @@ dependencies:
 - filepath
 - foldl
 - lens
+- lifted-async
 - mmorph
 - monad-control
 - mpi-hs
@@ -41,6 +42,8 @@ dependencies:
 - pipes-parse
 - pipes-safe
 - primitive
+- regex-base
+- regex-pcre-builtin
 - semigroupoids
 - stm
 - store

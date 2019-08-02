@@ -84,7 +84,8 @@ data ModelInput (r :: [Type -> Type]) where
 
 
 data ModelConfig = ModelConfig
-    { modelEValueThreshold :: Double
+    { modelEValueThreshold    :: Double
+    , modelVirusNameExtractor :: Text -> Text
     }
 
 
@@ -125,19 +126,22 @@ processHMMOut ::
 processHMMOut hitsFile = do
     let hitRows = Tbl.produceRows hitsFile
 
+
     thr <- reader modelEValueThreshold
+    getVirusName <- reader modelVirusNameExtractor
 
     hitsFrame <- DSV.inCoreAoSExc $
         hitRows
         >-> P.filter (\row -> view HMM.sequenceEValue row <= thr)
         >-> P.map V.rcast
 
-    return (countHits hitsFrame)
+    return $ hitsFrame
+        & D.mutate1 @M.VirusName (getVirusName . view HMM.targetName)
+        & countHits
   where
-    countHits :: FrameRec '[HMM.TargetName, HMM.QueryName, HMM.SequenceScore]
+    countHits :: FrameRec '[M.VirusName, HMM.TargetName, HMM.QueryName, HMM.SequenceScore]
               -> FrameRec '[M.VirusName, M.ModelName, M.NumHits]
     countHits = D.cat
-        |. D.mutate1 @M.VirusName (virusName . V.rget)
         |. D.fixing1 @M.VirusName do
              D.cat
                |. D.grouping1 @HMM.TargetName do

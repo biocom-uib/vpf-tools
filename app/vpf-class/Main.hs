@@ -15,6 +15,15 @@ import Control.Monad.Trans.Control (StM, liftBaseWith, restoreM)
 
 import qualified Data.List.NonEmpty as NE
 
+import qualified Data.Array                 as Array
+import qualified Data.ByteString            as BS
+import Data.Foldable (toList)
+import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Text (Text)
+import qualified Data.Text.Encoding         as T
+import qualified Text.Regex.Base            as PCRE
+import qualified Text.Regex.PCRE.ByteString as PCRE
+
 import qualified Options.Applicative as OptP
 
 import System.Exit (exitWith, ExitCode(..))
@@ -112,10 +121,30 @@ main = MPI.mainMPI $ do
         <> OptP.header "vpf-class: VPF-based virus sequence classifier"
 
 
+compileRegex :: (Lifted IO r, Member Fail r) => Text -> Eff r (Text -> Maybe Text)
+compileRegex src = do
+    erx <- lift $ PCRE.compile (PCRE.compUTF8 + PCRE.compAnchored)
+                               (PCRE.execAnchored + PCRE.execNoUTF8Check)
+                               (T.encodeUtf8 src)
+    case erx of
+      Left (_, err) -> do
+          lift $ putStrLn $ "Could not compile the regex " ++ show src ++ ": " ++ err
+          die
+
+      Right rx -> return $ \text -> do
+          let btext = T.encodeUtf8 text
+          arr <- PCRE.matchOnce rx btext
+          (off, len) <- listToMaybe (toList arr)
+
+          return (T.decodeUtf8 (BS.drop off (BS.take len btext)))
+
+
 masterClassify :: Config -> [MPI.Rank] -> IO (Maybe ())
 masterClassify cfg slaves =
     runLift $ runFail $ handleDSVParseErrors $ do
-        hitCounts <- runReader (modelCfg cfg) $
+        modelCfg <- initModelCfg cfg
+
+        hitCounts <- runReader modelCfg $
             case Opts.inputFiles cfg of
               Opts.GivenHitsFile hitsFile ->
                   VC.runModel (VC.GivenHitsFile hitsFile)
@@ -171,23 +200,26 @@ masterClassify cfg slaves =
 
 slaveClassify :: Config -> MPI.Rank -> [MPI.Rank] -> IO (Maybe ())
 slaveClassify cfg rank slaves =
-    runLift $ runFail $ handleDSVParseErrors $ runReader (modelCfg cfg) $
-        case Opts.inputFiles cfg of
-          Opts.GivenHitsFile hitsFile -> return ()
+    runLift $ runFail $ handleDSVParseErrors $ do
+        modelCfg <- initModelCfg cfg
 
-          Opts.GivenSequences vpfsFile genomesFile ->
-              withCfgWorkDir cfg $ \workDir ->
-              withProdigalCfg cfg $
-              withHMMSearchCfg cfg $
-              handleFastaParseErrors $ do
-                concOpts <- buildConcOpts workDir vpfsFile
+        runReader modelCfg $
+            case Opts.inputFiles cfg of
+              Opts.GivenHitsFile hitsFile -> return ()
 
-                liftBaseWith $ \runInIO ->
-                  PS.runSafeT $
-                    Conc.makeProcessWorker MPI.rootRank tagsClassify MPI.commWorld $ \chunk ->
-                      liftIO $ runInIO $
-                        fmap D.toFrameRowStoreRec $
-                          VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
+              Opts.GivenSequences vpfsFile genomesFile ->
+                  withCfgWorkDir cfg $ \workDir ->
+                  withProdigalCfg cfg $
+                  withHMMSearchCfg cfg $
+                  handleFastaParseErrors $ do
+                    concOpts <- buildConcOpts workDir vpfsFile
+
+                    liftBaseWith $ \runInIO ->
+                      PS.runSafeT $
+                        Conc.makeProcessWorker MPI.rootRank tagsClassify MPI.commWorld $ \chunk ->
+                          liftIO $ runInIO $
+                            fmap D.toFrameRowStoreRec $
+                              VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
   where
     buildConcOpts :: Path Directory
                   -> Path HMMERModel
@@ -205,11 +237,17 @@ slaveClassify cfg rank slaves =
           }
 
 
+initModelCfg :: (Lifted IO r, Member Fail r) => Config -> Eff r VC.ModelConfig
+initModelCfg cfg = do
+  virusNameExtractor <- compileRegex (Opts.virusNameRegex cfg)
 
-modelCfg :: Config -> VC.ModelConfig
-modelCfg cfg = VC.ModelConfig
-  { VC.modelEValueThreshold = Opts.evalueThreshold cfg
-  }
+  return VC.ModelConfig
+        { VC.modelEValueThreshold    = Opts.evalueThreshold cfg
+        , VC.modelVirusNameExtractor = \protName ->
+            fromMaybe (error $ "Could not extract virus name from protein: " ++ show protName)
+                      (virusNameExtractor protName)
+        }
+
 
 withCfgWorkDir :: LiftedBase IO r
                => Config
