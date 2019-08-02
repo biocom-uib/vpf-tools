@@ -32,6 +32,7 @@ import Frames (FrameRec, Record)
 
 import VPF.Eff.Cmd (Cmd, runCmd)
 import VPF.Ext.HMMER.Search (HMMSearch, HMMSearchError, hmmsearchConfig, execHMMSearch)
+import qualified VPF.Ext.HMMER.Search.Cols as HMM
 import VPF.Ext.Prodigal (Prodigal, ProdigalError, prodigalConfig, execProdigal)
 
 import VPF.Formats
@@ -60,8 +61,8 @@ import qualified System.Directory as D
 import qualified Opts
 
 
-type OutputCols = VC.PredictedCols '[M.VirusName, M.ModelName, M.NumHits]
-type RawOutputCols = VC.RawPredictedCols '[M.VirusName, M.ModelName, M.NumHits]
+type OutputCols = VC.PredictedCols '[M.VirusName, M.ModelName, HMM.SequenceScore]
+type RawOutputCols = VC.RawPredictedCols '[M.VirusName, M.ModelName, HMM.SequenceScore]
 
 type Config = Opts.Config (DSV "\t" OutputCols)
 
@@ -80,7 +81,7 @@ type ClassifyM = Eff '[
 
 tagsClassify :: Conc.JobTags Int Int
                 [FA.FastaEntry]
-                (StM ClassifyM (D.FrameRowStoreRec '[M.VirusName, M.ModelName, M.NumHits]))
+                (StM ClassifyM (D.FrameRowStoreRec '[M.VirusName, M.ModelName, HMM.SequenceScore]))
 tagsClassify = Conc.JobTags (Conc.JobTagIn 0) (Conc.JobTagOut 0)
 
 

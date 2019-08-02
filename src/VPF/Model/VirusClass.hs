@@ -61,7 +61,7 @@ data ConcurrencyOpts m = ConcurrencyOpts
     { fastaChunkSize  :: Int
     , pipelineWorkers :: NE.NonEmpty (
                           Pipe [FA.FastaEntry]
-                               (StM m (FrameRec '[M.VirusName, M.ModelName, M.NumHits]))
+                               (StM m (FrameRec '[M.VirusName, M.ModelName, HMM.SequenceScore]))
                                (SafeT IO)
                                ())
     }
@@ -122,7 +122,7 @@ processHMMOut ::
                  ] <:: r
               )
               => Path (HMMERTable HMM.ProtSearchHitCols)
-              -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
+              -> Eff r (FrameRec '[M.VirusName, M.ModelName, HMM.SequenceScore])
 processHMMOut hitsFile = do
     let hitRows = Tbl.produceRows hitsFile
 
@@ -140,14 +140,14 @@ processHMMOut hitsFile = do
         & countHits
   where
     countHits :: FrameRec '[M.VirusName, HMM.TargetName, HMM.QueryName, HMM.SequenceScore]
-              -> FrameRec '[M.VirusName, M.ModelName, M.NumHits]
+              -> FrameRec '[M.VirusName, M.ModelName, HMM.SequenceScore]
     countHits = D.cat
         |. D.fixing1 @M.VirusName do
              D.cat
                |. D.grouping1 @HMM.TargetName do
                     D.top1 @HMM.SequenceScore 1
                |. D.summarizing1 @HMM.QueryName do
-                    D.summary1 @M.NumHits frameLength
+                    D.summary1 @HMM.SequenceScore (L.fold (L.handles HMM.sequenceScore L.sum))
         |. D.rename @HMM.QueryName @M.ModelName
         |. D.copyAoS
 
@@ -171,7 +171,7 @@ asyncPipeline :: forall r.
               )
               => Producer FA.FastaEntry (SafeT IO) (Either FA.ParseError ())
               -> ConcurrencyOpts (Eff r)
-              -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
+              -> Eff r (FrameRec '[M.VirusName, M.ModelName, HMM.SequenceScore])
 asyncPipeline genomes concOpts = do
   asyncGenomeChunkProducer <- lift $ toAsyncEffProducer chunkedGenomes
 
@@ -206,7 +206,7 @@ runModel :: forall r.
             ] <:: r
          )
          => ModelInput r
-         -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
+         -> Eff r (FrameRec '[M.VirusName, M.ModelName, HMM.SequenceScore])
 runModel (GivenHitsFile hitsFile) = processHMMOut hitsFile
 runModel (GivenGenomes genomesFile concOpts) = asyncPipeline genomes concOpts
   where
