@@ -1,3 +1,4 @@
+{-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
 {-# language StandaloneDeriving #-}
 module VPF.Ext.Prodigal
@@ -13,8 +14,11 @@ module VPF.Ext.Prodigal
   , execProdigal
   ) where
 
+import GHC.Generics (Generic)
+
 import qualified Data.ByteString.Lazy as BL (toStrict)
 import Data.Function (fix, (&))
+import Data.Store (Store)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
@@ -30,29 +34,35 @@ import VPF.Util.FS (resolveExecutable)
 
 
 
-data Prodigal a where
-  Prodigal :: { inputFile           :: Path (FASTA Nucleotide)
-              , outputAminoacidFile :: Path (FASTA Aminoacid)
-              , outputGenBankFile   :: Maybe (Path GenBank)
-              }
-           -> Prodigal ()
+data ProdigalArgs = ProdigalArgs
+  { inputFile           :: Path (FASTA Nucleotide)
+  , outputAminoacidFile :: Path (FASTA Aminoacid)
+  , outputGenBankFile   :: Maybe (Path GenBank)
+  }
+  deriving (Eq, Ord, Show, Generic)
 
-deriving instance Eq (Prodigal a)
-deriving instance Ord (Prodigal a)
-deriving instance Show (Prodigal a)
+instance Store ProdigalArgs
+
+
+data Prodigal a where
+  Prodigal :: ProdigalArgs -> Prodigal ()
 
 
 data ProdigalConfig = ProdigalConfig
   { prodigalPath        :: FilePath
   , prodigalDefaultArgs :: [String]
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show, Generic)
+
+instance Store ProdigalConfig
 
 
 data ProdigalError
-  = ProdigalError    { cmd :: Prodigal (), exitCode :: !Int, stderr :: !Text }
+  = ProdigalError    { cmd :: ProdigalArgs, exitCode :: !Int, stderr :: !Text }
   | ProdigalNotFound { search :: FilePath }
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Generic)
+
+instance Store ProdigalError
 
 
 type instance CmdEff Prodigal r = (Member (Exc ProdigalError) r, Lifted IO r)
@@ -73,27 +83,28 @@ prodigal :: Member (Cmd Prodigal) r
          -> Path (FASTA Aminoacid)
          -> Maybe (Path GenBank)
          -> Eff r ()
-prodigal inputFile outputAminoacidFile outputGenBankFile = exec (Prodigal {..})
+prodigal inputFile outputAminoacidFile outputGenBankFile =
+    exec (Prodigal ProdigalArgs{..})
 
 
 mockProdigal :: CmdEff Prodigal r => Eff (Cmd Prodigal ': r) a -> Eff r a
-mockProdigal = runCmd $ \p@Prodigal{} -> lift $ putStrLn $ "running " ++ show p
+mockProdigal = runCmd $ \(Prodigal args) -> lift $ putStrLn $ "running " ++ show args
 
 
 execProdigal :: CmdEff Prodigal r => ProdigalConfig -> Eff (Cmd Prodigal ': r) a -> Eff r a
-execProdigal cfg = runCmd $ \cmd@Prodigal{} -> do
-    let args =
-          [ "-i", untag (inputFile cmd)
-          , "-a", untag (outputAminoacidFile cmd)
+execProdigal cfg = runCmd $ \(Prodigal args@ProdigalArgs{..}) -> do
+    let cmdlineArgs =
+          [ "-i", untag inputFile
+          , "-a", untag outputAminoacidFile
           ]
           ++
-          maybe [] (\path -> ["-o", untag path]) (outputGenBankFile cmd)
+          maybe [] (\path -> ["-o", untag path]) outputGenBankFile
 
     (exitCode, stderr) <- lift $
         Proc.readProcessStderr $
         Proc.setStdout Proc.nullStream $
-        Proc.proc (prodigalPath cfg) (prodigalDefaultArgs cfg ++ args)
+        Proc.proc (prodigalPath cfg) (prodigalDefaultArgs cfg ++ cmdlineArgs)
 
     case exitCode of
       ExitSuccess    -> return ()
-      ExitFailure ec -> throwError $! ProdigalError cmd ec (decodeUtf8 (BL.toStrict stderr))
+      ExitFailure ec -> throwError $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))

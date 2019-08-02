@@ -1,3 +1,4 @@
+{-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
 {-# language StandaloneDeriving #-}
 {-# language StrictData #-}
@@ -16,8 +17,11 @@ module VPF.Ext.HMMER.Search
   , ProtSearchHit
   ) where
 
+import GHC.Generics (Generic)
+
 import qualified Data.ByteString.Lazy as BL (toStrict)
 import Data.Function (fix)
+import Data.Store (Store)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
@@ -35,34 +39,34 @@ import VPF.Util.FS (resolveExecutable)
 
 
 
+data HMMSearchArgs = HMMSearchArgs
+  { inputModelFile :: Path HMMERModel
+  , inputSeqsFile  :: Path (FASTA Aminoacid)
+  , outputFile     :: Path (HMMERTable ProtSearchHitCols)
+  }
+  deriving (Eq, Ord, Show, Generic)
+
+instance Store HMMSearchArgs
+
 data HMMSearch a where
-  HMMSearch :: { inputModelFile :: Path HMMERModel
-               , inputSeqsFile  :: Path (FASTA seq)
-               , outputFile     :: Path (HMMERTable ProtSearchHitCols)
-               }
-            -> HMMSearch ()
-
-instance Eq (HMMSearch a) where
-  HMMSearch i1 s1 o1 == HMMSearch i2 s2 o2 = (i1, untag s1, o1) == (i2, untag s2, o2)
-
-instance Ord (HMMSearch a) where
-  HMMSearch i1 s1 o1 `compare` HMMSearch i2 s2 o2 = (i1, untag s1, o1) `compare` (i2, untag s2, o2)
-
-deriving instance Show (HMMSearch a)
-
+  HMMSearch :: HMMSearchArgs -> HMMSearch ()
 
 
 data HMMSearchConfig = HMMSearchConfig
   { hmmsearchPath        :: FilePath
   , hmmsearchDefaultArgs :: [String]
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show, Generic)
+
+instance Store HMMSearchConfig
 
 
 data HMMSearchError
-    = HMMSearchError    { cmd :: HMMSearch (), exitCode :: Int, stderr :: Text }
+    = HMMSearchError    { cmd :: HMMSearchArgs, exitCode :: Int, stderr :: Text }
     | HMMSearchNotFound { hmmerConfig :: HMMERConfig }
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Generic)
+
+instance Store HMMSearchError
 
 
 type instance CmdEff HMMSearch r = (Member (Exc HMMSearchError) r, Lifted IO r)
@@ -79,18 +83,19 @@ hmmsearchConfig cfg defaultArgs = do
 
 hmmsearch :: Member (Cmd HMMSearch) r
           => Path HMMERModel
-          -> Path (FASTA seq)
+          -> Path (FASTA Aminoacid)
           -> Path (HMMERTable ProtSearchHitCols)
           -> Eff r ()
-hmmsearch inputModelFile inputSeqsFile outputFile = exec HMMSearch {..}
+hmmsearch inputModelFile inputSeqsFile outputFile =
+    exec (HMMSearch HMMSearchArgs {..})
 
 
 mockHMMSearch :: CmdEff HMMSearch r => Eff (Cmd HMMSearch ': r) a -> Eff r a
-mockHMMSearch = runCmd $ \p@HMMSearch{} -> lift $ putStrLn $ "running " ++ show p
+mockHMMSearch = runCmd $ \(HMMSearch args) -> lift $ putStrLn $ "running " ++ show args
 
 execHMMSearch :: CmdEff HMMSearch r => HMMSearchConfig -> Eff (Cmd HMMSearch ': r) a -> Eff r a
-execHMMSearch cfg = runCmd $ \cmd@HMMSearch{..} -> do
-    let args =
+execHMMSearch cfg = runCmd $ \(HMMSearch args@HMMSearchArgs{..}) -> do
+    let cmdlineArgs =
           [ "--tformat", "FASTA"
           , "--tblout", untag outputFile
           , untag inputModelFile
@@ -100,8 +105,8 @@ execHMMSearch cfg = runCmd $ \cmd@HMMSearch{..} -> do
     (exitCode, stderr) <- lift $
         Proc.readProcessStderr $
         Proc.setStdout Proc.nullStream $
-        Proc.proc (hmmsearchPath cfg) (hmmsearchDefaultArgs cfg ++ args)
+        Proc.proc (hmmsearchPath cfg) (hmmsearchDefaultArgs cfg ++ cmdlineArgs)
 
     case exitCode of
       ExitSuccess    -> return ()
-      ExitFailure ec -> throwError $! HMMSearchError cmd ec (decodeUtf8 (BL.toStrict stderr))
+      ExitFailure ec -> throwError $! HMMSearchError args ec (decodeUtf8 (BL.toStrict stderr))

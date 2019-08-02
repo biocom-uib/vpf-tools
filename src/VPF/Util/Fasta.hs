@@ -35,7 +35,9 @@ instance Store FastaEntry
 data ParseError
     = ExpectedNameLine     Text
     | ExpectedSequenceLine [Text]
-  deriving Show
+  deriving (Show, Generic)
+
+instance Store ParseError
 
 
 fastaSeqLength :: FastaEntry -> Int

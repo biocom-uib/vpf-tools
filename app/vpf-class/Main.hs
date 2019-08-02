@@ -3,13 +3,21 @@
 module Main where
 
 import Control.Applicative ((<**>))
-import Control.Eff (Eff, Member, Lifted, LiftedBase, lift, runLift)
-import Control.Eff.Reader.Strict (runReader)
-import Control.Eff.Exception (Exc, runError, Fail, die, ignoreFail)
+import qualified Control.Distributed.MPI.Store as MPI
+import Control.Eff (Eff, Member, Lift, Lifted, LiftedBase, lift, runLift)
+import Control.Eff.Reader.Strict (Reader, runReader)
+import Control.Eff.Exception (Exc, runError, Fail, die, runFail)
 import Control.Lens (Lens, view, over, mapped, (&))
 import Control.Monad ((<=<))
+import qualified Control.Monad.Catch as MC
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Control (StM, liftBaseWith, restoreM)
+
+import qualified Data.List.NonEmpty as NE
 
 import qualified Options.Applicative as OptP
+
+import System.Exit (exitWith, ExitCode(..))
 
 import Frames (FrameRec, Record)
 
@@ -23,7 +31,8 @@ import qualified VPF.Model.Class.Cols as Cls
 import qualified VPF.Model.Cols       as M
 import qualified VPF.Model.VirusClass as VC
 
-import VPF.Concurrency.Async (replicate1)
+import qualified VPF.Concurrency.Async as Conc
+import qualified VPF.Concurrency.MPI   as Conc
 
 import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
@@ -35,7 +44,7 @@ import Pipes ((>->))
 import qualified Pipes         as P
 import qualified Pipes.Core    as P
 import qualified Pipes.Prelude as P
-import qualified Pipes.Safe    as P
+import qualified Pipes.Safe    as PS
 
 import qualified System.Directory as D
 
@@ -47,12 +56,55 @@ type RawOutputCols = VC.RawPredictedCols '[M.VirusName, M.ModelName, M.NumHits]
 
 type Config = Opts.Config (DSV "\t" OutputCols)
 
+type ClassifyM = Eff '[
+    Exc FA.ParseError,
+    Cmd HMMSearch,
+    Exc HMMSearchError,
+    Cmd Prodigal,
+    Exc ProdigalError,
+    Reader VC.ModelConfig,
+    Exc DSV.ParseError,
+    Fail,
+    Lift IO
+    ]
+
+
+tagsClassify :: Conc.JobTags Int Int
+                [FA.FastaEntry]
+                (StM ClassifyM (D.FrameRowStoreRec '[M.VirusName, M.ModelName, M.NumHits]))
+tagsClassify = Conc.JobTags (Conc.JobTagIn 0) (Conc.JobTagOut 0)
+
 
 main :: IO ()
-main = do
-    parser <- Opts.configParserIO
+main = MPI.mainMPI $ do
+    let comm = MPI.commWorld
+    rank <- MPI.commRank comm
+    size <- MPI.commSize comm
 
-    OptP.execParser (opts parser) >>= classify
+    let slaves = [succ MPI.rootRank .. pred size]
+    parser <- Opts.configParserIO slaves
+    cfg <- OptP.execParser (opts parser)
+
+    case MPI.fromRank rank of
+      0 -> do
+          result <- masterClassify cfg slaves `MC.catch` \e -> do
+            print (e :: MC.SomeException)
+            MPI.abort comm 1
+            exitWith (ExitFailure 1)
+
+          case result of
+            Just _  -> return ()
+            Nothing -> MPI.abort comm 1
+
+      r -> do
+          result <- slaveClassify cfg r slaves `MC.catch` \e -> do
+            print (e :: MC.SomeException)
+            MPI.abort comm 1
+            exitWith (ExitFailure 1)
+
+          case result of
+            Just _  -> return ()
+            Nothing -> MPI.abort comm 1
   where
     opts parser = OptP.info (parser <**> OptP.helper) $
         OptP.fullDesc
@@ -60,14 +112,10 @@ main = do
         <> OptP.header "vpf-class: VPF-based virus sequence classifier"
 
 
-classify :: Config -> IO ()
-classify cfg =
-    runLift $ ignoreFail $ handleDSVParseErrors $ do
-        let modelCfg = VC.ModelConfig
-              { VC.modelEValueThreshold = Opts.evalueThreshold cfg
-              }
-
-        hitCounts <- runReader modelCfg $
+masterClassify :: Config -> [MPI.Rank] -> IO (Maybe ())
+masterClassify cfg slaves =
+    runLift $ runFail $ handleDSVParseErrors $ do
+        hitCounts <- runReader (modelCfg cfg) $
             case Opts.inputFiles cfg of
               Opts.GivenHitsFile hitsFile ->
                   VC.runModel (VC.GivenHitsFile hitsFile)
@@ -77,11 +125,7 @@ classify cfg =
                   withProdigalCfg cfg $
                   withHMMSearchCfg cfg $
                   handleFastaParseErrors $ do
-                    let concOpts = VC.ConcurrencyOpts
-                         { VC.fastaChunkSize  = Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
-                         , VC.pipelineWorkers = replicate1 (fromIntegral $ Opts.numWorkers (Opts.concurrencyOpts cfg))
-                                                           (P.mapM (VC.processHMMOut <=< VC.searchGenomeHits workDir vpfsFile . P.each))
-                         }
+                    concOpts <- buildConcOpts workDir vpfsFile
 
                     VC.runModel (VC.GivenGenomes genomesFile concOpts)
 
@@ -100,9 +144,72 @@ classify cfg =
             Opts.StdDevice ->
                 DSV.writeDSV tsvOpts FS.stdoutWriter rawPredictedCls
             Opts.FSPath fp ->
-                P.runSafeT $
+                PS.runSafeT $
                   DSV.writeDSV tsvOpts (FS.fileWriter (untag fp)) rawPredictedCls
+  where
+    buildConcOpts :: Path Directory
+                  -> Path HMMERModel
+                  -> ClassifyM (VC.ConcurrencyOpts ClassifyM)
+    buildConcOpts workDir vpfsFile =
+        liftBaseWith $ \runInIO -> return VC.ConcurrencyOpts
+            { VC.fastaChunkSize =
+                Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
+                  * length slaves
+            , VC.pipelineWorkers =
+                if Opts.useMPI (Opts.concurrencyOpts cfg) && not (null slaves) then
+                    let mapStM f = runInIO . fmap f . restoreM in
+                    fmap (Conc.workerToPipe . Conc.mapWorkerIO (mapStM D.fromFrameRowStoreRec)) $
+                      Conc.mpiWorkers (NE.fromList slaves) tagsClassify MPI.commWorld
+                else
+                  Conc.replicate1
+                    (fromIntegral $ Opts.numWorkers (Opts.concurrencyOpts cfg))
+                    (P.mapM (\chunk -> liftIO $ runInIO $ do
+                        hitsFile <- VC.searchGenomeHits workDir vpfsFile (P.each chunk)
+                        VC.processHMMOut hitsFile))
+            }
 
+
+slaveClassify :: Config -> MPI.Rank -> [MPI.Rank] -> IO (Maybe ())
+slaveClassify cfg rank slaves =
+    runLift $ runFail $ handleDSVParseErrors $ runReader (modelCfg cfg) $
+        case Opts.inputFiles cfg of
+          Opts.GivenHitsFile hitsFile -> return ()
+
+          Opts.GivenSequences vpfsFile genomesFile ->
+              withCfgWorkDir cfg $ \workDir ->
+              withProdigalCfg cfg $
+              withHMMSearchCfg cfg $
+              handleFastaParseErrors $ do
+                concOpts <- buildConcOpts workDir vpfsFile
+
+                liftBaseWith $ \runInIO ->
+                  PS.runSafeT $
+                    Conc.makeProcessWorker MPI.rootRank tagsClassify MPI.commWorld $ \chunk ->
+                      liftIO $ runInIO $
+                        fmap D.toFrameRowStoreRec $
+                          VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
+  where
+    buildConcOpts :: Path Directory
+                  -> Path HMMERModel
+                  -> ClassifyM (VC.ConcurrencyOpts ClassifyM)
+    buildConcOpts workDir vpfsFile =
+      liftBaseWith $ \runInIO -> return VC.ConcurrencyOpts
+          { VC.fastaChunkSize =
+              Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
+          , VC.pipelineWorkers =
+              Conc.replicate1
+                (fromIntegral $ Opts.numWorkers (Opts.concurrencyOpts cfg))
+                (P.mapM (\chunk -> liftIO $ runInIO $ do
+                    hitsFile <- VC.searchGenomeHits workDir vpfsFile (P.each chunk)
+                    VC.processHMMOut hitsFile))
+          }
+
+
+
+modelCfg :: Config -> VC.ModelConfig
+modelCfg cfg = VC.ModelConfig
+  { VC.modelEValueThreshold = Opts.evalueThreshold cfg
+  }
 
 withCfgWorkDir :: LiftedBase IO r
                => Config

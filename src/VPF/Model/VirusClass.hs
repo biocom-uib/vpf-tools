@@ -6,7 +6,7 @@ module VPF.Model.VirusClass where
 
 import Control.Eff
 import Control.Eff.Reader.Strict (Reader, reader)
-import Control.Eff.Exception (Exc, throwError)
+import Control.Eff.Exception (Exc, liftEither, throwError)
 import Control.Lens (view, toListOf, (%~))
 import Control.Monad ((<=<))
 import Control.Monad.IO.Class (MonadIO(..))
@@ -59,7 +59,11 @@ import qualified VPF.Util.FS    as FS
 
 data ConcurrencyOpts m = ConcurrencyOpts
     { fastaChunkSize  :: Int
-    , pipelineWorkers :: forall r. NE.NonEmpty (Pipe [FA.FastaEntry] (FrameRec '[M.VirusName, M.ModelName, M.NumHits]) m r)
+    , pipelineWorkers :: NE.NonEmpty (
+                          Pipe [FA.FastaEntry]
+                               (StM m (FrameRec '[M.VirusName, M.ModelName, M.NumHits]))
+                               (SafeT IO)
+                               ())
     }
 
 
@@ -154,6 +158,43 @@ processHMMOut hitsFile = do
                 ++ T.unpack t)
 
 
+asyncPipeline :: forall r.
+              ( LiftedBase IO r
+              , '[ Reader ModelConfig
+                 , Exc DSV.ParseError
+                 , Exc FA.ParseError
+                 ] <:: r
+              )
+              => Producer FA.FastaEntry (SafeT IO) (Either FA.ParseError ())
+              -> ConcurrencyOpts (Eff r)
+              -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
+asyncPipeline genomes concOpts = do
+  asyncGenomeChunkProducer <- lift $ toAsyncEffProducer chunkedGenomes
+
+  ((), df) <- Conc.runAsyncEffect (nworkers+1) $
+      foldMap1 (asyncGenomeChunkProducer >|->) (pipelineWorkers concOpts)
+      >||>
+      Conc.restoreProducer >-|> Conc.asyncFold L.mconcat
+
+  return df
+  where
+    toAsyncEffProducer :: Producer a (SafeT IO) (Either FA.ParseError ())
+                       -> IO (Conc.AsyncProducer a (SafeT IO) () (Eff r) ())
+    toAsyncEffProducer prod = do
+      asyncProd <- fmap getAp <$> Conc.stealingAsyncProducer_ (nworkers+1) (fmap Ap prod)
+
+      let hoistToEff = hoist (lift . runSafeT)
+
+      return $ Conc.mapProducer liftEither (hoistToEff asyncProd)
+
+    chunkedGenomes :: Producer [FA.FastaEntry] (SafeT IO) (Either FA.ParseError ())
+    chunkedGenomes = Conc.bufferedChunks (fastaChunkSize concOpts) genomes
+
+    nworkers :: Num a => a
+    nworkers = fromIntegral $ length (pipelineWorkers concOpts)
+
+
+
 runModel :: forall r.
          ( LiftedBase IO r
          , '[ Reader ModelConfig
@@ -162,43 +203,10 @@ runModel :: forall r.
          )
          => ModelInput r
          -> Eff r (FrameRec '[M.VirusName, M.ModelName, M.NumHits])
-runModel input =
-    case input of
-        GivenHitsFile hitsFile -> processHMMOut hitsFile
-
-        GivenGenomes genomesFile concOpts -> do
-          let -- producer
-              chunkSize = fastaChunkSize concOpts
-
-              chunkedGenomes :: Producer [FA.FastaEntry] (SafeT IO) (Either FA.ParseError ())
-              chunkedGenomes =
-                  Conc.bufferedChunks chunkSize $
-                    FA.parsedFastaEntries $
-                      FS.fileReader (untag genomesFile)
-
-              asyncGenomeChunkProducer :: Conc.AsyncProducer [FA.FastaEntry] (SafeT IO) () (Eff r) ()
-              asyncGenomeChunkProducer =
-                  Conc.mapProducer (either throwError return) $
-                    hoist (lift . runSafeT) $
-                      fmap getAp (Conc.duplicatingAsyncProducer (fmap Ap chunkedGenomes))
-
-              -- consumer
-              workers = pipelineWorkers concOpts
-
-              nworkers :: Num a => a
-              nworkers = fromIntegral $ length workers
-
-              -- worker fastaEntries = do
-              --     hitsFile <- searchGenomeHits wd vpfsFile (P.each fastaEntries)
-              --     processHMMOut hitsFile
-
-
-          ((), df) <- Conc.runAsyncEffect (nworkers+1) $
-              asyncGenomeChunkProducer
-              >||>
-              foldMap1 (\worker -> worker >-|> Conc.asyncFold L.mconcat) workers
-
-          return df
+runModel (GivenHitsFile hitsFile) = processHMMOut hitsFile
+runModel (GivenGenomes genomesFile concOpts) = asyncPipeline genomes concOpts
+  where
+    genomes = FA.parsedFastaEntries $ FS.fileReader (untag genomesFile)
 
 
 type PredictedCols rs = rs V.++ V.RDelete M.ModelName ClassificationCols

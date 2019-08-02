@@ -1,5 +1,9 @@
+{-# language DeriveGeneric #-}
 module VPF.Ext.HMMER where
 
+import GHC.Generics (Generic)
+
+import Data.Store (Store)
 import System.FilePath ((</>))
 
 import VPF.Formats
@@ -7,7 +11,9 @@ import VPF.Util.FS (resolveExecutable)
 
 
 newtype HMMERConfig = HMMERConfig { hmmerPrefix :: Maybe (Path Directory) }
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Generic)
+
+instance Store HMMERConfig
 
 
 resolveHMMERTool :: HMMERConfig -> String -> IO (Maybe FilePath)

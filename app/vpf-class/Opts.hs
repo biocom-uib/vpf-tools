@@ -1,9 +1,12 @@
 {-# language ApplicativeDo #-}
 {-# language RecordWildCards #-}
+{-# language StrictData #-}
 module Opts where
 
 import Control.Concurrent (getNumCapabilities)
 import Options.Applicative
+
+import qualified Control.Distributed.MPI.Store  as MPI
 
 import VPF.Formats
 import VPF.Ext.HMMER (HMMERConfig(HMMERConfig))
@@ -23,7 +26,11 @@ data InputFiles =
     GivenSequences { vpfsFile :: Path HMMERModel, genomesFile :: Path (FASTA Nucleotide) }
   | GivenHitsFile { hitsFile :: Path (HMMERTable ProtSearchHitCols) }
 
-data ConcurrencyOpts = ConcurrencyOpts { fastaChunkSize :: Int, numWorkers :: Int }
+data ConcurrencyOpts = ConcurrencyOpts
+  { fastaChunkSize :: Int
+  , numWorkers :: Int
+  , useMPI :: Bool
+  }
 
 
 
@@ -46,16 +53,17 @@ argPathReader = maybeReader $ \s ->
       _   -> Just (FSPath (Tagged s))
 
 
-defaultConcurrencyOpts :: IO ConcurrencyOpts
-defaultConcurrencyOpts = do
+defaultConcurrencyOpts :: [MPI.Rank] -> IO ConcurrencyOpts
+defaultConcurrencyOpts slaves = do
     numWorkers <- getNumCapabilities
     let fastaChunkSize = 1
+    let useMPI = False
 
     return ConcurrencyOpts {..}
 
 
-configParserIO :: IO (Parser (Config outfmt))
-configParserIO = fmap configParser defaultConcurrencyOpts
+configParserIO :: [MPI.Rank] -> IO (Parser (Config outfmt))
+configParserIO = fmap configParser . defaultConcurrencyOpts
 
 configParser :: ConcurrencyOpts -> Parser (Config outfmt)
 configParser defConcOpts = do
@@ -155,5 +163,11 @@ configParser defConcOpts = do
           <> hidden
           <> showDefault
           <> help "Number of sequences to be processed at once by each parallel worker"
+
+      useMPI <- switch $
+          long "mpi"
+          <> hidden
+          <> showDefault
+          <> help "Enable MPI mode"
 
       pure ConcurrencyOpts {..}

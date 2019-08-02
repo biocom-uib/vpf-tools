@@ -38,6 +38,8 @@ import VPF.Util.Vinyl (rrename, VinylStore(..), ElFieldStore(..))
 newtype FrameRowStore row = FrameRowStore (Vec.Vector row)
   deriving (Store)
 
+type FrameRowStoreRec rs = FrameRowStore (VinylStore V.Rec ElFieldStore rs)
+
 
 fromFrameRowStore :: FrameRowStore row -> Frame row
 fromFrameRowStore (FrameRowStore v) = rowVecToFrame v
@@ -45,8 +47,11 @@ fromFrameRowStore (FrameRowStore v) = rowVecToFrame v
 toFrameRowStore :: Frame row -> FrameRowStore row
 toFrameRowStore = FrameRowStore . rowsVec
 
-toFrameRecRowStore :: FrameRec rs -> FrameRowStore (VinylStore V.Rec ElFieldStore rs)
-toFrameRecRowStore = toFrameRowStore . coerce
+fromFrameRowStoreRec :: FrameRowStoreRec cols -> FrameRec cols
+fromFrameRowStoreRec = coerce . fromFrameRowStore
+
+toFrameRowStoreRec :: FrameRec cols -> FrameRowStoreRec cols
+toFrameRowStoreRec = toFrameRowStore . coerce
 
 
 cat :: a -> a

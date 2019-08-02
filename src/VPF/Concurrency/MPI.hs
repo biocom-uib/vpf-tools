@@ -16,6 +16,7 @@ import qualified Control.Concurrent.STM.TBQueue as STM
 import qualified Control.Concurrent.STM.TMVar   as STM
 import qualified Control.Monad.STM              as STM
 
+import Control.Monad ((>=>))
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO(..))
 
@@ -32,13 +33,9 @@ import qualified Pipes.Prelude as P
 import qualified Pipes.Safe    as PS
 
 
-newtype JobTagIn e a = JobTagIn e
-  deriving (Eq, Ord, Show, Bounded, Enum)
-
-newtype JobTagOut e a = JobTagOut  e
-  deriving (Eq, Ord, Show, Bounded, Enum)
-
-data JobTags e e' a b = JobTags (JobTagIn e a) (JobTagOut e' a)
+data JobTagIn e a = Store a => JobTagIn e
+data JobTagOut e a = Store a => JobTagOut e
+data JobTags e e' a b = JobTags (JobTagIn e a) (JobTagOut e' b)
 
 
 data StreamItem a = StreamItem a | StreamEnd
@@ -47,6 +44,13 @@ data StreamItem a = StreamItem a | StreamEnd
 data Worker a b = Worker (a -> IO (StreamItem b)) (IO ())
 
 instance Store a => Store (StreamItem a)
+
+
+mapWorker :: (b -> c) -> Worker a b -> Worker a c
+mapWorker fbc (Worker fab finalizer) = Worker ((fmap.fmap.fmap) fbc fab) finalizer
+
+mapWorkerIO :: (b -> IO c) -> Worker a b -> Worker a c
+mapWorkerIO fbc (Worker fab finalizer) = Worker (fab >=> traverse fbc) finalizer
 
 
 messagesFrom :: forall tag m a. (Enum tag, PS.MonadSafe m, Store a)
@@ -84,88 +88,25 @@ messagesTo rank tag comm = do
         liftIO $ MC.mask_ $ MPI.send (StreamEnd @a) rank tag' comm
 
 
-makeProcessWorker :: (PS.MonadSafe m, Enum tag, Enum tag', Store a, Store b)
+makeProcessWorker :: (PS.MonadSafe m, Enum tag, Enum tag')
                   => MPI.Rank
                   -> JobTags tag tag' a b
                   -> MPI.Comm
                   -> (a -> m b)
                   -> m ()
-makeProcessWorker master (JobTags tagIn tagOut) comm f =
+makeProcessWorker master (JobTags (JobTagIn tagIn) (JobTagOut tagOut)) comm f =
     P.runEffect $
         messagesFrom master tagIn comm
           >-> P.mapM f
           >-> messagesTo master tagOut comm
 
 
--- joinMapM :: forall m a b r. (PS.MonadSafe m, Show a)
---          => [Worker a b]                        -- ^ worker action (StreamItem) /finalizer (StreamEnd)
---          -> Natural                             -- ^ job queue size
---          -> Natural                             -- ^ result queue size
---          -> Producer a m r                      -- ^ inputs
---          -> Producer b m r                      -- ^ outputs
--- joinMapM workers qsizeIn qsizeOut producer = do
---   done <- liftIO $ STM.newEmptyTMVarIO
---
---   inputs <- liftIO $ STM.newTBQueueIO qsizeIn
---   outputs <- liftIO $ STM.newTBQueueIO qsizeOut
---
---   PS.bracket (setupWorkers inputs outputs done) cancelWorkers $ \workerThreads -> do
---       r <- awaitYielding inputs outputs
---       liftIO $ STM.atomically $ STM.putTMVar done ()
---
---       consumeOutputs outputs workerThreads
---       return r
---   where
---     awaitYielding :: STM.TBQueue a -> STM.TBQueue b -> Producer b m r
---     awaitYielding inputs outputs =
---         P.for producer $ \a -> do
---             newResults <- liftIO $ STM.atomically $ STM.flushTBQueue outputs
---             P.each newResults
---             liftIO $ STM.atomically $ STM.writeTBQueue inputs a
---
---     consumeOutputs :: STM.TBQueue b -> [Async.Async ()] -> Producer b m ()
---     consumeOutputs outputs workerThreads = do
---       let consumeAndWait :: Async.Async () -> Producer b m ()
---           consumeAndWait workerThread = fix $ \loop -> do
---             status <- liftIO $ Async.poll workerThread
---
---             case status of
---               Just (Left e)   -> MC.throwM e
---               Just (Right ()) -> return ()
---               Nothing -> do
---                 bs <- liftIO $ STM.atomically $ STM.flushTBQueue outputs
---                 P.each bs
---                 loop
---
---       mapM_ consumeAndWait workerThreads
---
---     setupWorkers :: STM.TBQueue a -> STM.TBQueue b -> STM.TMVar () -> PS.Base m [Async.Async ()]
---     setupWorkers inputs outputs done = do
---         liftIO $ mapM (liftIO . Async.async . workerLoop) workers
---       where
---         workerLoop :: Worker a b -> IO ()
---         workerLoop (Worker worker finalizer) = flip MC.finally finalizer $ fix $ \loop -> do
---           newJob <- STM.atomically $
---               STM.orElse (StreamItem <$> STM.readTBQueue inputs)
---                          (StreamEnd  <$  STM.readTMVar done)
---
---           case newJob of
---             StreamEnd -> return ()
---             StreamItem job -> do
---               result <- worker job
---               case result of
---                 StreamEnd -> return ()
---                 StreamItem b -> do
---                   STM.atomically $ STM.writeTBQueue outputs b
---                   loop
---
---     cancelWorkers :: [Async.Async ()] -> PS.Base m ()
---     cancelWorkers = liftIO . mapM_ Async.cancel
-
-
-mpiWorker :: forall a b tag tag'. (Enum tag, Enum tag', Store a, Store b)
-          => MPI.Rank -> JobTags tag tag' a b -> MPI.Comm -> Worker a b
-mpiWorker rank (JobTags tagIn tagOut) comm =
+mpiWorker :: forall a b tag tag'. (Enum tag, Enum tag')
+          => MPI.Rank
+          -> JobTags tag tag' a b
+          -> MPI.Comm
+          -> Worker a b
+mpiWorker rank (JobTags (JobTagIn tagIn) (JobTagOut tagOut)) comm =
     Worker (\a -> MC.mask_ $ MPI.sendrecv_ (StreamItem a) rank tagIn' rank tagOut' comm)
            (MC.mask_ $ MPI.send (StreamEnd @a) rank tagIn' comm)
   where
@@ -174,28 +115,24 @@ mpiWorker rank (JobTags tagIn tagOut) comm =
     tagOut' = MPI.toTag tagOut
 
 
-mpiWorkers :: (Enum tag, Enum tag', Functor f, Store a, Store b)
-           => f (MPI.Rank) -> JobTags tag tag' a b -> MPI.Comm -> f (Worker a b)
+mpiWorkers :: (Enum tag, Enum tag', Functor f)
+           => f (MPI.Rank)
+           -> JobTags tag tag' a b
+           -> MPI.Comm
+           -> f (Worker a b)
 mpiWorkers ranks tags comm = fmap (\rank -> mpiWorker rank tags comm) ranks
 
 
-workerToPipeMaybe :: forall a b m r. (PS.MonadSafe m)
-                  => Worker a b
-                  -> Pipe a b m (Maybe r)
-workerToPipeMaybe (Worker worker finalizer) =
+workerToPipe :: forall a b m r. (PS.MonadSafe m) => Worker a b -> Pipe a b m ()
+workerToPipe (Worker worker finalizer) =
     transform `PS.finally` liftIO finalizer
   where
-    transform :: Pipe a b m (Maybe r)
+    transform :: Pipe a b m ()
     transform = P.mapM (liftIO . worker) >-> takeWhileItems
 
-    takeWhileItems :: Pipe (StreamItem b) b m (Maybe r)
+    takeWhileItems :: Pipe (StreamItem b) b m ()
     takeWhileItems = do
       item <- P.await
       case item of
         StreamItem b -> P.yield b >> takeWhileItems
-        StreamEnd    -> return Nothing
-
-workerToPipe_ :: forall a b m r. (PS.MonadSafe m)
-              => Worker a b
-              -> Pipe a b m ()
-workerToPipe_ = void . workerToPipeMaybe
+        StreamEnd    -> return ()

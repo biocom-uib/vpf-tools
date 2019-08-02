@@ -1,3 +1,4 @@
+{-# language DeriveGeneric #-}
 {-# language ImplicitParams #-}
 {-# language OverloadedStrings #-}
 {-# language StrictData #-}
@@ -22,6 +23,7 @@ module VPF.Util.DSV
   , writeDSV
   ) where
 
+import GHC.Generics (Generic)
 import GHC.TypeLits (Symbol, KnownSymbol, symbolVal)
 
 import Control.Eff (Member, Lifted, lift, Eff)
@@ -35,6 +37,7 @@ import Data.Char (isSpace)
 import Data.Kind (Type)
 import Data.List (intercalate)
 import Data.Proxy (Proxy(..))
+import Data.Store (Store)
 import Data.Tagged (Tagged(..), untag)
 import Data.Text (Text)
 import qualified Data.Text    as T
@@ -65,32 +68,29 @@ data ParserOptions = ParserOptions
     , rowTokenizer :: RowTokenizer
     }
 
-data ParseCtx where
-    ParseCtx :: forall (sep :: Symbol) (cols :: [(Symbol, Type)]).
-             (KnownSymbol sep, ColumnHeaders cols)
-             => Path (DSV sep cols)
-             -> ParseCtx
-
-instance Eq ParseCtx where
-    ParseCtx fp1 == ParseCtx fp2 = untag fp1 == untag fp2
+data ParseCtx = ParseCtx { ctxPath :: FilePath, ctxSep :: Char, ctxColNames :: [String] }
+  deriving (Eq, Generic)
 
 instance Show ParseCtx where
-    show (ParseCtx (fp :: Path (DSV sep cols))) =
-        let sep      = symbolVal (Proxy @sep)
-            colNames = columnHeaders (Proxy @(Record cols))
+    show (ParseCtx fp sep colNames) =
+        let -- sep      = symbolVal (Proxy @sep)
+            -- colNames = columnHeaders (Proxy @(Record cols))
             colsDesc = intercalate ", " colNames
         in
-            "file " ++ show (untag fp) ++ " with expected columns " ++ colsDesc ++
+            "file " ++ show fp ++ " with expected columns " ++ colsDesc ++
             " (separated by " ++ show sep ++ ")"
+
+instance Store ParseCtx
 
 
 type HasParseCtx = (?parseRowCtx :: ParseCtx)
 
 
 data ParseError = ParseError { parseErrorCtx :: ParseCtx, parseErrorRow :: Text }
-  deriving (Eq, Show, Typeable)
+  deriving (Eq, Show, Typeable, Generic)
 
 instance Exception ParseError
+instance Store ParseError
 
 
 defRowTokenizer :: Char -> RowTokenizer
@@ -125,7 +125,7 @@ pipeEitherRows opts =
     >-> P.map (parseEitherRow (rowTokenizer opts))
 
 
-produceEitherRows ::
+produceEitherRows :: forall m sep cols.
                   ( MonadSafe m, MonadIO m
                   , KnownSymbol sep, ColumnHeaders cols, CSV.ReadRec cols
                   )
@@ -135,7 +135,11 @@ produceEitherRows ::
 produceEitherRows fp opts =
     CSV.produceTextLines (untag fp) >-> pipeEitherRows opts
   where
-    ?parseRowCtx = ParseCtx fp
+    ?parseRowCtx =
+        let [sep]    = symbolVal (Proxy @sep)
+            colNames = columnHeaders (Proxy @(Record cols))
+        in  ParseCtx (untag fp) sep colNames
+
 
 
 throwLeftsM :: (Exception e, MonadThrow m) => Pipe (Either e a) a m ()

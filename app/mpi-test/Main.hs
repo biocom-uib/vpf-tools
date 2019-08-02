@@ -77,7 +77,7 @@ rootMain slaves comm = do
           Conc.runAsyncEffect (nslaves+1) $
               Conc.duplicatingAsyncProducer (fmap Alt fastaProducer)
               >||>
-              foldMap1 (\worker -> Conc.workerToPipe_ worker >-|> asyncPrinter)
+              foldMap1 (\worker -> Conc.workerToPipe worker >-|> asyncPrinter)
                        workers
   where
     nslaves :: Num a => a

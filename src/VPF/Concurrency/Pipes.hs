@@ -52,6 +52,10 @@ restoreProducerWith :: (Monad m, MonadBaseControl IO n)
 restoreProducerWith f producer = hoist f producer >-> P.mapM restoreM
 
 
+restoreProducer :: MonadBaseControl b m => Pipe (StM m a) a m r
+restoreProducer = P.mapM restoreM
+
+
 -- convert a Producer to an asynchronous producer via work stealing
 -- an AsyncProducer is less flexible than a producer, but the API is safer
 stealingAsyncProducer :: (MonadAsync m, PS.MonadSafe m)

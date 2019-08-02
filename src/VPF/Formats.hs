@@ -16,6 +16,7 @@ module VPF.Formats
 import GHC.TypeLits (Symbol)
 
 import Data.Kind (Type)
+import Data.Store (Store)
 import Data.Tagged
 
 
@@ -35,3 +36,6 @@ data DSV (sep :: Symbol) (cols :: [(Symbol, Type)])
 
 type CSV cols = DSV "," cols
 type TSV cols = DSV "\t" cols
+
+
+instance Store a => Store (Tagged tag a)
