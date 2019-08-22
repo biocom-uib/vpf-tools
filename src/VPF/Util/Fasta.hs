@@ -4,7 +4,8 @@
 module VPF.Util.Fasta
   ( FastaEntry(..)
   , ParseError(..)
-  , fastaSeqLength
+  , entryName
+  , entrySeqLength
   , parsedFastaEntries
   , fastaLines
   ) where
@@ -40,8 +41,11 @@ data ParseError
 instance Store ParseError
 
 
-fastaSeqLength :: FastaEntry -> Int
-fastaSeqLength (FastaEntry _ seq) = sum (map T.length seq)
+entryName :: FastaEntry -> Text
+entryName (FastaEntry n _) = n
+
+entrySeqLength :: FastaEntry -> Int
+entrySeqLength (FastaEntry _ seq) = sum (map T.length seq)
 
 
 parsedFastaEntries :: Monad m => Producer Text m r -> Producer FastaEntry m (Either ParseError r)
