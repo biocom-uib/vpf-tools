@@ -54,16 +54,26 @@ singleRow row = Frame { frameLength = 1, frameRow = const row }
 {-# inline singleRow #-}
 
 
+rowsVec :: Frame row -> Vec.Vector row
+rowsVec df = Vec.generate (frameLength df) (frameRow df)
+{-# inline rowsVec #-}
+
+
 copyAoS :: Frame rows -> Frame rows
-copyAoS df = df { frameRow = (rowsVec Vec.!) }
+copyAoS df = df { frameRow = (rv Vec.!) }
   where
-    rowsVec = Vec.generate (frameLength df) (frameRow df)
+    rv = rowsVec df
 {-# inline copyAoS #-}
 
 
+rowVecToFrame :: Vec.Vector row -> Frame row
+rowVecToFrame rows =
+    Frame { frameLength = length rows, frameRow = (rows Vec.!) }
+{-# inline rowVecToFrame #-}
+
+
 toFrameN :: Foldable f => Int -> f (Record cols) -> FrameRec cols
-toFrameN n fr =
-    Frame { frameLength = n, frameRow = (v Vec.!) }
+toFrameN n fr = rowVecToFrame v
   where
     v = Vec.fromListN n (F.toList fr)
 
@@ -181,7 +191,30 @@ reorder = fmap V.rcast
 {-# inline reorder #-}
 
 
-splitOn :: forall k row row' f. Ord k => (row -> k) -> Frame row -> [Frame row]
+splitSortOn :: forall k row. Ord k => (row -> k) -> Frame row -> [Frame row]
+splitSortOn key =
+    let
+      cacheKeys :: Frame row -> Frame (k, row)
+      cacheKeys = fmap (\row -> (key row, row))
+
+      arrangedRows :: Frame (k, row) -> Vec.Vector (k, row)
+      arrangedRows = rowsVec . arrangeBy (\(k1, _) (k2, _) -> compare k1 k2)
+
+      splitVec :: Vec.Vector (k, row) -> [Vec.Vector (k, row)]
+      splitVec v
+        | Vec.null v = []
+        | otherwise  =
+            let
+              (currentKey, _) = Vec.head v
+              (group, rest) = Vec.span (\(k, _) -> k == currentKey) v
+            in
+              group : splitVec rest
+    in
+      map (fmap snd . rowVecToFrame) . splitVec . arrangedRows . cacheKeys
+{-# inlinable splitSortOn #-}
+
+
+splitOn :: forall k row. Ord k => (row -> k) -> Frame row -> [Frame row]
 splitOn key df =
     let buildSubframes :: Map k [Int] -> [Frame row]
         buildSubframes = map (df !@) . F.toList . fmap UVec.fromList
@@ -198,7 +231,7 @@ groupingOn :: forall k row row' f. Ord k
            -> (Frame row -> Frame row')
            -> Frame row
            -> Frame row'
-groupingOn key f = mconcat . map f . splitOn key
+groupingOn key f = mconcat . map f . splitSortOn key
 {-# inline groupingOn #-}
 
 
