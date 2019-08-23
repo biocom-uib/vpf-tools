@@ -35,7 +35,6 @@ data ConcurrencyOpts = ConcurrencyOpts
   }
 
 
-
 data Config outfmt = Config
   { hmmerConfig     :: HMMERConfig
   , prodigalPath    :: FilePath

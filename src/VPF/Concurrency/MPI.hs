@@ -10,6 +10,7 @@ module VPF.Concurrency.MPI where
 
 import GHC.Generics (Generic)
 
+import Control.Concurrent (yield)
 import qualified Control.Concurrent.Async.Lifted.Safe as Async
 
 import qualified Control.Concurrent.STM.TBQueue as STM
@@ -101,13 +102,37 @@ makeProcessWorker master (JobTags (JobTagIn tagIn) (JobTagOut tagOut)) comm f =
           >-> messagesTo master tagOut comm
 
 
+waitYielding_ :: MPI.Request a -> IO a
+waitYielding_ req = loop
+  where
+    loop = do
+      res <- MPI.test_ req
+      case res of
+        Just a  -> return a
+        Nothing -> yield >> loop
+
+sendYielding_ :: Store a => a -> MPI.Rank -> MPI.Tag -> MPI.Comm -> IO ()
+sendYielding_ a rank tag comm = MC.mask_ $
+    MPI.isend a rank tag comm >>= waitYielding_
+
+recvYielding_ :: Store b => MPI.Rank -> MPI.Tag -> MPI.Comm -> IO b
+recvYielding_ rank tag comm = MC.mask_ $
+    MPI.irecv rank tag comm >>= waitYielding_
+
+sendrecvYielding_ :: (Store a, Store b)
+                => a -> MPI.Rank -> MPI.Tag -> MPI.Rank -> MPI.Tag -> MPI.Comm -> IO b
+sendrecvYielding_ a rank tag rank' tag' comm = MC.mask_ $ do
+    MPI.isend a rank tag comm >>= waitYielding_
+    MPI.irecv rank' tag' comm >>= waitYielding_
+
+
 mpiWorker :: forall a b tag tag'. (Enum tag, Enum tag')
           => MPI.Rank
           -> JobTags tag tag' a b
           -> MPI.Comm
           -> Worker a b
 mpiWorker rank (JobTags (JobTagIn tagIn) (JobTagOut tagOut)) comm =
-    Worker (\a -> MC.mask_ $ MPI.sendrecv_ (StreamItem a) rank tagIn' rank tagOut' comm)
+    Worker (\a -> sendrecvYielding_ (StreamItem a) rank tagIn' rank tagOut' comm)
            (MC.mask_ $ MPI.send (StreamEnd @a) rank tagIn' comm)
   where
     tagIn', tagOut' :: MPI.Tag

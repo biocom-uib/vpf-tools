@@ -126,7 +126,6 @@ processHMMOut ::
 processHMMOut hitsFile = do
     let hitRows = Tbl.produceRows hitsFile
 
-
     thr <- reader modelEValueThreshold
     getVirusName <- reader modelVirusNameExtractor
 
@@ -160,6 +159,20 @@ processHMMOut hitsFile = do
             Nothing -> error (
                 "unrecognized protein naming scheme in hmmsearch result "
                 ++ T.unpack t)
+
+
+syncPipeline ::
+             ( Lifted IO r
+             , Member (Cmd HMM.HMMSearch) r
+             , Member (Cmd Prodigal) r
+             , Member (Exc DSV.ParseError) r
+             , Member (Reader ModelConfig) r
+             )
+             => Path Directory
+             -> Path HMMERModel
+             -> Producer FA.FastaEntry (SafeT IO) ()
+             -> Eff r (FrameRec '[M.VirusName, M.ModelName, HMM.SequenceScore])
+syncPipeline wd vpfsFile genomes = searchGenomeHits wd vpfsFile genomes >>= processHMMOut
 
 
 asyncPipeline :: forall r.

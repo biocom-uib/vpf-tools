@@ -90,7 +90,7 @@ putErrLn = liftIO . IO.hPutStrLn IO.stderr
 mpiAbortWith :: Int -> String -> IO a
 mpiAbortWith ec msg = do
   IO.hFlush IO.stdout
-  IO.hPrint IO.stderr msg
+  IO.hPutStrLn IO.stderr msg
   IO.hFlush IO.stderr
   MPI.abort MPI.commWorld ec
   exitFailure
@@ -186,6 +186,9 @@ masterClassify cfg slaves =
                 PS.runSafeT $
                   DSV.writeDSV tsvOpts (FS.fileWriter (untag fp)) rawPredictedCls
   where
+    nworkers :: Int
+    nworkers = max 1 $ Opts.numWorkers (Opts.concurrencyOpts cfg)
+
     buildConcOpts :: Path Directory
                   -> Path HMMERModel
                   -> ClassifyM (VC.ConcurrencyOpts ClassifyM)
@@ -193,18 +196,22 @@ masterClassify cfg slaves =
         liftBaseWith $ \runInIO -> return VC.ConcurrencyOpts
             { VC.fastaChunkSize =
                 Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
-                  * max 1 (length slaves)
+                  * nworkers
+
             , VC.pipelineWorkers =
                 if Opts.useMPI (Opts.concurrencyOpts cfg) && not (null slaves) then
-                    let mapStM f = runInIO . fmap f . restoreM in
-                    fmap (Conc.workerToPipe . Conc.mapWorkerIO (mapStM D.fromFrameRowStoreRec)) $
-                      Conc.mpiWorkers (NE.fromList slaves) tagsClassify MPI.commWorld
+                  let
+                    mpiWorkers = Conc.mpiWorkers (NE.fromList slaves) tagsClassify MPI.commWorld
+                    mapStM f = runInIO . fmap f . restoreM
+                    asDeserialized = Conc.mapWorkerIO (mapStM D.fromFrameRowStoreRec)
+                  in
+                    fmap (Conc.workerToPipe . asDeserialized) mpiWorkers
                 else
-                  Conc.replicate1
-                    (fromIntegral $ Opts.numWorkers (Opts.concurrencyOpts cfg))
-                    (P.mapM (\chunk -> liftIO $ runInIO $ do
-                        hitsFile <- VC.searchGenomeHits workDir vpfsFile (P.each chunk)
-                        VC.processHMMOut hitsFile))
+                  let
+                    workerBody chunk = liftIO $ runInIO $
+                        VC.syncPipeline workDir vpfsFile (P.each chunk)
+                  in
+                    Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
             }
 
 
@@ -217,20 +224,24 @@ slaveClassify cfg rank slaves =
             case Opts.inputFiles cfg of
               Opts.GivenHitsFile hitsFile -> return ()
 
-              Opts.GivenSequences vpfsFile genomesFile ->
+              Opts.GivenSequences vpfsFile _ ->
                   withCfgWorkDir cfg $ \workDir ->
                   withProdigalCfg cfg $
                   withHMMSearchCfg cfg $
-                  handleFastaParseErrors $ do
-                    concOpts <- buildConcOpts workDir vpfsFile
-
-                    liftBaseWith $ \runInIO ->
-                      PS.runSafeT $
-                        Conc.makeProcessWorker MPI.rootRank tagsClassify MPI.commWorld $ \chunk ->
-                          liftIO $ runInIO $
-                            fmap D.toFrameRowStoreRec $
-                              VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
+                  handleFastaParseErrors $
+                    worker workDir vpfsFile
   where
+    worker :: Path Directory -> Path HMMERModel -> ClassifyM ()
+    worker workDir vpfsFile = do
+      concOpts <- buildConcOpts workDir vpfsFile
+
+      liftBaseWith $ \runInIO ->
+          PS.runSafeT $
+            Conc.makeProcessWorker MPI.rootRank tagsClassify MPI.commWorld $ \chunk ->
+                liftIO $ runInIO $
+                  fmap D.toFrameRowStoreRec $
+                    VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
+
     buildConcOpts :: Path Directory
                   -> Path HMMERModel
                   -> ClassifyM (VC.ConcurrencyOpts ClassifyM)
@@ -238,12 +249,15 @@ slaveClassify cfg rank slaves =
       liftBaseWith $ \runInIO -> return VC.ConcurrencyOpts
           { VC.fastaChunkSize =
               Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
+
           , VC.pipelineWorkers =
-              Conc.replicate1
-                (fromIntegral $ Opts.numWorkers (Opts.concurrencyOpts cfg))
-                (P.mapM (\chunk -> liftIO $ runInIO $ do
-                    hitsFile <- VC.searchGenomeHits workDir vpfsFile (P.each chunk)
-                    VC.processHMMOut hitsFile))
+              let
+                nworkers = max 1 $ Opts.numWorkers (Opts.concurrencyOpts cfg)
+
+                workerBody chunk = liftIO $ runInIO $
+                    VC.syncPipeline workDir vpfsFile (P.each chunk)
+              in
+                Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
           }
 
 
