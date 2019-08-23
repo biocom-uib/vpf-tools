@@ -216,7 +216,30 @@ reorder = fmap V.rcast
 {-# inline reorder #-}
 
 
-splitOn :: forall k row row' f. Ord k => (row -> k) -> Frame row -> [Frame row]
+splitSortOn :: forall k row. Ord k => (row -> k) -> Frame row -> [Frame row]
+splitSortOn key =
+    let
+      cacheKeys :: Frame row -> Frame (k, row)
+      cacheKeys = fmap (\row -> (key row, row))
+
+      arrangedRows :: Frame (k, row) -> Vec.Vector (k, row)
+      arrangedRows = rowsVec . arrangeBy (\(k1, _) (k2, _) -> compare k1 k2)
+
+      splitVec :: Vec.Vector (k, row) -> [Vec.Vector (k, row)]
+      splitVec v
+        | Vec.null v = []
+        | otherwise  =
+            let
+              (currentKey, _) = Vec.head v
+              (group, rest) = Vec.span (\(k, _) -> k == currentKey) v
+            in
+              group : splitVec rest
+    in
+      map (fmap snd . rowVecToFrame) . splitVec . arrangedRows . cacheKeys
+{-# inlinable splitSortOn #-}
+
+
+splitOn :: forall k row. Ord k => (row -> k) -> Frame row -> [Frame row]
 splitOn key df =
     let buildSubframes :: Map k [Int] -> [Frame row]
         buildSubframes = map (df !@) . F.toList . fmap UVec.fromList
@@ -233,7 +256,7 @@ groupingOn :: forall k row row' f. Ord k
            -> (Frame row -> Frame row')
            -> Frame row
            -> Frame row'
-groupingOn key f = mconcat . map f . splitOn key
+groupingOn key f = mconcat . map f . splitSortOn key
 {-# inline groupingOn #-}
 
 
