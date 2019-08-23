@@ -54,54 +54,6 @@ mapWorkerIO :: (b -> IO c) -> Worker a b -> Worker a c
 mapWorkerIO fbc (Worker fab finalizer) = Worker (fab >=> traverse fbc) finalizer
 
 
-messagesFrom :: forall tag m a. (Enum tag, PS.MonadSafe m, Store a)
-             => MPI.Rank                      -- ^ where to listen for values
-             -> tag                           -- ^ tag
-             -> MPI.Comm                      -- ^ communicator
-             -> Producer a m ()               -- ^ produces values of producer tag
-messagesFrom rank tag comm = fix $ \loop -> do
-    msg <- liftIO $ MC.mask_ $ MPI.recv_ rank tag' comm
-
-    case msg of
-      StreamItem a -> do
-        P.yield a
-        loop
-      StreamEnd    -> return ()
-  where
-    tag' :: MPI.Tag
-    tag' = MPI.toTag tag
-
-
-messagesTo :: forall tag m a r. (Enum tag, PS.MonadSafe m, Store a)
-           => MPI.Rank
-           -> tag
-           -> MPI.Comm
-           -> Consumer a m r
-messagesTo rank tag comm = do
-    P.mapM_ (\s -> liftIO $ MC.mask_ $ MPI.send (StreamItem s) rank tag' comm)
-      `PS.finally` sendStreamEnd
-  where
-    tag' :: MPI.Tag
-    tag' = MPI.toTag tag
-
-    sendStreamEnd :: PS.Base m ()
-    sendStreamEnd =
-        liftIO $ MC.mask_ $ MPI.send (StreamEnd @a) rank tag' comm
-
-
-makeProcessWorker :: (PS.MonadSafe m, Enum tag, Enum tag')
-                  => MPI.Rank
-                  -> JobTags tag tag' a b
-                  -> MPI.Comm
-                  -> (a -> m b)
-                  -> m ()
-makeProcessWorker master (JobTags (JobTagIn tagIn) (JobTagOut tagOut)) comm f =
-    P.runEffect $
-        messagesFrom master tagIn comm
-          >-> P.mapM f
-          >-> messagesTo master tagOut comm
-
-
 waitYielding_ :: MPI.Request a -> IO a
 waitYielding_ req = loop
   where
@@ -124,6 +76,55 @@ sendrecvYielding_ :: (Store a, Store b)
 sendrecvYielding_ a rank tag rank' tag' comm = MC.mask_ $ do
     MPI.isend a rank tag comm >>= waitYielding_
     MPI.irecv rank' tag' comm >>= waitYielding_
+
+
+
+messagesFrom :: forall tag m a. (Enum tag, PS.MonadSafe m, Store a)
+             => MPI.Rank                      -- ^ where to listen for values
+             -> tag                           -- ^ tag
+             -> MPI.Comm                      -- ^ communicator
+             -> Producer a m ()               -- ^ produces values of producer tag
+messagesFrom rank tag comm = fix $ \loop -> do
+    msg <- liftIO $ recvYielding_ rank tag' comm
+
+    case msg of
+      StreamItem a -> do
+        P.yield a
+        loop
+      StreamEnd    -> return ()
+  where
+    tag' :: MPI.Tag
+    tag' = MPI.toTag tag
+
+
+messagesTo :: forall tag m a r. (Enum tag, PS.MonadSafe m, Store a)
+           => MPI.Rank
+           -> tag
+           -> MPI.Comm
+           -> Consumer a m r
+messagesTo rank tag comm = do
+    P.mapM_ (\s -> liftIO $ sendYielding_ (StreamItem s) rank tag' comm)
+      `PS.finally` sendStreamEnd
+  where
+    tag' :: MPI.Tag
+    tag' = MPI.toTag tag
+
+    sendStreamEnd :: PS.Base m ()
+    sendStreamEnd =
+        liftIO $ sendYielding_ (StreamEnd @a) rank tag' comm
+
+
+makeProcessWorker :: (PS.MonadSafe m, Enum tag, Enum tag')
+                  => MPI.Rank
+                  -> JobTags tag tag' a b
+                  -> MPI.Comm
+                  -> (a -> m b)
+                  -> m ()
+makeProcessWorker master (JobTags (JobTagIn tagIn) (JobTagOut tagOut)) comm f =
+    P.runEffect $
+        messagesFrom master tagIn comm
+          >-> P.mapM f
+          >-> messagesTo master tagOut comm
 
 
 mpiWorker :: forall a b tag tag'. (Enum tag, Enum tag')
