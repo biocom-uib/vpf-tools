@@ -23,7 +23,7 @@ import qualified Data.Text as T
 import qualified Data.Vinyl           as V
 import qualified Data.Vinyl.TypeLevel as V
 
-import Frames (Frame, FrameRec, RecordColumns, frameLength)
+import Frames (Frame, FrameRec, frameLength)
 import Frames.InCore (RecVec)
 import Frames.Joins (innerJoin)
 
@@ -49,7 +49,6 @@ import qualified VPF.Util.Dplyr as D
 import qualified VPF.Util.DSV   as DSV
 import qualified VPF.Util.Fasta as FA
 import qualified VPF.Util.FS    as FS
-
 
 
 data ConcurrencyOpts = ConcurrencyOpts
@@ -189,12 +188,12 @@ type PredictedCols rs = rs V.++ V.RDelete M.ModelName ClassificationCols
 type RawPredictedCols rs = rs V.++ V.RDelete M.ModelName RawClassificationCols
 
 
-predictClassification ::
-                      ( V.RElem M.ModelName rs (V.RIndex M.ModelName rs)
-                      , rs V.<: PredictedCols rs
-                      , RecVec rs
-                      , RecVec (PredictedCols rs)
-                      )
-                      => FrameRec rs -> FrameRec ClassificationCols -> FrameRec (PredictedCols rs)
+predictClassification :: forall rs. V.RElem M.ModelName rs (V.RIndex M.ModelName rs)
+                      => FrameRec rs
+                      -> FrameRec ClassificationCols
+                      -> FrameRec (rs V.++ V.RDelete M.ModelName ClassificationCols)
 predictClassification hits cls =
-    innerJoin @'[M.ModelName] hits cls
+    D.innerJoin @rs @(V.RDelete M.ModelName ClassificationCols)
+      (D.reindex1 @M.ModelName hits)
+      (D.reindex1 @M.ModelName cls & fmap (D.copyAoS . D.select))
+    & D.resetIndex

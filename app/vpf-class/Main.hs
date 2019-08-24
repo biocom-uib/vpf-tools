@@ -112,9 +112,10 @@ classify cfg =
 
         let predictedCls = VC.predictClassification hitCounts cls
 
-            rawPredictedCls = over (mapped.rsubset') (view Cls.rawClassification)
-                                   predictedCls
-                            & D.reorder @RawOutputCols
+            rawPredictedCls = predictedCls
+              & over (mapped.rsubset') (view Cls.rawClassification)
+              & D.arrange @'[M.VirusName, M.ModelName]
+              & D.reorder @RawOutputCols
 
             tsvOpts = DSV.defWriterOptions '\t'
 

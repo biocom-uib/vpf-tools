@@ -99,9 +99,15 @@ cmpF1 = compare `on` rgetField @r
 {-# inline cmpF1 #-}
 
 
-mapToFrame :: Map (Record as) (Record bs) -> FrameRec (as V.++ bs)
-mapToFrame m = toFrameN (Map.size m) [rec1 V.<+> rec2 | (rec1, rec2) <- Map.toAscList m]
-{-# inline mapToFrame #-}
+frameProductWith :: (row1 -> row2 -> row3) -> Frame row1 -> Frame row2 -> Frame row3
+frameProductWith f df1 df2 = Frame
+    { frameLength = n1 * n2
+    , frameRow = \i -> f (frameRow df1 (i `div` n1)) (frameRow df2 (i `mod` n2))
+    }
+  where
+    n1 = frameLength df1
+    n2 = frameLength df2
+{-# inline frameProductWith #-}
 
 
 arrangeBy :: (row -> row -> Ordering) -> Frame row -> Frame row
@@ -226,6 +232,54 @@ splitOn key df =
 {-# inlinable splitOn #-}
 
 
+mapToFrame :: Map (Record as) (Record bs) -> FrameRec (as V.++ bs)
+mapToFrame m = toFrameN (Map.size m) [rec1 V.<+> rec2 | (rec1, rec2) <- Map.toAscList m]
+{-# inline mapToFrame #-}
+
+
+reindexBy :: Ord k => (row -> k) -> Frame row -> Map k (Frame row)
+reindexBy key df = Map.fromAscList [(key (frameRow grp 0), grp) | grp <- splitSortOn key df]
+{-# inline reindexBy #-}
+
+
+resetIndex :: Map k (Frame row) -> Frame row
+resetIndex = mconcat . Map.elems
+{-# inline resetIndex #-}
+
+
+reindex :: forall cols' cols.
+        (Ord (Record cols'), cols' V.<: cols)
+        => FrameRec cols
+        -> Map (Record cols') (FrameRec cols)
+reindex = reindexBy (V.rcast @cols')
+{-# inline reindex #-}
+
+
+reindex1 :: forall col cols.
+         (V.KnownField col, Ord (V.Snd col), V.RElem col cols (V.RIndex col cols))
+         => FrameRec cols
+         -> Map (V.Snd col) (FrameRec cols)
+reindex1 = reindexBy (rgetField @col)
+{-# inline reindex1 #-}
+
+
+innerJoinWith :: Ord k
+              => (row1 -> row2 -> row3)
+              -> Map k (Frame row1)
+              -> Map k (Frame row2)
+              -> Map k (Frame row3)
+innerJoinWith f = Map.intersectionWith (frameProductWith f)
+{-# inline innerJoinWith #-}
+
+
+innerJoin :: forall cols1 cols2 k. Ord k
+          => Map k (FrameRec cols1)
+          -> Map k (FrameRec cols2)
+          -> Map k (FrameRec (cols1 V.++ cols2))
+innerJoin = innerJoinWith (V.<+>)
+{-# inline innerJoin #-}
+
+
 groupingOn :: forall k row row' f. Ord k
            => (row -> k)
            -> (Frame row -> Frame row')
@@ -256,7 +310,7 @@ fixing :: forall ss ss' rs. (Ord (Record ss), ss V.<: rs)
        => (FrameRec rs -> FrameRec ss')
        -> FrameRec rs
        -> FrameRec (ss V.++ ss')
-fixing f =  grouping @ss applyGroup
+fixing f = grouping @ss applyGroup
   where
     applyGroup :: FrameRec rs -> FrameRec (ss V.++ ss')
     applyGroup group =

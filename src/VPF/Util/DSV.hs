@@ -219,7 +219,6 @@ produceDSVLinesFromFrame opts frame =
     produceFromFrame frame >-> pipeDSVLines opts
 
 
-
 writeDSV ::
          ( RecMapMethod CSV.ShowCSV ElField cols
          , RecordToList cols
