@@ -127,7 +127,7 @@ cmpF1 = compare `on` rgetField @r
 frameProductWith :: (row1 -> row2 -> row3) -> Frame row1 -> Frame row2 -> Frame row3
 frameProductWith f df1 df2 = Frame
     { frameLength = n1 * n2
-    , frameRow = \i -> f (frameRow df1 (i `div` n1)) (frameRow df2 (i `mod` n2))
+    , frameRow = \i -> f (frameRow df1 (i `div` n1)) (frameRow df2 (i `mod` n1))
     }
   where
     n1 = frameLength df1
