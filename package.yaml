@@ -65,6 +65,7 @@ default-extensions:
 - FlexibleInstances
 - FunctionalDependencies
 - GADTs
+- LambdaCase
 - MultiParamTypeClasses
 - PolyKinds
 - RankNTypes
@@ -75,10 +76,16 @@ default-extensions:
 - TypeFamilyDependencies
 - TypeOperators
 
+ghc-options:
+  - -Wall
+  - -Wno-unticked-promoted-constructors
+
 library:
   source-dirs: src
   ghc-options:
   - -fsimpl-tick-factor=150
+  - -Wall
+  - -Wno-unticked-promoted-constructors
 
 executables:
   vpf-class:

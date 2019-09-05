@@ -1,4 +1,4 @@
-module VPF.Util.Tagged
+module VPF.Frames.TaggedField
   ( Field
   , elfield
   , rgetTagged

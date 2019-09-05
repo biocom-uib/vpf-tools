@@ -10,3 +10,8 @@ declareColumn "virus_name"   ''Text
 declareColumn "protein_name" ''Text
 declareColumn "model_name"   ''Text
 declareColumn "num_hits"     ''Int
+
+declareColumn "k_base_size"       ''Double
+declareColumn "protein_hit_score" ''Double
+declareColumn "virus_hit_score"   ''Double
+declareColumn "membership_ratio"  ''Double

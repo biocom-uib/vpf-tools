@@ -2,7 +2,7 @@
 {-# language ImplicitParams #-}
 {-# language OverloadedStrings #-}
 {-# language StrictData #-}
-module VPF.Util.DSV
+module VPF.Frames.DSV
   ( RowTokenizer
   , ParserOptions(..)
   , ParseCtx(..)

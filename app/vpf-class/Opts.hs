@@ -26,7 +26,7 @@ instance Show (ArgPath t) where
 
 data InputFiles =
     GivenSequences { vpfsFile :: Path HMMERModel, genomesFile :: Path (FASTA Nucleotide) }
-  | GivenHitsFile { hitsFile :: Path (HMMERTable ProtSearchHitCols) }
+  -- | GivenHitsFile { hitsFile :: Path (HMMERTable ProtSearchHitCols) }
 
 data ConcurrencyOpts = ConcurrencyOpts
   { fastaChunkSize :: Int
@@ -100,7 +100,7 @@ configParser defConcOpts = do
         <> hidden
         <> help "Generate temporary files in DIR instead of creating a temporary one"
 
-    inputFiles <- givenSequences <|> givenHitsFile
+    inputFiles <- givenSequences -- <|> givenHitsFile
 
     virusNameRegex <- fmap T.pack $ strOption $
         long "virus-pattern"
@@ -145,15 +145,15 @@ configParser defConcOpts = do
 
       pure GivenSequences {..}
 
-    givenHitsFile :: Parser InputFiles
-    givenHitsFile = do
-      hitsFile <- strOption $
-          long "hits"
-          <> short 'h'
-          <> metavar "HITS_FILE"
-          <> help "HMMER tblout file containing protein search hits against the VPFs"
+    -- givenHitsFile :: Parser InputFiles
+    -- givenHitsFile = do
+    --   hitsFile <- strOption $
+    --       long "hits"
+    --       <> short 'h'
+    --       <> metavar "HITS_FILE"
+    --       <> help "HMMER tblout file containing protein search hits against the VPFs"
 
-      pure GivenHitsFile {..}
+    --   pure GivenHitsFile {..}
 
 
     concOpts :: Parser ConcurrencyOpts

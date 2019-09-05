@@ -20,7 +20,7 @@ import Pipes.Safe (MonadSafe)
 
 
 import VPF.Formats
-import qualified VPF.Util.DSV as DSV
+import qualified VPF.Frames.DSV as DSV
 
 
 data Accession = NoAccession | Accession Text

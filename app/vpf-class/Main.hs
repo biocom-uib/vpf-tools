@@ -1,5 +1,6 @@
-{-# language OverloadedStrings #-}
+{-# language BlockArguments #-}
 {-# language MonoLocalBinds #-}
+{-# language OverloadedStrings #-}
 module Main where
 
 import Control.Applicative ((<**>))
@@ -7,14 +8,12 @@ import qualified Control.Distributed.MPI.Store as MPI
 import Control.Eff (Eff, Member, Lift, Lifted, LiftedBase, lift, runLift)
 import Control.Eff.Reader.Strict (Reader, runReader)
 import Control.Eff.Exception (Exc, runError, Fail, die, runFail)
-import Control.Lens (Lens, view, over, mapped, (&))
-import Control.Monad ((<=<))
+import Control.Lens (Lens, view, (%~), (&))
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Control.Monad.Trans.Control (StM, liftBaseWith, restoreM)
 
-import qualified Data.Array                 as Array
-import qualified Data.ByteString            as BS
+import qualified Data.ByteString as BS
 import Data.Foldable (toList)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.List.NonEmpty as NE
@@ -27,9 +26,18 @@ import qualified System.Directory as D
 import System.Exit (exitFailure)
 import qualified System.IO as IO
 
-import qualified Options.Applicative as OptP
+import Pipes ((>->))
+import qualified Pipes         as P
+import qualified Pipes.Core    as P
+import qualified Pipes.Prelude as P
+import qualified Pipes.Safe    as PS
 
 import Frames (FrameRec, Record)
+
+import qualified Options.Applicative as OptP
+
+import qualified VPF.Concurrency.Async as Conc
+import qualified VPF.Concurrency.MPI   as Conc
 
 import VPF.Eff.Cmd (Cmd, runCmd)
 import VPF.Ext.HMMER.Search (HMMSearch, HMMSearchError, hmmsearchConfig, execHMMSearch)
@@ -37,31 +45,26 @@ import qualified VPF.Ext.HMMER.Search.Cols as HMM
 import VPF.Ext.Prodigal (Prodigal, ProdigalError, prodigalConfig, execProdigal)
 
 import VPF.Formats
+import VPF.Frames.Dplyr.Ops
+import qualified VPF.Frames.Dplyr  as F
+import qualified VPF.Frames.DSV    as DSV
+import qualified VPF.Frames.InCore as F
+
 import qualified VPF.Model.Class      as Cls
 import qualified VPF.Model.Class.Cols as Cls
 import qualified VPF.Model.Cols       as M
 import qualified VPF.Model.VirusClass as VC
 
-import qualified VPF.Concurrency.Async as Conc
-import qualified VPF.Concurrency.MPI   as Conc
-
-import qualified VPF.Util.Dplyr as D
-import qualified VPF.Util.DSV   as DSV
 import qualified VPF.Util.Fasta as FA
 import qualified VPF.Util.FS    as FS
-import VPF.Util.Vinyl (rsubset')
-
-import Pipes ((>->))
-import qualified Pipes         as P
-import qualified Pipes.Core    as P
-import qualified Pipes.Prelude as P
-import qualified Pipes.Safe    as PS
+import VPF.Util.Vinyl (rsubset_)
 
 import qualified Opts
 
 
-type OutputCols = VC.PredictedCols '[M.VirusName, M.ModelName, HMM.SequenceScore]
-type RawOutputCols = VC.RawPredictedCols '[M.VirusName, M.ModelName, HMM.SequenceScore]
+type HitCols = '[M.VirusName, M.ModelName, M.ProteinHitScore]
+type OutputCols = VC.ClassifiedCols HitCols
+type RawOutputCols = VC.RawClassifiedCols HitCols
 
 type Config = Opts.Config (DSV "\t" OutputCols)
 
@@ -79,8 +82,8 @@ type ClassifyM = Eff '[
 
 
 tagsClassify :: Conc.JobTags Int Int
-                [FA.FastaEntry]
-                (StM ClassifyM (D.FrameRowStoreRec '[M.VirusName, M.ModelName, HMM.SequenceScore]))
+                [FA.FastaEntry Nucleotide]
+                (StM ClassifyM (F.FrameRowStoreRec HitCols))
 tagsClassify = Conc.JobTags (Conc.JobTagIn 0) (Conc.JobTagOut 0)
 
 
@@ -156,8 +159,8 @@ masterClassify cfg slaves =
 
         hitCounts <- runReader modelCfg $
             case Opts.inputFiles cfg of
-              Opts.GivenHitsFile hitsFile ->
-                  VC.runModel (VC.GivenHitsFile hitsFile)
+              -- Opts.GivenHitsFile hitsFile ->
+              --     VC.runModel (VC.GivenHitsFile hitsFile)
 
               Opts.GivenSequences vpfsFile genomesFile ->
                   withCfgWorkDir cfg $ \workDir ->
@@ -170,22 +173,25 @@ masterClassify cfg slaves =
 
         cls <- Cls.loadClassification (Opts.vpfClassFile cfg)
 
-        let predictedCls = VC.predictClassification hitCounts cls
+        let withClassification = VC.appendClassification cls hitCounts
 
-            rawPredictedCls = predictedCls
-              & over (mapped.rsubset') (view Cls.rawClassification)
-              & D.arrange @'[M.VirusName, M.ModelName]
-              & D.reorder @RawOutputCols
+            predict :: FrameRec '[M.VirusName, M.ModelName, M.ProteinHitScore, Cls.ClassObj]
+                    -> FrameRec '[M.VirusName, Cls.ClassName, M.MembershipRatio, M.VirusHitScore]
+            predict = F.select_ |. F.reindexed' @"virus_name" %~ VC.predictMembership
+
+            prepareForWriting = F.arrange @'[F.Asc "virus_name", F.Desc "membership_ratio"]
 
             tsvOpts = DSV.defWriterOptions '\t'
+
+            result = prepareForWriting (predict withClassification)
 
         lift $
           case Opts.outputFile cfg of
             Opts.StdDevice ->
-                DSV.writeDSV tsvOpts FS.stdoutWriter rawPredictedCls
+                DSV.writeDSV tsvOpts FS.stdoutWriter result
             Opts.FSPath fp ->
                 PS.runSafeT $
-                  DSV.writeDSV tsvOpts (FS.fileWriter (untag fp)) rawPredictedCls
+                  DSV.writeDSV tsvOpts (FS.fileWriter (untag fp)) result
   where
     nworkers :: Int
     nworkers = max 1 $ Opts.numWorkers (Opts.concurrencyOpts cfg)
@@ -204,7 +210,7 @@ masterClassify cfg slaves =
                   let
                     mpiWorkers = Conc.mpiWorkers (NE.fromList slaves) tagsClassify MPI.commWorld
                     mapStM f = runInIO . fmap f . restoreM
-                    asDeserialized = Conc.mapWorkerIO (mapStM D.fromFrameRowStoreRec)
+                    asDeserialized = Conc.mapWorkerIO (mapStM F.fromFrameRowStoreRec)
                   in
                     fmap (Conc.workerToPipe . asDeserialized) mpiWorkers
                 else
@@ -223,7 +229,7 @@ slaveClassify cfg rank slaves =
 
         runReader modelCfg $
             case Opts.inputFiles cfg of
-              Opts.GivenHitsFile hitsFile -> return ()
+              -- Opts.GivenHitsFile hitsFile -> return ()
 
               Opts.GivenSequences vpfsFile _ ->
                   withCfgWorkDir cfg $ \workDir ->
@@ -240,7 +246,7 @@ slaveClassify cfg rank slaves =
           PS.runSafeT $
             Conc.makeProcessWorker MPI.rootRank tagsClassify MPI.commWorld $ \chunk ->
                 liftIO $ runInIO $
-                  fmap D.toFrameRowStoreRec $
+                  fmap F.toFrameRowStoreRec $
                     VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
 
     buildConcOpts :: Path Directory
