@@ -6,9 +6,8 @@ import GHC.TypeLits (KnownSymbol)
 
 import Prelude hiding (filter)
 
-import Control.Lens (Setter, Traversal, mapped, (%~), set, sequenceOf)
-import Data.Maybe (fromJust, isJust)
-import Data.Proxy (Proxy(..))
+import qualified Control.Lens as L
+import Control.Lens.Type
 
 import qualified Data.Vector         as Vec
 import qualified Data.Vector.Generic as GVec
@@ -16,8 +15,9 @@ import qualified Data.Vector.Generic as GVec
 import qualified Data.Vinyl           as V
 import qualified Data.Vinyl.TypeLevel as V
 
-import Frames (Frame(..), FrameRec, Record, rgetField)
+import Frames (Frame(..), FrameRec, Record)
 
+import VPF.Frames.Dplyr.Ops
 import VPF.Frames.InCore (rowsVec)
 import VPF.Util.Vinyl (FieldSpec, NameSpec, RSubseq, rsubseq, rrename)
 
@@ -27,18 +27,13 @@ cat = id
 {-# inline cat #-}
 
 
-tApply :: (Proxy i -> r) -> r
-tApply f = f Proxy
-{-# inline tApply #-}
-
-
 rowwise :: (row -> row') -> Frame row -> Frame row'
 rowwise = fmap
 {-# inline rowwise #-}
 
 
 rows :: Setter (Frame row) (Frame row') row row'
-rows = mapped
+rows = L.mapped
 {-# inline rows #-}
 
 
@@ -55,6 +50,17 @@ df !@ idx = Frame
 {-# inline (!@) #-}
 
 
+field :: forall i s a b col col' cols cols'.
+      ( FieldSpec cols i col
+      , col ~ '(s ,a)
+      , col' ~ '(s, b)
+      , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
+      )
+      => Lens (Record cols) (Record cols') a b
+field = V.rlens' @col . V.rfield
+{-# inline field #-}
+
+
 get :: forall i s a col cols.
     ( FieldSpec cols i col
     , V.RElem col cols (V.RIndex col cols)
@@ -62,7 +68,7 @@ get :: forall i s a col cols.
     )
     => Record cols
     -> a
-get = rgetField @col
+get = L.view (field @col)
 {-# inline get #-}
 
 
@@ -73,17 +79,12 @@ col :: forall i s a b col col' cols cols'.
     , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
     )
     => Setter (FrameRec cols) (FrameRec cols') a b
-col = rows . V.rlens' @col . V.rfield
+col = rows . field @col
 {-# inline col #-}
 
 
-field :: forall i s a. (NameSpec i s, KnownSymbol s) => a -> V.ElField '(s, a)
-field = V.Field
-{-# inline field #-}
-
-
 singleField :: forall i s a. (NameSpec i s, KnownSymbol s) => a -> Record '[ '(s, a)]
-singleField a = field @i a V.:& V.RNil
+singleField a = V.Field a V.:& V.RNil
 {-# inline singleField #-}
 
 
@@ -101,25 +102,6 @@ frameProductWith f df1 df2 = Frame
     n1 = frameLength df1
     n2 = frameLength df2
 {-# inline frameProductWith #-}
-
-
-filter :: (Record cols -> Bool) -> FrameRec cols -> FrameRec cols
-filter f = rowsVec %~ Vec.filter f
-{-# inline filter #-}
-
-
-dropNothings :: forall i s a col col' cols cols'.
-             ( FieldSpec cols i col
-             , KnownSymbol s
-             , col ~ '(s, Maybe a)
-             , col' ~ '(s, a)
-             , V.RElem col cols (V.RIndex col cols)
-             , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
-             )
-             => FrameRec cols
-             -> FrameRec cols'
-dropNothings = replace @col (fromJust . rgetField @col) . filter (isJust . rgetField @col)
-{-# inline dropNothings #-}
 
 
 firstN :: Int -> Frame row -> Frame row
@@ -167,8 +149,27 @@ replace :: forall i s a b col col' cols cols'.
        => (Record cols -> b)
        -> FrameRec cols
        -> FrameRec cols'
-replace f = fmap (\row -> set (V.rlens' @col . V.rfield) (f row) row)
+replace f = rows %~ \row -> L.set (field @col) (f row) row
 {-# inline replace #-}
+
+
+filter :: (Record cols -> Bool) -> FrameRec cols -> FrameRec cols
+filter f = rowsVec %~ Vec.filter f
+{-# inline filter #-}
+
+
+dropNothings :: forall i s a col col' cols cols'.
+             ( FieldSpec cols i col
+             , KnownSymbol s
+             , col ~ '(s, Maybe a)
+             , col' ~ '(s, a)
+             , V.RElem col cols (V.RIndex col cols)
+             , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
+             )
+             => FrameRec cols
+             -> FrameRec cols'
+dropNothings = rowsVec %~ Vec.mapMaybe (L.sequenceAOf (field @col))
+{-# inline dropNothings #-}
 
 
 unnest :: forall i s a col col' cols cols'.
@@ -180,7 +181,7 @@ unnest :: forall i s a col col' cols cols'.
        => FrameRec cols
        -> FrameRec cols'
 unnest =
-    rowsVec %~ Vec.concatMap (Vec.fromList . sequenceOf (V.rlens' @col . V.rfield))
+    rowsVec %~ Vec.concatMap (Vec.fromList . L.sequenceAOf (field @col))
 {-# inline unnest #-}
 
 
