@@ -2,28 +2,42 @@
 {-# language InstanceSigs #-}
 {-# language UndecidableInstances #-}
 module VPF.Util.Vinyl
-  ( ElFieldStore(..)
+  (
+  -- Store instances for Rec f
+    ElFieldStore(..)
   , VinylStore(..)
+
+  -- type-level polymorphic field indexers
   , FieldSpec
   , NameSpec
   , InferFieldKind
   , MonoFieldSpec
+
+  -- (strictly) monotone index sequences
   , IncSeq
   , DecSeq
   , Monotone
-  , RecSubseq(..)
+
+  -- ss is subsequence of rs if RImage ss rs is strictly monotone
+  , RecSubseq
   , RSubseq
   , rsubseq_
   , rsubseq
+
+  -- special case: if RSubseq ss '[] rs rs', we can split rs into ss and rs'
   , RecQuotient
   , RQuotient
   , rquotient
   , rquotientSplit
   , rquotientSplit'
+
+  -- type-changing rsubset-related lenses
   , over_rsubset
   , rsubset_
   , rsubset'
   , rreordered
+
+  -- field renaming
   , rrename
   , renameField
   , renameFieldTo
@@ -50,6 +64,8 @@ import Data.Vinyl.TypeLevel
 
 import Frames.Melt (RDeleteAll)
 
+
+-- Store instances for Rec f
 
 newtype ElFieldStore rs = ElFieldStore (ElField rs)
 newtype VinylStore record f rs = VinylStore (record f rs)
@@ -83,6 +99,7 @@ instance (Store (f r), Store (VinylStore Rec f rs)) => Store (VinylStore Rec f (
       Store.poke (VinylStore rs)
 
 
+-- type-level polymorphic field indexers
 
 type family ProjField (ki :: Type) (kr :: Type) (rs :: [(Symbol, Type)]) (i :: ki) :: kr where
   ProjField (Symbol, Type) (Symbol, Type)  rs  '(s, a)   = '(s, a)
@@ -112,46 +129,7 @@ type instance ProjName (Symbol, Type) '(s, a) = s
 type NameSpec (i :: ki) s = ProjName ki i ~ s
 
 
-type family IfEmpty (xs :: [k1]) (a :: k) (b :: k) :: k where
-  IfEmpty '[]       a b = a
-  IfEmpty (x ': xs) a b = b
-
-
-over_rsubset :: forall ss ss' rs f.
-             ( ss <: rs
-             , RDeleteAll ss rs <: rs
-             , ss ++ RDeleteAll ss rs :~: rs
-             )
-             => (Rec f ss -> Rec f ss')
-             -> Rec f rs
-             -> Rec f (ss' ++ RDeleteAll ss rs)
-over_rsubset f rec =
-    f (rcast @ss rec) <+> rcast @(RDeleteAll ss rs) rec
-{-# inline over_rsubset #-}
-
-
-rsubset_ :: forall (ss :: [(Symbol, Type)]) ss' rs f.
-         ( ss <: rs
-         , RDeleteAll ss rs <: rs
-         , ss ++ RDeleteAll ss rs :~: rs
-         )
-         => Setter (Rec f rs) (Rec f (ss' ++ RDeleteAll ss rs))
-                   (Rec f ss) (Rec f ss')
-rsubset_ = sets over_rsubset
-{-# inline rsubset_ #-}
-
-
-rsubset' :: forall is ss ss' rs f.
-         ( FieldSpec rs is ss
-         , ss <: rs
-         , RDeleteAll ss rs <: rs
-         , ss ++ RDeleteAll ss rs :~: rs
-         )
-         => Setter (Rec f rs) (Rec f (ss' ++ RDeleteAll ss rs))
-                   (Rec f ss) (Rec f ss')
-rsubset' = rsubset_
-{-# inline rsubset' #-}
-
+-- (strictly) monotone Nat lists
 
 type family IncSeq is = dec_is | dec_is -> is where
   IncSeq '[] = '[]
@@ -160,7 +138,6 @@ type family IncSeq is = dec_is | dec_is -> is where
 type DecSeq is dec_is = IncSeq dec_is ~ is
 
 
--- strictly monotone
 class Monotone (is :: [Nat])
 
 instance Monotone '[]
@@ -168,6 +145,7 @@ instance (DecSeq is' dec_is', Monotone dec_is') => Monotone (Z ': is')
 instance (DecSeq is' dec_is', Monotone (dec_i ': dec_is')) => Monotone (S dec_i ': is')
 
 
+-- field subsequences (different from subsets)
 
 class (Monotone is, is ~ RImage ss rs) => RecSubseq rec f ss ss' rs rs' (is :: [Nat])
     | is rs -> ss
@@ -176,6 +154,11 @@ class (Monotone is, is ~ RImage ss rs) => RecSubseq rec f ss ss' rs rs' (is :: [
     where
   rsubseqC :: Lens (rec f rs) (rec f rs') (rec f ss) (rec f ss')
 
+  -- Isomorphism when ss' ~ '[]: splitting rs into ss and rs'
+  --  view rsubseqC :: rs -> ss
+  --  set rsubseqC RNil :: rs -> rs'
+  --  view (rsubseqSplitC Refl) = view rsubseqC &&& set rsubseqC RNil
+  --  rs :~: ss ++ rs'
   rsubseqSplitC :: ss' E.:~: '[] -> Iso' (rec f rs) (rec f ss, rec f rs')
 
 
@@ -208,9 +191,10 @@ restore join = fmap (uncurry join) . getCompose
 
 instance (rs ~ rs') => RecSubseq Rec f '[] '[] rs rs' '[] where
   rsubseqC f rs = fmap (\RNil -> rs) (f RNil)
+  {-# inline rsubseqC #-}
 
   rsubseqSplitC _ = iso (\rs -> (RNil, rs)) (\(RNil, rs) -> rs)
-  {-# inline rsubseqC #-}
+  {-# inline rsubseqSplitC #-}
 
 
 instance
@@ -227,15 +211,6 @@ instance
 
 
 -- delete ss
-
--- NOTE:
---  view rsubseqC :: rs -> ss
---  ker (view rsubseqC) ~ rs'
-
---  set rsubseqC RNil :: rs -> rs'
---  ker (set rsubseqC RNil) ~ ss
-
--- (ss, rs') -> rs
 
 instance
     ( RecSubseq Rec f ss '[] rs rs' dec_is'
@@ -285,22 +260,16 @@ instance
       (r :&) <$> rsubseqC f rs
   {-# inline rsubseqC #-}
 
-  -- rsubseqSplitC :: (Profunctor p, Functor g)
-  --               => p (Rec f ss, Rec f (r' ': rs')) (g (Rec f ss, Rec f (r' ': rs')))
-  --               -> p (Rec f rs) (g (Rec f rs))
-
-  --     iso (\(r :& rs)      -> case view go rs of (ss, rs') -> (ss, r :& rs'))
-  --         (\(ss, r :& rs') -> r :& view (from go) (ss, rs'))
-
   rsubseqSplitC eq =
       withIso (rsubseqSplitC @Rec @f @ss eq) $ \split join ->
           iso (\(r :& rs)      -> second (r :&) (split rs))
               (\(ss, r :& rs') -> r :& join (ss, rs'))
+  {-# inline rsubseqSplitC #-}
 
 
+-- actual exported lenses
 
 type RSubseq ss ss' rs rs' = RecSubseq Rec ElField ss ss' rs rs' (RImage ss rs)
-
 
 rsubseq_ :: forall ss ss' rs rs' rec f.
          ( RecSubseq rec f ss ss' rs rs' (RImage ss rs)
@@ -318,6 +287,8 @@ rsubseq :: forall i ss ss' rs rs' rec f.
 rsubseq = rsubseq_
 {-# inline rsubseq #-}
 
+
+-- special case for quotients and splitting records
 
 type RecQuotient rec f sub rs q = RecSubseq rec f sub '[] rs q (RImage sub rs)
 type RQuotient sub rs q = RecQuotient Rec ElField sub rs q
@@ -355,10 +326,50 @@ rquotientSplit' = iso split unsplit'
 {-# inline rquotientSplit' #-}
 
 
+-- type-changing rsubset-related lenses
+
+over_rsubset :: forall ss ss' rs f.
+             ( ss <: rs
+             , RDeleteAll ss rs <: rs
+             , ss ++ RDeleteAll ss rs :~: rs
+             )
+             => (Rec f ss -> Rec f ss')
+             -> Rec f rs
+             -> Rec f (ss' ++ RDeleteAll ss rs)
+over_rsubset f rec =
+    f (rcast @ss rec) <+> rcast @(RDeleteAll ss rs) rec
+{-# inline over_rsubset #-}
+
+
+rsubset_ :: forall (ss :: [(Symbol, Type)]) ss' rs f.
+         ( ss <: rs
+         , RDeleteAll ss rs <: rs
+         , ss ++ RDeleteAll ss rs :~: rs
+         )
+         => Setter (Rec f rs) (Rec f (ss' ++ RDeleteAll ss rs))
+                   (Rec f ss) (Rec f ss')
+rsubset_ = sets over_rsubset
+{-# inline rsubset_ #-}
+
+
+rsubset' :: forall is ss ss' rs f.
+         ( FieldSpec rs is ss
+         , ss <: rs
+         , RDeleteAll ss rs <: rs
+         , ss ++ RDeleteAll ss rs :~: rs
+         )
+         => Setter (Rec f rs) (Rec f (ss' ++ RDeleteAll ss rs))
+                   (Rec f ss) (Rec f ss')
+rsubset' = rsubset_
+{-# inline rsubset' #-}
+
+
 rreordered :: forall rs' rs f. (rs :~: rs') => Iso' (Rec f rs) (Rec f rs')
 rreordered = iso rcast rcast
 {-# inline rreordered #-}
 
+
+-- field renaming
 
 rrename :: forall i i' s s' a r r' rs rs' record.
         ( FieldSpec rs i r
