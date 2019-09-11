@@ -79,13 +79,14 @@ default-extensions:
 ghc-options:
   - -Wall
   - -Wno-unticked-promoted-constructors
+  - -Wno-name-shadowing
+  - -Werror=missing-fields
+  - -Werror=missing-methods
 
 library:
   source-dirs: src
   ghc-options:
   - -fsimpl-tick-factor=150
-  - -Wall
-  - -Wno-unticked-promoted-constructors
 
 executables:
   vpf-class:

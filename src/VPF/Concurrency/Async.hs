@@ -25,21 +25,19 @@ module VPF.Concurrency.Async
   , (>-|>), (<|-<)
   , runAsyncEffect
   , asyncMapM
+  , asyncFoldMapM
   ) where
 
 import GHC.Stack (HasCallStack)
 
 -- import Data.Constraint ((\\))
 -- import Data.Constraint.Forall (Forall, inst)
-import Data.Functor (($>))
 import Data.Functor.Apply (Apply(..))
-import Data.List (foldl')
 import qualified Data.List.NonEmpty as NE
 import Data.Semigroup.Foldable (Foldable1, foldMap1)
 import Data.Semigroup.Traversable (Traversable1, traverse1)
 import Numeric.Natural (Natural)
 
-import Control.Applicative (Alternative, empty)
 import qualified Control.Concurrent.Async.Lifted as Async
 import qualified Control.Foldl as L
 import Control.Monad (void, (<=<), (<=<))
@@ -223,6 +221,7 @@ asyncMapM :: forall t a b m n r s.
           -> AsyncProducer b m r n (t s)
 asyncMapM fs ap =
     traverse1 (\f -> premapProducer (P.mapM f >->) ap) fs
+
 
 asyncFoldMapM :: forall t a b m n r s.
               (Foldable1 t, Monad m, MonadAsync n, Semigroup s)

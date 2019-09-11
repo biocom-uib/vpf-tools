@@ -11,11 +11,6 @@ module VPF.Concurrency.MPI where
 import GHC.Generics (Generic)
 
 import Control.Concurrent (yield)
-import qualified Control.Concurrent.Async.Lifted.Safe as Async
-
-import qualified Control.Concurrent.STM.TBQueue as STM
-import qualified Control.Concurrent.STM.TMVar   as STM
-import qualified Control.Monad.STM              as STM
 
 import Control.Monad ((>=>))
 import qualified Control.Monad.Catch as MC
@@ -24,9 +19,7 @@ import Control.Monad.IO.Class (MonadIO(..))
 import qualified Control.Distributed.MPI.Store  as MPI
 
 import Data.Function (fix)
-import Data.Functor (void)
 import Data.Store (Store)
-import Numeric.Natural (Natural)
 
 import Pipes (Producer, Pipe, Consumer, (>->))
 import qualified Pipes         as P
@@ -149,7 +142,7 @@ mpiWorkers :: (Enum tag, Enum tag', Functor f)
 mpiWorkers ranks tags comm = fmap (\rank -> mpiWorker rank tags comm) ranks
 
 
-workerToPipe :: forall a b m r. (PS.MonadSafe m) => Worker a b -> Pipe a b m ()
+workerToPipe :: forall a b m. (PS.MonadSafe m) => Worker a b -> Pipe a b m ()
 workerToPipe (Worker worker finalizer) =
     transform `PS.finally` liftIO finalizer
   where

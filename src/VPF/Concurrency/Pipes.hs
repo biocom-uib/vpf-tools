@@ -7,25 +7,16 @@ import qualified Control.Concurrent.Async.Lifted as Async
 import qualified Control.Concurrent.MVar        as MVar
 import qualified Control.Concurrent.STM.TBQueue as STM
 import qualified Control.Concurrent.STM.TMVar   as STM
-import qualified Control.Concurrent.STM.TVar    as STM
 import qualified Control.Monad.STM              as STM
 
-import Control.Lens (alaf, (%~))
-import Control.Monad ((<=<))
+import Control.Lens ((%~))
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Morph (hoist)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Base (MonadBase, liftBase)
-import Control.Monad.Trans.Control (MonadBaseControl, StM, liftBaseWith, restoreM)
+import Control.Monad.Trans.Control (MonadBaseControl, StM, restoreM)
 
 import Data.Function (fix)
-import qualified Data.List.NonEmpty as NE
-import Data.Monoid (Ap(..))
-import Data.Semigroup (First(..))
-import Data.Semigroup.Foldable (foldMap1)
-import Data.Semigroup.Traversable (Traversable1)
-import Data.Traversable (forM)
 import Numeric.Natural (Natural)
 
 import Pipes (Producer, Pipe, (>->))

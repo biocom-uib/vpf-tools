@@ -54,7 +54,7 @@ tokenizeRowWithMaxCols = iterBreak
       in (a, b')
 
     iterBreak :: Int -> Text -> [Text]
-    iterBreak       0 s = []
+    iterBreak       0 _ = []
     iterBreak maxCols s =
         case break s of
           ("", _) -> []

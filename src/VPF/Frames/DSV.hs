@@ -20,28 +20,26 @@ module VPF.Frames.DSV
   , defWriterOptions
   , produceFromFrame
   , pipeDSVLines
+  , produceDSVLinesFromFrame
   , writeDSV
   ) where
 
 import GHC.Generics (Generic)
-import GHC.TypeLits (Symbol, KnownSymbol, symbolVal)
+import GHC.TypeLits (KnownSymbol, symbolVal)
 
 import Control.Eff (Member, Lifted, lift, Eff)
 import Control.Eff.Exception (Exc, liftEither)
 import Control.Monad (when, (>=>))
 import Control.Exception (try)
 import Control.Monad.Catch (Exception, MonadThrow(throwM))
-import Control.Monad.IO.Class (MonadIO(liftIO))
+import Control.Monad.IO.Class (MonadIO)
 
-import Data.Char (isSpace)
-import Data.Kind (Type)
 import Data.List (intercalate)
 import Data.Proxy (Proxy(..))
 import Data.Store (Store)
-import Data.Tagged (Tagged(..), untag)
+import Data.Tagged (untag)
 import Data.Text (Text)
 import qualified Data.Text    as T
-import qualified Data.Text.IO as T
 import Data.Typeable (Typeable)
 
 import Data.Vinyl (ElField, RecMapMethod, RecordToList, rtraverse)

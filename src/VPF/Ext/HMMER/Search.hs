@@ -20,7 +20,6 @@ module VPF.Ext.HMMER.Search
 import GHC.Generics (Generic)
 
 import qualified Data.ByteString.Lazy as BL (toStrict)
-import Data.Function (fix)
 import Data.Store (Store)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
@@ -35,8 +34,6 @@ import VPF.Eff.Cmd
 import VPF.Formats
 import VPF.Ext.HMMER (HMMERConfig, resolveHMMERTool)
 import VPF.Ext.HMMER.Search.Cols (ProtSearchHitCols, ProtSearchHit)
-import VPF.Util.FS (resolveExecutable)
-
 
 
 data HMMSearchArgs = HMMSearchArgs

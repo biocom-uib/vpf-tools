@@ -18,15 +18,13 @@ import GHC.Generics (Generic)
 import GHC.Stack (HasCallStack)
 
 import Control.Lens (zoom)
-import Control.Monad.Catch (MonadThrow, throwM)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
+import Control.Monad.Trans.Except (runExceptT, throwE)
 
 import Data.Char (isAlpha)
 import Data.Store (Store)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Void
 
 import Pipes (Consumer, Pipe, Producer, runEffect, (>->))
 import qualified Pipes.Parse   as P
@@ -35,7 +33,6 @@ import qualified Pipes.Safe    as P
 
 import VPF.Formats
 import VPF.Util.FS (fileReader, fileWriter)
-
 
 
 data FastaEntry acid = FastaEntry Text [Text]
@@ -56,11 +53,13 @@ entryName (FastaEntry n _)
   | T.isPrefixOf (T.pack ">") n = T.tail n
   | otherwise                   = error "entryName: badly constructed FastaEntry"
 
-removeNameComments :: Text -> Text
+
+removeNameComments :: HasCallStack => Text -> Text
 removeNameComments nameText =
     case T.splitOn (T.pack " #") nameText of
       [name]          -> T.strip name
       (name:_comment) -> T.strip name
+      []              -> error "removeNameComments: bad name line"
 
 
 class AcidBaseLength acid where
@@ -78,7 +77,6 @@ instance AcidBaseLength Aminoacid where
 
 entrySeqNumBases :: forall acid. AcidBaseLength acid => FastaEntry acid -> Int
 entrySeqNumBases (FastaEntry _ seq) = sum (map (seqNumBases @acid) seq)
-
 
 
 fastaFileReader :: forall acid m. P.MonadSafe m
