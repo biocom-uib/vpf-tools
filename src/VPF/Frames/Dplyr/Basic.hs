@@ -1,10 +1,11 @@
 {-# language AllowAmbiguousTypes #-}
+{-# language TypeSynonymInstances #-}
 {-# language UndecidableInstances #-}
 module VPF.Frames.Dplyr.Basic where
 
 import GHC.TypeLits (KnownSymbol)
 
-import Prelude hiding (filter)
+import Prelude hiding (drop, filter, zipWith)
 
 import qualified Control.Lens as L
 import Control.Lens.Type
@@ -12,14 +13,13 @@ import Control.Lens.Type
 import qualified Data.Vector         as Vec
 import qualified Data.Vector.Generic as GVec
 
-import qualified Data.Vinyl           as V
-import qualified Data.Vinyl.TypeLevel as V
+import qualified Data.Vinyl as V
 
-import Frames (Frame(..), FrameRec, Record)
-
+import VPF.Frames.Classes (RMonoid(..), RSingleton(..))
 import VPF.Frames.Dplyr.Ops
+import VPF.Frames.Dplyr.Row
 import VPF.Frames.InCore (rowsVec)
-import VPF.Util.Vinyl (FieldSpec, NameSpec, RSubseq, rsubseq, rrename)
+import VPF.Frames.Types
 
 
 cat :: a -> a
@@ -50,41 +50,37 @@ df !@ idx = Frame
 {-# inline (!@) #-}
 
 
-field :: forall i s a b col col' cols cols'.
-      ( FieldSpec cols i col
-      , col ~ '(s ,a)
-      , col' ~ '(s, b)
-      , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
-      )
-      => Lens (Record cols) (Record cols') a b
-field = V.rlens' @col . V.rfield
-{-# inline field #-}
-
-
-get :: forall i s a col cols.
-    ( FieldSpec cols i col
-    , V.RElem col cols (V.RIndex col cols)
-    , col ~ '(s, a)
-    )
-    => Record cols
-    -> a
-get = L.view (field @col)
-{-# inline get #-}
-
-
-col :: forall i s a b col col' cols cols'.
+col :: forall i s a b col col' cols cols' rec.
     ( FieldSpec cols i col
     , col ~ '(s, a)
     , col' ~ '(s, b)
-    , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
+    , ReplField rec col col' cols cols'
     )
-    => Setter (FrameRec cols) (FrameRec cols') a b
+    => Setter (FrameFields rec cols) (FrameFields rec cols') a b
 col = rows . field @col
 {-# inline col #-}
 
 
-singleField :: forall i s a. (NameSpec i s, KnownSymbol s) => a -> Record '[ '(s, a)]
-singleField a = V.Field a V.:& V.RNil
+cols :: forall i subs subs' cols cols' rec.
+     ( FieldSpec cols i subs
+     , ReplFields rec subs subs' cols cols'
+     )
+     => Setter (FrameFields rec cols) (FrameFields rec cols')
+               (Fields rec subs)      (Fields rec subs')
+cols = rows . rsubseq @subs
+{-# inline cols #-}
+
+
+only :: forall i s a b rec. (NameSpec i s, KnownSymbol s, RSingleton rec)
+     => Iso (Fields rec '[ '(s, a)]) (Fields rec '[ '(s, b)]) a b
+only = rsingleton . elfield
+{-# inline only #-}
+
+
+singleField :: forall i s a rec. (NameSpec i s, KnownSymbol s, RSingleton rec)
+            => a
+            -> Fields rec '[ '(s, a)]
+singleField = L.review (only @i)
 {-# inline singleField #-}
 
 
@@ -99,8 +95,8 @@ frameProductWith f df1 df2 = Frame
     , frameRow = \i -> f (frameRow df1 (i `div` n2)) (frameRow df2 (i `mod` n2))
     }
   where
-    n1 = frameLength df1
-    n2 = frameLength df2
+    !n1 = frameLength df1
+    !n2 = frameLength df2
 {-# inline frameProductWith #-}
 
 
@@ -109,109 +105,141 @@ firstN n df = df { frameLength = min (frameLength df) n }
 {-# inline firstN #-}
 
 
-select :: forall is ss rs.
+drop :: forall i ss rs q rec.
+     ( FieldSpec rs i ss
+     , RecQuotient rec ss rs q
+     , RMonoid rec
+     )
+     => FrameFields rec rs
+     -> FrameFields rec q
+drop = fmap (rquotient @ss)
+{-# inline drop #-}
+
+
+select :: forall is ss rs rec.
        ( FieldSpec rs is ss
-       , ss V.<: rs
+       , FieldSubset rec ss rs
        )
-       => FrameRec rs
-       -> FrameRec ss
+       => FrameFields rec rs
+       -> FrameFields rec ss
 select = fmap V.rcast
 {-# inline select #-}
 
 
-select_ :: forall ss rs. (ss V.<: rs) => FrameRec rs -> FrameRec ss
+select_ :: forall ss rs rec. FieldSubset rec ss rs
+        => FrameFields rec rs
+        -> FrameFields rec ss
 select_ = fmap V.rcast
 {-# inline select_ #-}
 
 
-mutate :: (Record cols -> Record new) -> FrameRec cols -> FrameRec (new V.++ cols)
-mutate f = fmap (\row -> f row V.<+> row)
+mutate :: RMonoid rec
+       => (Fields rec cols -> Fields rec new)
+       -> FrameFields rec cols
+       -> FrameFields rec (new ++ cols)
+mutate f = fmap (\row -> rappend (f row) row)
 {-# inline mutate #-}
 
 
-mutate1 :: forall i s a cols.
+mutate1 :: forall i s a cols rec.
         ( NameSpec i s
         , KnownSymbol s
+        , RMonoid rec
+        , RSingleton rec
         )
-        => (Record cols -> a)
-        -> FrameRec cols
-        -> FrameRec ('(s, a) ': cols)
-mutate1 f = fmap (\row -> V.Field (f row) V.:& row)
+        => (Fields rec cols -> a)
+        -> FrameFields rec cols
+        -> FrameFields rec ('(s, a) ': cols)
+mutate1 f = fmap (\row -> rcons (V.Field (f row)) row)
 {-# inline mutate1 #-}
 
 
-replace :: forall i s a b col col' cols cols'.
+replace :: forall i s a b col col' cols cols' rec.
         ( FieldSpec cols i col
         , col ~ '(s, a)
         , col' ~ '(s, b)
-        , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
+        , ReplField rec col col' cols cols'
         )
-       => (Record cols -> b)
-       -> FrameRec cols
-       -> FrameRec cols'
-replace f = rows %~ \row -> L.set (field @col) (f row) row
+       => (Fields rec cols -> b)
+       -> FrameFields rec cols
+       -> FrameFields rec cols'
+replace f = rows . into (field @col) %~ f
 {-# inline replace #-}
 
 
-filter :: (Record cols -> Bool) -> FrameRec cols -> FrameRec cols
+filter :: (row -> Bool) -> Frame row -> Frame row
 filter f = rowsVec %~ Vec.filter f
 {-# inline filter #-}
 
 
-dropNothings :: forall i s a col col' cols cols'.
+dropNothings :: forall i s a col col' cols cols' rec.
              ( FieldSpec cols i col
              , KnownSymbol s
              , col ~ '(s, Maybe a)
              , col' ~ '(s, a)
-             , V.RElem col cols (V.RIndex col cols)
-             , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
+             , GetField rec col cols
+             , ReplField rec col col' cols cols'
              )
-             => FrameRec cols
-             -> FrameRec cols'
+             => FrameFields rec cols
+             -> FrameFields rec cols'
 dropNothings = rowsVec %~ Vec.mapMaybe (L.sequenceAOf (field @col))
 {-# inline dropNothings #-}
 
 
-unnest :: forall i s a col col' cols cols'.
+unnest :: forall i s a col col' cols cols' rec.
        ( FieldSpec cols i col
        , col ~ '(s, [a])
        , col' ~ '(s, a)
-       , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
+       , ReplField rec col col' cols cols'
        )
-       => FrameRec cols
-       -> FrameRec cols'
+       => FrameFields rec cols
+       -> FrameFields rec cols'
 unnest =
     rowsVec %~ Vec.concatMap (Vec.fromList . L.sequenceAOf (field @col))
 {-# inline unnest #-}
 
 
-unzipWith :: forall i s a col cols col's cols'.
-          ( FieldSpec cols i col
-          , col ~ '(s, a)
-          , RSubseq '[col] col's cols cols'
-          )
-          => (a -> Record col's)
-          -> FrameRec cols
-          -> FrameRec cols'
-unzipWith f = rows . rsubseq @col %~ f . get @col
-{-# inline unzipWith #-}
+unnestFrame :: forall i s col col's cols cols' rec.
+            ( FieldSpec cols i col
+            , col ~ '(s, FrameFields rec col's)
+            , GetField rec col cols
+            , ReplFields rec '[col] col's cols cols'
+            , RSingleton rec
+            )
+            => FrameFields rec cols
+            -> FrameFields rec cols'
+unnestFrame =
+    rowsVec %~ Vec.concatMap (L.view rowsVec . factorFrameOut)
+  where
+    factorFrameOut :: Fields rec cols -> FrameFields rec cols'
+    factorFrameOut = L.traverseOf (rsubseq @col) (V.getField . L.view rsingleton)
 
 
-rename :: forall i i' s s' a col col' cols cols'.
+using :: L.Profunctor p => L.Getting a s a -> Optic p f s b a b
+using ss' = L.lmap (L.view ss')
+
+away :: (L.Profunctor p, Functor f) => L.AReview t b -> Optic p f s t s b
+away = L.rmap . fmap . L.review
+
+into :: LensLike f s t a b -> LensLike f s t s b
+into l f s = l (const (f s)) s
+
+
+rename :: forall i i' s s' a col col' cols cols' rec.
         ( FieldSpec cols i col
         , NameSpec i' s'
         , col ~ '(s, a)
         , col' ~ '(s', a)
         , KnownSymbol s'
-        , V.RecElem V.Rec col col' cols cols' (V.RIndex col cols)
+        , ReplField rec col col' cols cols'
         )
-        => FrameRec cols
-        -> FrameRec cols'
+        => FrameFields rec cols
+        -> FrameFields rec cols'
 rename = fmap (rrename @i @i')
 {-# inline rename #-}
 
 
-reorder :: (rs' V.:~: rs) => FrameRec rs -> FrameRec rs'
+reorder :: EquivFields rec rs rs' => FrameFields rec rs -> FrameFields rec rs'
 reorder = fmap V.rcast
 {-# inline reorder #-}
 

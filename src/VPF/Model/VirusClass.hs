@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fconstraint-solver-iterations=20 #-}
 {-# language ApplicativeDo #-}
 {-# language BlockArguments #-}
 {-# language OverloadedLabels #-}
@@ -8,7 +9,7 @@ module VPF.Model.VirusClass where
 import Control.Eff
 import Control.Eff.Reader.Strict (Reader, reader)
 import Control.Eff.Exception (Exc, liftEither)
-import Control.Lens (folded, view, sumOf, (^.), (%~))
+import Control.Lens (folded, view, to, sumOf, (^.), (%~))
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Morph (hoist)
 import Control.Monad.Trans.Control (StM)
@@ -23,8 +24,6 @@ import Data.Text (Text)
 
 import qualified Data.Vinyl           as V
 import qualified Data.Vinyl.TypeLevel as V
-
-import Frames (FrameRec, Record)
 
 import Pipes (Pipe, Producer, (>->))
 import qualified Pipes         as P
@@ -43,7 +42,7 @@ import qualified VPF.Ext.HMMER.TableFormat as Tbl
 
 import VPF.Formats
 import VPF.Frames.Dplyr.Ops
-import VPF.Frames.TaggedField
+import VPF.Frames.Types
 import qualified VPF.Frames.Dplyr  as F
 import qualified VPF.Frames.DSV    as DSV
 import qualified VPF.Frames.InCore as F
@@ -56,13 +55,15 @@ import qualified VPF.Util.Fasta as FA
 import qualified VPF.Util.FS    as FS
 
 
+type Pipeline m =
+    Pipe [FA.FastaEntry Nucleotide]
+         (StM m (FrameRec '[M.VirusName, M.ModelName, M.ProteinHitScore]))
+         (P.SafeT IO)
+         ()
+
 data ConcurrencyOpts m = ConcurrencyOpts
     { fastaChunkSize  :: Int
-    , pipelineWorkers :: NE.NonEmpty (
-                          Pipe [FA.FastaEntry Nucleotide]
-                               (StM m (FrameRec '[M.VirusName, M.ModelName, M.ProteinHitScore]))
-                               (P.SafeT IO)
-                               ())
+    , pipelineWorkers :: NE.NonEmpty (Pipeline m)
     }
 
 
@@ -145,7 +146,7 @@ processHMMOut aminoacidsFile hitsFile = do
           , #k_base_size  =: fromIntegral (FA.entrySeqNumBases entry) / 1000
           )
 
-    loadProteinSizes :: Eff r (F.GroupedFrameRec (Field M.ProteinName) '[M.KBaseSize])
+    loadProteinSizes :: Eff r (GroupedFrameRec (Field M.ProteinName) '[M.KBaseSize])
     loadProteinSizes = do
         (colVecs, errs) <- lift $ P.runSafeT $
             L.impurely P.foldM' (F.colVecsFoldM 128) $
@@ -153,56 +154,51 @@ processHMMOut aminoacidsFile hitsFile = do
                   >-> P.mapM (\entry -> return $! fastaEntryToRow entry)
 
         liftEither errs
-        return $! F.fromColVecs colVecs ^. F.reindexed' @"protein_name"
+        return $! F.reindex' @"protein_name" (F.fromColVecs colVecs)
 
 
-    aggregateHits :: F.GroupedFrameRec (Field M.ProteinName) '[M.KBaseSize]
+    aggregateHits :: GroupedFrameRec (Field M.ProteinName) '[M.KBaseSize]
                   -> FrameRec '[M.VirusName, HMM.TargetName, HMM.QueryName, HMM.SequenceScore]
                   -> FrameRec '[M.VirusName, M.ModelName, M.ProteinHitScore]
     aggregateHits proteinSizes = F.cat
-        |. F.fixed @"virus_name" %~ do
-             F.cat
-               |. F.grouped @"target_name" %~ F.top @(F.Desc "sequence_score") 1
-               |. F.reindex' @"target_name"
-               |. F.renameIndexTo @"protein_name"
-               |. F.innerJoin proteinSizes
-               |. F.dropIndex
-               |. F.rowwise do \row -> row & HMM.sequenceScore %~ (/ row^.M.kBaseSize)
-               |. F.summarizing @"query_name" %~ do
-                    F.singleField @"protein_hit_score" . sumOf (folded . HMM.sequenceScore)
-        |. F.rename @"query_name" @"model_name"
+        |. F.reindexed @"virus_name" . F.groups %~ do
+            F.cat
+              |. F.reindexed @"target_name" %~ do
+                  F.cat
+                    |. F.renameIndexTo @"protein_name"
+                    |. F.groups %~ F.top @(F.Desc "sequence_score") 1
+                    |. F.innerJoin proteinSizes
+
+              |. F.summarizing @"query_name" %~ do
+                    let normalizedScore row = F.get @"sequence_score" row / F.get @"k_base_size" row
+
+                    F.singleField @"protein_hit_score" . sumOf (folded . to normalizedScore)
+
+              |. F.rename @"query_name" @"model_name"
         |. F.copySoA
 
 
-predictMembership :: F.GroupedFrameRec (Field M.VirusName)
-                                       '[Cls.ClassObj, M.ProteinHitScore]
-                  -> F.GroupedFrameRec (Field M.VirusName)
-                                       '[Cls.ClassName, M.MembershipRatio, M.VirusHitScore]
+predictMembership :: GroupedFrameRec (Field M.VirusName)
+                                     '[Cls.ClassObj, M.ProteinHitScore]
+                  -> GroupedFrameRec (Field M.VirusName)
+                                     '[Cls.ClassName, M.MembershipRatio, M.VirusHitScore]
 predictMembership = F.groups %~ do
     F.cat
-      |. F.col @"class_obj" %~ inspectClass
-      |. F.unnest @"class_obj"
-
-      |. F.unzipWith @"class_obj" do
-          \(name, prop) -> V.fieldRec (#class_name =: name, #class_prop =: prop)
+      |. F.col @"class_obj" %~ Cls.unnestClassObj
+      |. F.unnestFrame @"class_obj"
 
       |. F.summarizing @"class_name" %~ do
-          F.cat
-            |. F.rowwise do \row -> F.get @"protein_hit_score" row * F.get @"class_prop" row
-            |. F.singleField @"protein_hit_score" . sum
+            let products row = F.get @"class_percent" row * F.get @"protein_hit_score" row / 100
 
-      |. \df ->
-          let
-            totalScore = sumOf (folded . M.proteinHitScore) df
-          in
+            F.singleField @"protein_hit_score" . sumOf (folded . to products)
+
+      |. \df -> do
+            let totalScore = sumOf (folded . M.proteinHitScore) df
+
             df & F.cat
               |. F.mutate1 @"virus_hit_score"  (const totalScore)
               |. F.mutate1 @"membership_ratio" (\row -> row^.M.proteinHitScore / totalScore)
-              |. F.select_
-  where
-    inspectClass :: Cls.Class -> [(Text, Double)]
-    inspectClass (Cls.HomogClass name cat) = [(name, (5 - fromIntegral cat) / 4)]
-    inspectClass (Cls.NonHomogClass _)     = [("patata", 52.43923/100)]
+              |. F.select @'["class_name", "membership_ratio", "virus_hit_score"]
 
 
 syncPipeline ::
@@ -226,7 +222,6 @@ syncPipeline wd vpfsFile genomes = do
 asyncPipeline :: forall r.
               ( LiftedBase IO r
               , '[ Reader ModelConfig
-                 , Exc DSV.ParseError
                  , Exc FA.ParseError
                  ] <:: r
               )
@@ -259,7 +254,6 @@ asyncPipeline genomes concOpts = do
     nworkers = fromIntegral $ length (pipelineWorkers concOpts)
 
 
-
 runModel :: forall r.
          ( LiftedBase IO r
          , '[ Reader ModelConfig
@@ -274,13 +268,13 @@ runModel (GivenGenomes genomesFile concOpts) = asyncPipeline genomes concOpts
     genomes = FA.fastaFileReader genomesFile
 
 
-type ClassifiedCols rs = rs V.++ V.RDelete M.ModelName ClassificationCols
-type RawClassifiedCols rs = rs V.++ V.RDelete M.ModelName RawClassificationCols
+type ClassifiedCols rs = rs ++ V.RDelete M.ModelName ClassificationCols
+type RawClassifiedCols rs = rs ++ V.RDelete M.ModelName RawClassificationCols
 
 
-appendClassification :: forall rs. V.RElem M.ModelName rs (V.RIndex M.ModelName rs)
+appendClassification :: forall rs. GetField Rec M.ModelName rs
                      => FrameRec ClassificationCols
                      -> FrameRec rs
                      -> FrameRec (ClassifiedCols rs)
 appendClassification cls =
-    F.reindexed @M.ModelName %~ F.innerJoin (F.reindex' @M.ModelName cls)
+    F.reindexed_ @M.ModelName %~ F.innerJoin (F.reindex' @M.ModelName cls)

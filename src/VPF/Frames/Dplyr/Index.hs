@@ -1,4 +1,6 @@
 {-# language AllowAmbiguousTypes #-}
+{-# language DeriveFunctor #-}
+{-# language DeriveFoldable #-}
 module VPF.Frames.Dplyr.Index where
 
 import qualified Control.Lens as L
@@ -9,21 +11,16 @@ import Data.Coerce (coerce)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 
-import qualified Data.Vinyl           as V
 import qualified Data.Vinyl.TypeLevel as V
-
-import Frames (Frame(..), FrameRec, Record)
 
 import Unsafe.Coerce (unsafeCoerce)
 
+import VPF.Frames.Classes
 import VPF.Frames.Dplyr.Basic
 import VPF.Frames.Dplyr.Group
+import VPF.Frames.Dplyr.Row
 import VPF.Frames.TaggedField
-import VPF.Util.Vinyl (MonoFieldSpec, RQuotient, rquotient, rquotientSplit)
-
-
-newtype GroupedFrame k row = GroupedFrame { getGroups :: Map k (Frame row) }
-type GroupedFrameRec k cols = GroupedFrame k (Record cols)
+import VPF.Frames.Types
 
 
 groups :: IndexedTraversal k
@@ -38,24 +35,25 @@ reindexBy key = GroupedFrame . Map.fromAscList . splitSortOn key
 {-# inline reindexBy #-}
 
 
-reindex :: forall i r cols.
-        ( MonoFieldSpec cols i r
-        , GroupingKey r cols
+reindex :: forall i keys cols rec.
+        ( FieldSpec cols i keys
+        , GroupingKey rec keys cols
         )
-        => FrameRec cols
-        -> GroupedFrameRec (KeyType r) cols
-reindex = reindexBy (\row -> (getKey @r row, row))
+        => FrameFields rec cols
+        -> GroupedFrameFields rec (KeyType keys rec) cols
+reindex = reindexBy (\row -> (getKey @keys row, row))
 {-# inline reindex #-}
 
 
-reindex' :: forall i r cols quot_cols.
-         ( MonoFieldSpec cols i r
-         , GroupingKey r cols
-         , RQuotient (KeyCols r) cols quot_cols
+reindex' :: forall i keys cols quot_cols rec.
+         ( FieldSpec cols i keys
+         , GroupingKey rec keys cols
+         , RecQuotient rec keys cols quot_cols
+         , RMonoid rec
          )
-         => FrameRec cols
-         -> GroupedFrameRec (KeyType r) quot_cols
-reindex' = reindexBy (\row -> (getKey @r row, rquotient @(KeyCols r) row))
+         => FrameFields rec cols
+         -> GroupedFrameFields rec (KeyType keys rec) quot_cols
+reindex' = reindexBy (\row -> (getKey @keys row, rquotient @keys row))
 {-# inline reindex' #-}
 
 
@@ -65,7 +63,10 @@ mapIndexMonotonic f = GroupedFrame . Map.mapKeysMonotonic f . getGroups
 
 
 renameIndexTo :: forall s' s a row. GroupedFrame (Tagged s a) row -> GroupedFrame (Tagged s' a) row
-renameIndexTo = unsafeCoerce
+renameIndexTo = coerce renameMap
+  where
+    renameMap :: Map (Tagged s a) (Frame row) -> Map (Tagged s' a) (Frame row)
+    renameMap = unsafeCoerce
 {-# inline renameIndexTo #-}
 
 
@@ -79,53 +80,55 @@ resetIndexWith f = L.ifoldMapOf groups (fmap . f)
 {-# inline resetIndexWith #-}
 
 
-resetIndex :: GroupedFrameRec (Record as) bs  -> FrameRec (as V.++ bs)
-resetIndex = resetIndexWith (V.<+>)
+resetIndex :: forall keys rec cols.
+           (RMonoid rec, RSingleton rec, AsKey keys, KeyRecordCtx keys rec)
+           => GroupedFrameFields rec (KeyType keys rec) cols
+           -> FrameFields rec (keys ++ cols)
+resetIndex = resetIndexWith (\k -> let keyRec = k^.keyRecord @keys in rappend keyRec)
 {-# inline resetIndex #-}
 
 
-resetIndex1 :: V.KnownField col => GroupedFrameRec (Field col) cols  -> FrameRec (col ': cols)
-resetIndex1 = resetIndexWith (\k -> let elf = elfield k in (elf V.:&))
-{-# inline resetIndex1 #-}
-
-
 -- NOTE: not a lawful iso because it sorts the frame
-reindexed :: forall i r cols k' cols'.
-          ( MonoFieldSpec cols i r
-          , GroupingKey r cols
-          )
-          => Iso (FrameRec cols)                    (FrameRec cols')
-                 (GroupedFrameRec (KeyType r) cols) (GroupedFrameRec k' cols')
-reindexed = L.iso (reindex @i) dropIndex
-{-# inline reindexed #-}
-
-
--- NOTE: not a lawful iso because it sorts the frame
-reindexed' :: forall i r cols quot_cols cols' quot_cols'.
-           ( MonoFieldSpec cols i r
-           , GroupingKey r cols
-           , V.RImage (KeyCols r) cols ~ V.RImage (KeyCols r) cols'
-           , RQuotient (KeyCols r) cols  quot_cols
-           , RQuotient (KeyCols r) cols' quot_cols'
+reindexed_ :: forall i keys cols k' row' rec.
+           ( FieldSpec cols i keys
+           , GroupingKey rec keys cols
            )
-           => Iso (FrameRec cols)
-                  (FrameRec cols')
-                  (GroupedFrameRec (KeyType r) quot_cols)
-                  (GroupedFrameRec (KeyType r) quot_cols')
-reindexed' = L.iso (reindexBy split) (resetIndexWith unsplit')
+           => Iso (FrameFields rec cols)
+                  (Frame row')
+                  (GroupedFrameFields rec (KeyType keys rec) cols)
+                  (GroupedFrame k' row')
+reindexed_ = L.iso (reindex @i) dropIndex
+{-# inline reindexed_ #-}
+
+
+-- NOTE: not a lawful iso because it sorts the frame
+reindexed :: forall i keys keys' cols quot_cols cols' quot_cols' rec rec'.
+          ( FieldSpec cols i keys
+          , GroupingKey rec keys cols
+          , AsKey keys'
+          , KeyRecordCtx keys' rec'
+          , V.RImage keys cols ~ V.RImage keys' cols'
+          , RecQuotient rec  keys  cols  quot_cols
+          , RecQuotient rec' keys' cols' quot_cols'
+          )
+          => Iso (FrameFields rec cols)
+                 (FrameFields rec' cols')
+                 (GroupedFrameFields rec  (KeyType keys rec)   quot_cols)
+                 (GroupedFrameFields rec' (KeyType keys' rec') quot_cols')
+reindexed = L.iso (reindexBy split) (resetIndexWith unsplit')
   where
-    split :: Record cols -> (KeyType r, Record quot_cols)
+    split :: Fields rec cols -> (KeyType keys rec, Fields rec quot_cols)
     split row =
-      let (!recKey, !row') = row ^. rquotientSplit @(KeyCols r)
-          !k               = recKey ^. L.from (keyRecord @r)
+      let (!recKey, !row') = row ^. rquotientSplit @keys
+          !k               = keyRecord @keys # recKey
       in  (k, row')
 
-    unsplit' :: KeyType r -> Record quot_cols' -> Record cols'
+    unsplit' :: KeyType keys' rec' -> Fields rec' quot_cols' -> Fields rec' cols'
     unsplit' k =
-      let !recKey = k ^. keyRecord @r
-          !merge  = L.view (L.from (rquotientSplit @(KeyCols r)))
+      let !recKey = k ^. keyRecord @keys'
+          !merge  = L.review (rquotientSplit @keys')
       in  \row' -> merge (recKey, row')
-{-# inline reindexed' #-}
+{-# inline reindexed #-}
 
 
 innerJoinWith :: Ord k
@@ -137,10 +140,10 @@ innerJoinWith f = coerce (Map.intersectionWith (frameProductWith f))
 {-# inline innerJoinWith #-}
 
 
-innerJoin :: forall cols1 cols2 k. Ord k
-          => GroupedFrameRec k cols1
-          -> GroupedFrameRec k cols2
-          -> GroupedFrameRec k (cols2 V.++ cols1)
-innerJoin = innerJoinWith (\row1 row2 -> row2 V.<+> row1)
+innerJoin :: (Ord k, RMonoid rec)
+          => GroupedFrameFields rec k cols1
+          -> GroupedFrameFields rec k cols2
+          -> GroupedFrameFields rec k (cols2 ++ cols1)
+innerJoin = innerJoinWith (\row1 row2 -> rappend row2 row1)
     -- flipped for partial application in |. chains
 {-# inline innerJoin #-}

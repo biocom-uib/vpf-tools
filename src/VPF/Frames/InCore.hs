@@ -3,8 +3,12 @@
 {-# language UndecidableInstances #-}
 module VPF.Frames.InCore
   (
+  -- Rec f serialization
+    ElFieldStore(..)
+  , VinylStore(..)
+
   -- AoS
-    toRowsVecN
+  , toRowsVecN
   , toRowsVec
   , fromRowsVec
   , rowsVec
@@ -47,17 +51,56 @@ import Control.Monad.ST (runST)
 
 import Data.Coerce (coerce)
 import Data.Foldable (toList)
+import Data.Functor.Contravariant (contramap)
 import Data.Proxy (Proxy(..))
-import Data.Store (Store)
+import Data.Store (Store, Size(..))
+import qualified Data.Store as Store
 import qualified Data.Vector as Vec
 
-import qualified Data.Vinyl as V
+import qualified Data.Vinyl           as V
+import qualified Data.Vinyl.TypeLevel as V
 
-import Frames (Frame(..), FrameRec, Record)
 import qualified Frames.InCore as IC
 
-import VPF.Util.Vinyl (VinylStore(..), ElFieldStore(..))
+import VPF.Frames.Types
 
+
+-- Store instances for Rec f
+
+newtype ElFieldStore rs = ElFieldStore (V.ElField rs)
+newtype VinylStore record f rs = VinylStore (record f rs)
+
+
+instance (V.KnownField rs, Store (V.Snd rs)) => Store (ElFieldStore rs) where
+    size = contramap (\(ElFieldStore (V.Field a)) -> a)  Store.size
+    peek = fmap (ElFieldStore . V.Field) Store.peek
+    poke (ElFieldStore (V.Field a)) = Store.poke a
+
+instance Store (VinylStore Rec f '[]) where
+    size = ConstSize 0
+    peek = return (VinylStore RNil)
+    poke _ = return ()
+
+
+instance (Store (f r), Store (VinylStore Rec f rs)) => Store (VinylStore Rec f (r ': rs)) where
+    size =
+        case (Store.size, Store.size) of
+          (VarSize f, VarSize g)     -> VarSize (\(VinylStore (r :& rs)) -> f r + g (VinylStore rs))
+          (VarSize f, ConstSize m)   -> VarSize (\(VinylStore (r :& _))  -> f r + m)
+          (ConstSize n, VarSize g)   -> VarSize (\(VinylStore (_ :& rs)) -> n + g (VinylStore rs))
+          (ConstSize n, ConstSize m) -> ConstSize (n + m)
+
+    peek = do
+      r <- Store.peek
+      VinylStore rs <- Store.peek
+      return (VinylStore (r :& rs))
+
+    poke (VinylStore (r :& rs)) = do
+      Store.poke r
+      Store.poke (VinylStore rs)
+
+
+-- AoS
 
 toRowsVecN :: Foldable f => Int -> f row -> Vec.Vector row
 toRowsVecN n = Vec.fromListN n . toList
@@ -84,6 +127,7 @@ copyAoS :: Frame rows -> Frame rows
 copyAoS = fromRowsVec . toRowsVec
 
 
+-- AoS serialization
 
 newtype FrameRowStore row = FrameRowStore (Vec.Vector row)
   deriving (Store)
@@ -111,6 +155,7 @@ frameRowStoreRec :: Iso (FrameRec cols) (FrameRec cols') (FrameRowStoreRec cols)
 frameRowStoreRec = iso toFrameRowStoreRec fromFrameRowStoreRec
 
 
+-- SoA
 
 data ColVecsM m cols = ColVecsM !Int !Int !(Record (IC.VectorMs m cols))
 data ColVecs cols = ColVecs !Int !(Record (IC.Vectors cols))
@@ -178,6 +223,8 @@ colVecs = iso toColVecs fromColVecs
 copySoA :: IC.RecVec cols => FrameRec cols -> FrameRec cols
 copySoA = fromColVecs . toColVecs
 
+
+-- SoA serialization
 
 data FrameColStoreRec rs = FrameColStore !Int !(VinylStore V.Rec ElFieldStore (IC.Vectors rs))
   deriving (Generic)

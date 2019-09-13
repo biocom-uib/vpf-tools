@@ -1,3 +1,4 @@
+{-# LANGUAGE PartialTypeSignatures #-}
 {-# language BlockArguments #-}
 {-# language MonoLocalBinds #-}
 {-# language OverloadedStrings #-}
@@ -11,7 +12,7 @@ import Control.Eff.Exception (Exc, runError, Fail, die, runFail)
 import Control.Lens (Lens, view, (%~), (&))
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO(liftIO))
-import Control.Monad.Trans.Control (StM, liftBaseWith, restoreM)
+import Control.Monad.Trans.Control (RunInBase, StM, liftBaseWith, restoreM)
 
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
@@ -57,7 +58,6 @@ import qualified VPF.Model.VirusClass as VC
 
 import qualified VPF.Util.Fasta as FA
 import qualified VPF.Util.FS    as FS
-import VPF.Util.Vinyl (rsubset_)
 
 import qualified Opts
 
@@ -120,7 +120,7 @@ main = MPI.mainMPI $ do
             Nothing -> mpiAbortWith 1 "errors were produced in master task, aborting"
 
       r -> do
-          result <- slaveClassify cfg r slaves `MC.catch` \(e :: MC.SomeException) -> do
+          result <- slaveClassify cfg r `MC.catch` \(e :: MC.SomeException) -> do
                       putErrLn "exception was caught in slave task"
                       mpiAbortWith 4 (show e)
 
@@ -167,7 +167,7 @@ masterClassify cfg slaves =
                   withProdigalCfg cfg $
                   withHMMSearchCfg cfg $
                   handleFastaParseErrors $ do
-                    concOpts <- buildConcOpts workDir vpfsFile
+                    concOpts <- newConcurrencyOpts cfg (Just slaves) workDir vpfsFile
 
                     VC.runModel (VC.GivenGenomes genomesFile concOpts)
 
@@ -177,7 +177,7 @@ masterClassify cfg slaves =
 
             predict :: FrameRec '[M.VirusName, M.ModelName, M.ProteinHitScore, Cls.ClassObj]
                     -> FrameRec '[M.VirusName, Cls.ClassName, M.MembershipRatio, M.VirusHitScore]
-            predict = F.select_ |. F.reindexed' @"virus_name" %~ VC.predictMembership
+            predict = F.select_ |. F.reindexed @"virus_name" %~ VC.predictMembership
 
             prepareForWriting = F.arrange @'[F.Asc "virus_name", F.Desc "membership_ratio"]
 
@@ -192,38 +192,10 @@ masterClassify cfg slaves =
             Opts.FSPath fp ->
                 PS.runSafeT $
                   DSV.writeDSV tsvOpts (FS.fileWriter (untag fp)) result
-  where
-    nworkers :: Int
-    nworkers = max 1 $ Opts.numWorkers (Opts.concurrencyOpts cfg)
-
-    buildConcOpts :: Path Directory
-                  -> Path HMMERModel
-                  -> ClassifyM (VC.ConcurrencyOpts ClassifyM)
-    buildConcOpts workDir vpfsFile =
-        liftBaseWith $ \runInIO -> return VC.ConcurrencyOpts
-            { VC.fastaChunkSize =
-                Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
-                  * nworkers
-
-            , VC.pipelineWorkers =
-                if Opts.useMPI (Opts.concurrencyOpts cfg) && not (null slaves) then
-                  let
-                    mpiWorkers = Conc.mpiWorkers (NE.fromList slaves) tagsClassify MPI.commWorld
-                    mapStM f = runInIO . fmap f . restoreM
-                    asDeserialized = Conc.mapWorkerIO (mapStM F.fromFrameRowStoreRec)
-                  in
-                    fmap (Conc.workerToPipe . asDeserialized) mpiWorkers
-                else
-                  let
-                    workerBody chunk = liftIO $ runInIO $
-                        VC.syncPipeline workDir vpfsFile (P.each chunk)
-                  in
-                    Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
-            }
 
 
-slaveClassify :: Config -> MPI.Rank -> [MPI.Rank] -> IO (Maybe ())
-slaveClassify cfg rank slaves =
+slaveClassify :: Config -> MPI.Rank -> IO (Maybe ())
+slaveClassify cfg rank =
     runLift $ runFail $ handleDSVParseErrors $ do
         modelCfg <- initModelCfg cfg
 
@@ -240,7 +212,7 @@ slaveClassify cfg rank slaves =
   where
     worker :: Path Directory -> Path HMMERModel -> ClassifyM ()
     worker workDir vpfsFile = do
-      concOpts <- buildConcOpts workDir vpfsFile
+      concOpts <- newConcurrencyOpts cfg Nothing workDir vpfsFile
 
       liftBaseWith $ \runInIO ->
           PS.runSafeT $
@@ -248,24 +220,6 @@ slaveClassify cfg rank slaves =
                 liftIO $ runInIO $
                   fmap F.toFrameRowStoreRec $
                     VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
-
-    buildConcOpts :: Path Directory
-                  -> Path HMMERModel
-                  -> ClassifyM (VC.ConcurrencyOpts ClassifyM)
-    buildConcOpts workDir vpfsFile =
-      liftBaseWith $ \runInIO -> return VC.ConcurrencyOpts
-          { VC.fastaChunkSize =
-              Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
-
-          , VC.pipelineWorkers =
-              let
-                nworkers = max 1 $ Opts.numWorkers (Opts.concurrencyOpts cfg)
-
-                workerBody chunk = liftIO $ runInIO $
-                    VC.syncPipeline workDir vpfsFile (P.each chunk)
-              in
-                Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
-          }
 
 
 initModelCfg :: (Lifted IO r, Member Fail r) => Config -> Eff r VC.ModelConfig
@@ -280,6 +234,51 @@ initModelCfg cfg = do
         }
 
 
+newConcurrencyOpts :: Config
+                   -> Maybe [MPI.Rank]
+                   -> Path Directory
+                   -> Path HMMERModel
+                   -> ClassifyM (VC.ConcurrencyOpts ClassifyM)
+newConcurrencyOpts cfg slaves workDir vpfsFile =
+    liftBaseWith $ \runInIO -> return $
+        case slaves of
+          Nothing  -> multithreadedMode runInIO
+          Just []  -> multithreadedMode runInIO
+          Just slv -> mpiMode runInIO (NE.fromList slv)
+  where
+    nworkers :: Int
+    nworkers = max 1 $ Opts.numWorkers (Opts.concurrencyOpts cfg)
+
+    mpiMode :: RunInBase ClassifyM IO -> NE.NonEmpty MPI.Rank -> VC.ConcurrencyOpts ClassifyM
+    mpiMode runInIO slv = VC.ConcurrencyOpts
+        { VC.fastaChunkSize  = Opts.fastaChunkSize (Opts.concurrencyOpts cfg) * nworkers
+        , VC.pipelineWorkers = pipelineWorkers
+        }
+      where
+        pipelineWorkers :: NE.NonEmpty (VC.Pipeline ClassifyM)
+        pipelineWorkers =
+            let
+              mpiWorkers = Conc.mpiWorkers slv tagsClassify MPI.commWorld
+              mapStM f = runInIO . fmap f . restoreM
+              asDeserialized = Conc.mapWorkerIO (mapStM F.fromFrameRowStoreRec)
+            in
+              fmap (Conc.workerToPipe . asDeserialized) mpiWorkers
+
+    multithreadedMode :: RunInBase ClassifyM IO -> VC.ConcurrencyOpts ClassifyM
+    multithreadedMode runInIO = VC.ConcurrencyOpts
+        { VC.fastaChunkSize = Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
+        , VC.pipelineWorkers = pipelineWorkers
+        }
+      where
+        pipelineWorkers :: NE.NonEmpty (VC.Pipeline ClassifyM)
+        pipelineWorkers =
+            let
+              workerBody chunk = liftIO $ runInIO $
+                  VC.syncPipeline workDir vpfsFile (P.each chunk)
+            in
+              Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
+
+
 withCfgWorkDir :: LiftedBase IO r
                => Config
                -> (Path Directory -> Eff r a)
@@ -288,7 +287,6 @@ withCfgWorkDir cfg fm =
     case Opts.workDir cfg of
       Nothing ->
           FS.withTmpDir "." "vpf-work" fm
-
       Just wd -> do
           lift $ D.createDirectoryIfMissing True (untag wd)
           fm wd

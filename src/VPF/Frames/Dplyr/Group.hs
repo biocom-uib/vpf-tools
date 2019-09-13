@@ -1,9 +1,8 @@
 {-# language AllowAmbiguousTypes #-}
-{-# language UndecidableInstances #-}
 {-# language QuantifiedConstraints #-}
+{-# language TypeInType #-}
+{-# language UndecidableInstances #-}
 module VPF.Frames.Dplyr.Group where
-
-import GHC.TypeLits (Symbol)
 
 import qualified Control.Foldl as Foldl
 import qualified Control.Lens as L
@@ -15,70 +14,72 @@ import Data.Function (on)
 import Data.Kind (Constraint, Type)
 import Data.Map.Strict (Map)
 import Data.Monoid (Ap(..))
-import qualified Data.Vector                 as Vec
-import qualified Data.Vector.Unboxed         as UVec
-import qualified Data.Vector.Algorithms.Tim  as Tim
+import qualified Data.Vector                as Vec
+import qualified Data.Vector.Unboxed        as UVec
+import qualified Data.Vector.Algorithms.Tim as Tim
 
-import qualified Data.Vinyl           as V
-import qualified Data.Vinyl.TypeLevel as V
+import qualified Data.Vinyl as V
 
-import Frames (Frame(..), FrameRec, Record)
-
+import VPF.Frames.Classes (RSingleton(..), RMonoid(..))
 import VPF.Frames.Dplyr.Basic
 import VPF.Frames.InCore (fromRowsVec, toRowsVec)
 import VPF.Frames.TaggedField
+import VPF.Frames.Types
 
-import VPF.Util.Vinyl (MonoFieldSpec)
+
+class AsKey (keys :: FieldsK) where
+    type KeyType (keys :: FieldsK) (rec :: RecK) = (t :: Type) | t -> keys
+    type HasKey  (keys :: FieldsK) (rec :: RecK) (cols :: FieldsK) :: Constraint
+
+    type KeyRecordCtx (keys :: FieldsK) (rec :: RecK) :: Constraint
+
+    getKey :: HasKey keys rec cols => Fields rec cols -> KeyType keys rec
+    keyRecord :: KeyRecordCtx keys rec => Iso' (KeyType keys rec) (Fields rec keys)
 
 
-class (forall cols. HasKey r cols => (KeyCols r V.<: cols)) => AsKey r where
-    type KeyType (r :: kr) :: Type
-    type KeyCols (r :: kr) :: [(Symbol, Type)]
+instance (col ~ '(s, a), V.KnownField col) => AsKey ('[col] :: FieldsK) where
+    type KeyType '[col] rec = Field col
+    type HasKey '[col] rec cols = GetField rec col cols
+    type KeyRecordCtx '[col] rec = RSingleton rec
 
-    type HasKey  (r :: kr) (cols :: [(Symbol, Type)]) :: Constraint
+    getKey = rgetTagged @col
+    keyRecord = untagged . L.from rsingleton
 
-    getKey :: HasKey r cols => Record cols -> KeyType r
-    keyRecord :: Iso' (KeyType r) (Record (KeyCols r))
 
-instance AsKey (subs :: [(Symbol, Type)]) where
-    type KeyType subs = Record subs
-    type KeyCols subs = subs
-    type HasKey subs cols = subs V.<: cols
+instance subs ~ (col1 ': col2 ': cols) => AsKey ((col1 ': col2 ': cols) :: FieldsK) where
+    type KeyType (col1 ': col2 ': cols) rec = Fields rec (col1 ': col2 ': cols)
+    type HasKey (col1 ': col2 ': cols) rec colss = FieldSubset rec (col1 ': col2 ': cols) colss
+    type KeyRecordCtx (col1 ': col2 ': cols) rec = ()
 
     getKey = V.rcast
     keyRecord = id
 
-instance V.KnownField col => AsKey (col :: (Symbol, Type)) where
-    type KeyType col = Field col
-    type KeyCols col = '[col]
-    type HasKey  col cols = V.RElem col cols (V.RIndex col cols)
 
-    getKey = rgetTagged @col
-    keyRecord = L.iso (singleField @col . untag) (rgetTagged @col)
-
-
-type GroupingKey r cols = (AsKey r, Ord (KeyType r), HasKey r cols, KeyCols r V.<: cols)
+type GroupingKey rec keys cols =
+    ( AsKey keys
+    , Ord (KeyType keys rec)
+    , HasKey keys rec cols
+    , KeyRecordCtx keys rec
+    )
 
 
 data SortOrder = forall i. Asc i | forall i. Desc i
 
-class SortKey i cols where
-    compareRows :: Record cols -> Record cols -> Ordering
+class SortKey rec i cols where
+    compareRows :: Fields rec cols -> Fields rec cols -> Ordering
 
-instance (MonoFieldSpec cols i r, AsKey r, Ord (KeyType r), HasKey r cols)
-    => SortKey (Asc i) cols where
-    compareRows = compare `on` getKey @r
+instance (FieldSpec cols i keys, GroupingKey rec keys cols) => SortKey rec (Asc i) cols where
+    compareRows = compare `on` getKey @keys
 
-instance (MonoFieldSpec cols i r, AsKey r, Ord (KeyType r), HasKey r cols)
-    => SortKey (Desc i) cols where
-    compareRows = compare `on` getKey @r
+instance (FieldSpec cols i keys, GroupingKey rec keys cols) => SortKey rec (Desc i) cols where
+    compareRows = compare `on` getKey @keys
 
-instance SortKey ('[] :: [SortOrder]) cols where
+instance SortKey rec ('[] :: [SortOrder]) cols where
     compareRows _ _ = EQ
 
-instance (SortKey i cols, SortKey is cols) => SortKey (i ': is :: [SortOrder]) cols where
+instance (SortKey rec i cols, SortKey rec is cols) => SortKey rec (i ': is :: [SortOrder]) cols where
     compareRows row1 row2 =
-        compareRows @i row1 row2 <> compareRows @is row1 row2
+        compareRows @rec @i row1 row2 <> compareRows @rec @is row1 row2
 
 
 arrangeBy :: (row -> row -> Ordering) -> Frame row -> Frame row
@@ -96,8 +97,8 @@ arrangeBy cmp df =
 {-# inline arrangeBy #-}
 
 
-arrange :: forall is cols. SortKey is cols => FrameRec cols -> FrameRec cols
-arrange = arrangeBy (compareRows @is)
+arrange :: forall is cols rec. SortKey rec is cols => FrameFields rec cols -> FrameFields rec cols
+arrange = arrangeBy (compareRows @rec @is)
 {-# inline arrange #-}
 
 
@@ -106,8 +107,8 @@ topBy cmp n = firstN n . arrangeBy cmp
 {-# inline topBy #-}
 
 
-top :: forall is cols. SortKey is cols => Int -> FrameRec cols -> FrameRec cols
-top = topBy (compareRows @is)
+top :: forall is cols rec. SortKey rec is cols => Int -> FrameFields rec cols -> FrameFields rec cols
+top = topBy (compareRows @rec @is)
 {-# inline top #-}
 
 
@@ -157,42 +158,48 @@ groupedOn key f =
 
 
 -- NOTE: not a lawful traversal because it sorts the frame
-grouped :: forall i r cols cols'.
-        ( MonoFieldSpec cols i r
-        , GroupingKey r cols
+grouped :: forall i keys cols cols' rec rec'.
+        ( FieldSpec cols i keys
+        , GroupingKey rec keys cols
         )
-        => IndexedTraversal (KeyType r)
-             (FrameRec cols) (FrameRec cols')
-             (FrameRec cols) (FrameRec cols')
-grouped = groupedOn (getKey @r)
+        => IndexedTraversal (KeyType keys rec)
+             (FrameFields rec cols) (FrameFields rec' cols')
+             (FrameFields rec cols) (FrameFields rec' cols')
+grouped = groupedOn (getKey @keys)
 {-# inline grouped #-}
 
 
 -- NOTE: not a lawful traversal because it sorts the frame
-fixed :: forall i r cols cols'.
-       ( MonoFieldSpec cols i r
-       , GroupingKey r cols
+fixed :: forall i keys cols cols' rec rec'.
+       ( FieldSpec cols i keys
+       , GroupingKey rec keys cols
+       , KeyRecordCtx keys rec'
+       , KeyType keys rec ~ KeyType keys rec'
+       , RMonoid rec'
        )
-       => IndexedTraversal (KeyType r)
-            (FrameRec cols) (FrameRec (KeyCols r V.++ cols'))
-            (FrameRec cols) (FrameRec cols')
+       => IndexedTraversal (KeyType keys rec)
+            (FrameFields rec cols) (FrameFields rec' (keys ++ cols'))
+            (FrameFields rec cols) (FrameFields rec' cols')
 fixed f =
     grouped @i $ L.Indexed $ \k ->
-        let !recKey = L.view (keyRecord @r) k
+        let !recKey = L.view (keyRecord @keys) k
             !f'     = ixf k
-        in  \group -> fmap (rowwise (recKey V.<+>)) (f' group)
+        in  \group -> fmap (rowwise (rappend recKey)) (f' group)
   where
     ixf = L.indexed f
 {-# inline fixed #-}
 
 
 -- NOTE: not a lawful traversal because it sorts the frame
-summarizing :: forall i r cols cols'.
-            ( MonoFieldSpec cols i r
-            , GroupingKey r cols
+summarizing :: forall i keys cols cols' rec rec'.
+            ( FieldSpec cols i keys
+            , GroupingKey rec keys cols
+            , KeyRecordCtx keys rec'
+            , KeyType keys rec ~ KeyType keys rec'
+            , RMonoid rec'
             )
-            => IndexedTraversal (KeyType r)
-                 (FrameRec cols) (FrameRec (KeyCols r V.++ cols'))
-                 (FrameRec cols) (Record cols')
+            => IndexedTraversal (KeyType keys rec)
+                 (FrameFields rec cols) (FrameFields rec' (keys ++ cols'))
+                 (FrameFields rec cols) (Fields rec' cols')
 summarizing = fixed @i . L.rmap (fmap singleRow)
 {-# inline summarizing #-}
