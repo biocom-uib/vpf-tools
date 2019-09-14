@@ -3,13 +3,11 @@
 {-# language GeneralizedNewtypeDeriving #-}
 {-# language UndecidableInstances #-}
 module VPF.Frames.Dplyr
-  ( module VPF.Frames.Dplyr.Basic
-  , module VPF.Frames.Dplyr.Group
-  , module VPF.Frames.Dplyr.Index
-  , module VPF.Frames.Dplyr.Row
+  ( module Exports
   ) where
 
-import VPF.Frames.Dplyr.Basic
-import VPF.Frames.Dplyr.Group
-import VPF.Frames.Dplyr.Index
-import VPF.Frames.Dplyr.Row
+import VPF.Frames.Dplyr.Basic as Exports
+import VPF.Frames.Dplyr.Group as Exports
+import VPF.Frames.Dplyr.Index as Exports
+import VPF.Frames.Dplyr.Row   as Exports
+import VPF.Frames.VinylExts   as Exports (RMonoid(..), RSingleton(..))

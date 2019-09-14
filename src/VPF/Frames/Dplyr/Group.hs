@@ -20,11 +20,11 @@ import qualified Data.Vector.Algorithms.Tim as Tim
 
 import qualified Data.Vinyl as V
 
-import VPF.Frames.Classes (RSingleton(..), RMonoid(..))
 import VPF.Frames.Dplyr.Basic
 import VPF.Frames.InCore (fromRowsVec, toRowsVec)
 import VPF.Frames.TaggedField
 import VPF.Frames.Types
+import VPF.Frames.VinylExts
 
 
 class AsKey (keys :: FieldsK) where

@@ -50,7 +50,9 @@ import qualified Data.Vinyl as V
 import Frames as Frames (Record, Frame(..), FrameRec)
 
 import VPF.Frames.TaggedField as TaggedField (Field)
-import VPF.Frames.Classes as ExtraClasses (RSingleton, RMonoid, RecSubseq, RSubseq, RecQuotient, RQuotient)
+import VPF.Frames.VinylExts as ExtraClasses (RSingleton, RMonoid,
+                                             RecSubseq, RSubseq,
+                                             RecQuotient, RQuotient)
 
 
 -- kinds

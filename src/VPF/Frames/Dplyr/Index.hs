@@ -15,12 +15,12 @@ import qualified Data.Vinyl.TypeLevel as V
 
 import Unsafe.Coerce (unsafeCoerce)
 
-import VPF.Frames.Classes
 import VPF.Frames.Dplyr.Basic
 import VPF.Frames.Dplyr.Group
 import VPF.Frames.Dplyr.Row
 import VPF.Frames.TaggedField
 import VPF.Frames.Types
+import VPF.Frames.VinylExts
 
 
 groups :: IndexedTraversal k

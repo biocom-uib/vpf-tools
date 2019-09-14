@@ -21,8 +21,8 @@ module VPF.Frames.Dplyr.Row
   -- type-changing rsubset-related lenses
   , over_rsubset
   , rsubset_
-  , rsubset'
-  , rreordered
+  , rsubset
+  , rreorder
 
   -- zipping/unzipping
   , ZipNamesTup
@@ -40,31 +40,21 @@ module VPF.Frames.Dplyr.Row
 
 import GHC.TypeLits (KnownSymbol, Symbol)
 
-import Control.Lens (Iso, Iso', Lens, Setter)
+import Control.Lens (Iso, Iso', Lens)
 import qualified Control.Lens as L
 
-import Data.Bifunctor (first, second)
 import Data.Kind (Type)
-import Data.Functor.Contravariant (contramap)
-import Data.Store (Store, Size(..))
-import qualified Data.Store as Store
 import qualified Data.Type.Equality as E
 
-import Data.Vinyl (ElField(..), Rec(..), (<+>))
-import Data.Vinyl.ARec (ARec(..))
-import Data.Vinyl.Derived (KnownField, rfield)
-import Data.Vinyl.Functor (Compose(..))
-import Data.Vinyl.Lens (RecElem, RecElemFCtx,
-                        rlens', type (<:), type (:~:), rcast)
-import Data.Vinyl.TypeLevel
+import Data.Vinyl (ElField(..), Rec(..))
+import Data.Vinyl.Derived (rfield)
+import Data.Vinyl.Lens (rlens', rcast)
 
 import qualified Data.Vinyl.FromTuple as VX
 import qualified Data.Vinyl.XRec      as VX
 
-import VPF.Frames.Classes
 import VPF.Frames.Types
-
-import Unsafe.Coerce (unsafeCoerce)
+import VPF.Frames.VinylExts
 
 import Frames.Melt (RDeleteAll)
 
@@ -161,45 +151,48 @@ rquotientSplit' = L.iso split unsplit'
 
 -- type-changing rsubset-related lenses
 
-over_rsubset :: forall ss ss' rs f.
-             ( ss <: rs
-             , RDeleteAll ss rs <: rs
-             , ss ++ RDeleteAll ss rs :~: rs
+over_rsubset :: forall ss ss' rs rec.
+             ( FieldSubset rec ss rs
+             , FieldSubset rec (RDeleteAll ss rs) rs
+             , EquivFields rec (ss ++ RDeleteAll ss rs) rs
+             , RMonoid rec
              )
-             => (Rec f ss -> Rec f ss')
-             -> Rec f rs
-             -> Rec f (ss' ++ RDeleteAll ss rs)
+             => (Fields rec ss -> Fields rec ss')
+             -> Fields rec rs
+             -> Fields rec (ss' ++ RDeleteAll ss rs)
 over_rsubset f rec =
-    f (rcast @ss rec) <+> rcast @(RDeleteAll ss rs) rec
+    f (rcast @ss rec) `rappend` rcast @(RDeleteAll ss rs) rec
 {-# inline over_rsubset #-}
 
 
-rsubset_ :: forall (ss :: [(Symbol, Type)]) ss' rs f.
-         ( ss <: rs
-         , RDeleteAll ss rs <: rs
-         , ss ++ RDeleteAll ss rs :~: rs
+rsubset_ :: forall ss ss' rs rec.
+         ( FieldSubset rec ss rs
+         , FieldSubset rec (RDeleteAll ss rs) rs
+         , FieldSubset rec (ss ++ RDeleteAll ss rs) rs
+         , RMonoid rec
          )
-         => Setter (Rec f rs) (Rec f (ss' ++ RDeleteAll ss rs))
-                   (Rec f ss) (Rec f ss')
-rsubset_ = L.sets over_rsubset
+         => Lens (Fields rec rs) (Fields rec (ss' ++ RDeleteAll ss rs))
+                 (Fields rec ss) (Fields rec ss')
+rsubset_ = L.lens (rcast @ss) (\rec ss -> ss `rappend` rcast @(RDeleteAll ss rs) rec)
 {-# inline rsubset_ #-}
 
 
-rsubset' :: forall is ss ss' rs f.
-         ( FieldSpec rs is ss
-         , ss <: rs
-         , RDeleteAll ss rs <: rs
-         , ss ++ RDeleteAll ss rs :~: rs
-         )
-         => Setter (Rec f rs) (Rec f (ss' ++ RDeleteAll ss rs))
-                   (Rec f ss) (Rec f ss')
-rsubset' = rsubset_
-{-# inline rsubset' #-}
+rsubset :: forall is ss ss' rs rec.
+        ( FieldSpec rs is ss
+        , FieldSubset rec ss rs
+        , FieldSubset rec (RDeleteAll ss rs) rs
+        , FieldSubset rec (ss ++ RDeleteAll ss rs) rs
+        , RMonoid rec
+        )
+        => Lens (Fields rec rs) (Fields rec (ss' ++ RDeleteAll ss rs))
+                (Fields rec ss) (Fields rec ss')
+rsubset = rsubset_
+{-# inline rsubset #-}
 
 
-rreordered :: forall rs' rs f. (rs :~: rs') => Iso' (Rec f rs) (Rec f rs')
-rreordered = L.iso rcast rcast
-{-# inline rreordered #-}
+rreorder :: forall rs' rs rec. EquivFields rec rs rs' => Fields rec rs -> Fields rec rs'
+rreorder = rcast
+{-# inline rreorder #-}
 
 
 -- zipping/unzipping

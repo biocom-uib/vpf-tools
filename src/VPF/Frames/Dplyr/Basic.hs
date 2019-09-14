@@ -15,11 +15,11 @@ import qualified Data.Vector.Generic as GVec
 
 import qualified Data.Vinyl as V
 
-import VPF.Frames.Classes (RMonoid(..), RSingleton(..))
 import VPF.Frames.Dplyr.Ops
 import VPF.Frames.Dplyr.Row
-import VPF.Frames.InCore (rowsVec)
+import VPF.Frames.InCore (rowsVec, toRowsVec)
 import VPF.Frames.Types
+import VPF.Frames.VinylExts
 
 
 cat :: a -> a
@@ -37,6 +37,7 @@ rows = L.mapped
 {-# inline rows #-}
 
 
+-- generalized 'rows', but slower
 traverseRows :: Traversal (Frame row) (Frame row') row row'
 traverseRows = rowsVec . traverse
 {-# inline traverseRows #-}
@@ -163,7 +164,7 @@ replace :: forall i s a b col col' cols cols' rec.
        => (Fields rec cols -> b)
        -> FrameFields rec cols
        -> FrameFields rec cols'
-replace f = rows . into (field @col) %~ f
+replace f = rows %~ \row -> L.set (field @col) (f row) row
 {-# inline replace #-}
 
 
@@ -209,20 +210,11 @@ unnestFrame :: forall i s col col's cols cols' rec.
             => FrameFields rec cols
             -> FrameFields rec cols'
 unnestFrame =
-    rowsVec %~ Vec.concatMap (L.view rowsVec . factorFrameOut)
+    rowsVec %~ Vec.concatMap (toRowsVec . factorFrameOut)
   where
     factorFrameOut :: Fields rec cols -> FrameFields rec cols'
     factorFrameOut = L.traverseOf (rsubseq @col) (V.getField . L.view rsingleton)
-
-
-using :: L.Profunctor p => L.Getting a s a -> Optic p f s b a b
-using ss' = L.lmap (L.view ss')
-
-away :: (L.Profunctor p, Functor f) => L.AReview t b -> Optic p f s t s b
-away = L.rmap . fmap . L.review
-
-into :: LensLike f s t a b -> LensLike f s t s b
-into l f s = l (const (f s)) s
+{-# inline unnestFrame #-}
 
 
 rename :: forall i i' s s' a col col' cols cols' rec.

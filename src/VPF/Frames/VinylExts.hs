@@ -1,6 +1,6 @@
 {-# language AllowAmbiguousTypes #-}
 {-# language UndecidableInstances #-}
-module VPF.Frames.Classes
+module VPF.Frames.VinylExts
   ( RSingleton(..)
   , RMonoid(..)
 
@@ -175,11 +175,13 @@ class ReplaceSubseq ss ss' rs rs' is => RecSubseq rec ss ss' rs rs' is where
   --  rs :~: ss ++ rs'
   rsubseqSplitC :: ss' E.:~: '[] -> Iso' (rec f rs) (rec f ss, rec f rs')
 
+
 -- RecSubseq implementation helpers
 
 type family DiscriminateEmpty xs a b where
   DiscriminateEmpty '[]       a b = a
   DiscriminateEmpty (x ': xs) a b = b
+
 
 impossibleList :: (x ': xs) E.:~: '[] -> a
 impossibleList eq = E.castWith (transport eq) ()
@@ -188,8 +190,10 @@ impossibleList eq = E.castWith (transport eq) ()
               -> DiscriminateEmpty ys a b E.:~: DiscriminateEmpty zs a b
     transport E.Refl = E.Refl
 
+
 keep :: Functor g => (s -> (a, s')) -> g s -> Compose g ((,) a) s'
 keep split = Compose . fmap split
+
 
 restore :: Functor g => (a -> s' -> s) -> Compose g ((,) a) s' -> g s
 restore join = fmap (uncurry join) . getCompose
