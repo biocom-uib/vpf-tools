@@ -14,7 +14,7 @@ module VPF.Frames.DSV
   , produceEitherRows
   , throwLeftsM
   , inCoreAoSExc
-  , readFrameExc
+  , readFrame
 
   , WriterOptions(..)
   , defWriterOptions
@@ -155,16 +155,16 @@ inCoreAoSExc =
     lift . try @ParseError . inCoreAoS >=> liftEither
 
 
-readFrameExc ::
-             ( KnownSymbol sep, ColumnHeaders cols
-             , CSV.ReadRec cols, RecVec cols
-             , Lifted IO r
-             , Member (Exc ParseError) r
-             )
-             => Path (DSV sep cols)
-             -> ParserOptions
-             -> Eff r (FrameRec cols)
-readFrameExc fp opts =
+readFrame ::
+          ( KnownSymbol sep, ColumnHeaders cols
+          , CSV.ReadRec cols, RecVec cols
+          , Lifted IO r
+          , Member (Exc ParseError) r
+          )
+          => Path (DSV sep cols)
+          -> ParserOptions
+          -> Eff r (FrameRec cols)
+readFrame fp opts =
     inCoreAoSExc (produceEitherRows fp opts >-> throwLeftsM)
 
 

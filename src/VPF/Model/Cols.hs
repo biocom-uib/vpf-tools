@@ -15,3 +15,4 @@ declareColumn "k_base_size"       ''Double
 declareColumn "protein_hit_score" ''Double
 declareColumn "virus_hit_score"   ''Double
 declareColumn "membership_ratio"  ''Double
+declareColumn "confidence_score"  ''Double

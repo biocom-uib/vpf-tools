@@ -4,16 +4,23 @@
 module Opts where
 
 import Control.Concurrent (getNumCapabilities)
+import Control.Monad.Trans.Except (Except, throwE)
+import Control.Monad.Trans.Reader (ReaderT(..))
+
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
+
 import Options.Applicative
+import Options.Applicative.Types
 
 import qualified Control.Distributed.MPI.Store  as MPI
 
 import VPF.Formats
 import VPF.Ext.HMMER (HMMERConfig(HMMERConfig))
-import VPF.Ext.HMMER.Search (ProtSearchHitCols)
 import VPF.Model.Class (RawClassificationCols)
+import qualified VPF.Model.Cols as M
 
 
 data ArgPath t = FSPath (Path t) | StdDevice
@@ -35,16 +42,17 @@ data ConcurrencyOpts = ConcurrencyOpts
   }
 
 
-data Config outfmt = Config
-  { hmmerConfig     :: HMMERConfig
-  , prodigalPath    :: FilePath
-  , evalueThreshold :: Double
-  , inputFiles      :: InputFiles
-  , virusNameRegex  :: Text
-  , vpfClassFile    :: Path (DSV "\t" RawClassificationCols)
-  , outputFile      :: ArgPath outfmt
-  , workDir         :: Maybe (Path Directory)
-  , concurrencyOpts :: ConcurrencyOpts
+data Config = Config
+  { hmmerConfig      :: HMMERConfig
+  , prodigalPath     :: FilePath
+  , evalueThreshold  :: Double
+  , inputFiles       :: InputFiles
+  , virusNameRegex   :: Text
+  , vpfClassFiles    :: Map Text (Path (DSV "\t" RawClassificationCols))
+  , scoreSampleFiles :: Map Text (Path (DSV "\t" '[M.VirusHitScore]))
+  , outputPrefix     :: FilePath
+  , workDir          :: Maybe (Path Directory)
+  , concurrencyOpts  :: ConcurrencyOpts
   }
 
 
@@ -55,8 +63,18 @@ argPathReader = maybeReader $ \s ->
       _   -> Just (FSPath (Tagged s))
 
 
+kvReader :: ReadM a -> ReadM b -> ReadM (a, b)
+kvReader ra rb = ReadM $ ReaderT $ \s ->
+    case break (== '=') s of
+      (sa, '=':sb) -> liftA2 (,) (feedReadM ra sa) (feedReadM rb sb)
+      _            -> throwE (ErrorMsg "could not parse key/value pair")
+  where
+    feedReadM :: ReadM a -> String -> Except ParseError a
+    feedReadM ma s = runReaderT (unReadM ma) s
+
+
 defaultConcurrencyOpts :: [MPI.Rank] -> IO ConcurrencyOpts
-defaultConcurrencyOpts slaves = do
+defaultConcurrencyOpts _ = do
     numWorkers <- getNumCapabilities
     let fastaChunkSize = 1
     let useMPI = False
@@ -64,10 +82,10 @@ defaultConcurrencyOpts slaves = do
     return ConcurrencyOpts {..}
 
 
-configParserIO :: [MPI.Rank] -> IO (Parser (Config outfmt))
+configParserIO :: [MPI.Rank] -> IO (Parser Config)
 configParserIO = fmap configParser . defaultConcurrencyOpts
 
-configParser :: ConcurrencyOpts -> Parser (Config outfmt)
+configParser :: ConcurrencyOpts -> Parser Config
 configParser defConcOpts = do
     prodigalPath <- strOption $
         long "prodigal"
@@ -110,19 +128,24 @@ configParser defConcOpts = do
         <> showDefault
         <> help "PCRE regex matching the virus identifier from a gene identifier (options PCRE_ANCHORED | PCRE_UTF8)"
 
-    vpfClassFile <- strOption $
-        long "vpf-class"
+    vpfClassFiles <- fmap Map.fromList $ some $ option (kvReader str str) $
+        long "vpf-classes"
         <> short 'c'
         <> metavar "CLASS_FILE"
         <> help "Tab-separated file containing the classification of the VPFs"
 
-    outputFile <- option argPathReader $
+    scoreSampleFiles <- fmap Map.fromList $ some $ option (kvReader str str) $
+        long "scores"
+        <> short 's'
+        <> metavar "SCORE_FILE"
+        <> help "Score samples (one per line) to take percentiles on, same format as --vpf-classes"
+
+    outputPrefix <- strOption $
         long "output"
         <> short 'o'
         <> metavar "OUTPUT"
-        <> value StdDevice
-        <> showDefault
-        <> help "Output file or - for STDOUT"
+        <> help "Output file prefix (e.g. -c family=fam.tsv -o output would \
+                 \ produce output.family.tsv)"
 
     concurrencyOpts <- concOpts
 
@@ -154,7 +177,6 @@ configParser defConcOpts = do
     --       <> help "HMMER tblout file containing protein search hits against the VPFs"
 
     --   pure GivenHitsFile {..}
-
 
     concOpts :: Parser ConcurrencyOpts
     concOpts = do

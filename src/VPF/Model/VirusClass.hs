@@ -21,6 +21,8 @@ import qualified Data.List.NonEmpty as NE
 import Data.Monoid (Ap(..))
 import Data.Semigroup.Foldable (foldMap1)
 import Data.Text (Text)
+import Data.Vector (Vector)
+import qualified Data.Vector as Vec
 
 import qualified Data.Vinyl           as V
 import qualified Data.Vinyl.TypeLevel as V
@@ -178,11 +180,12 @@ processHMMOut aminoacidsFile hitsFile = do
         |. F.copySoA
 
 
-predictMembership :: GroupedFrameRec (Field M.VirusName)
+predictMembership :: Vector (Field M.VirusHitScore)
+                  -> GroupedFrameRec (Field M.VirusName)
                                      '[Cls.ClassObj, M.ProteinHitScore]
                   -> GroupedFrameRec (Field M.VirusName)
-                                     '[Cls.ClassName, M.MembershipRatio, M.VirusHitScore]
-predictMembership = F.groups %~ do
+                                     '[Cls.ClassName, M.MembershipRatio, M.VirusHitScore, M.ConfidenceScore]
+predictMembership scoreSamples = F.groups %~ do
     F.cat
       |. F.col @"class_obj" %~ Cls.unnestClassObj
       |. F.unnestFrame @"class_obj"
@@ -194,11 +197,25 @@ predictMembership = F.groups %~ do
 
       |. \df -> do
             let totalScore = sumOf (folded . M.proteinHitScore) df
+                confidence = percentileRank scoreSamples (Tagged totalScore)
 
             df & F.cat
               |. F.mutate1 @"virus_hit_score"  (const totalScore)
+              |. F.mutate1 @"confidence_score" (const confidence)
               |. F.mutate1 @"membership_ratio" (\row -> row^.M.proteinHitScore / totalScore)
-              |. F.select @'["class_name", "membership_ratio", "virus_hit_score"]
+              |. F.select_
+  where
+    percentileRank :: Ord a => Vector a -> a -> Double
+    percentileRank v a =
+        case Vec.span (< a) v of
+          (less, v') ->
+              case Vec.span (== a) v' of
+                (equal, _) ->
+                    let c = fromIntegral $ Vec.length less
+                        f = fromIntegral $ Vec.length equal
+                        n = fromIntegral $ Vec.length v
+                    in  (c + 0.5*f) / n
+
 
 
 syncPipeline ::
@@ -272,7 +289,7 @@ type ClassifiedCols rs = rs ++ V.RDelete M.ModelName ClassificationCols
 type RawClassifiedCols rs = rs ++ V.RDelete M.ModelName RawClassificationCols
 
 
-appendClassification :: forall rs. GetField Rec M.ModelName rs
+appendClassification :: GetField Rec M.ModelName rs
                      => FrameRec ClassificationCols
                      -> FrameRec rs
                      -> FrameRec (ClassifiedCols rs)

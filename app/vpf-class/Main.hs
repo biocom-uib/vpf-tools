@@ -9,16 +9,18 @@ import qualified Control.Distributed.MPI.Store as MPI
 import Control.Eff (Eff, Member, Lift, Lifted, LiftedBase, lift, runLift)
 import Control.Eff.Reader.Strict (Reader, runReader)
 import Control.Eff.Exception (Exc, runError, Fail, die, runFail)
-import Control.Lens (Lens, view, (%~), (&))
+import qualified Control.Lens as L
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Control.Monad.Trans.Control (RunInBase, StM, liftBaseWith, restoreM)
 
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
+import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
+import qualified Data.Text                  as T
 import qualified Data.Text.Encoding         as T
 import qualified Text.Regex.Base            as PCRE
 import qualified Text.Regex.PCRE.ByteString as PCRE
@@ -27,23 +29,18 @@ import qualified System.Directory as D
 import System.Exit (exitFailure)
 import qualified System.IO as IO
 
-import Pipes ((>->))
 import qualified Pipes         as P
-import qualified Pipes.Core    as P
 import qualified Pipes.Prelude as P
 import qualified Pipes.Safe    as PS
-
-import Frames (FrameRec, Record)
 
 import qualified Options.Applicative as OptP
 
 import qualified VPF.Concurrency.Async as Conc
 import qualified VPF.Concurrency.MPI   as Conc
 
-import VPF.Eff.Cmd (Cmd, runCmd)
+import VPF.Eff.Cmd (Cmd)
 import VPF.Ext.HMMER.Search (HMMSearch, HMMSearchError, hmmsearchConfig, execHMMSearch)
-import qualified VPF.Ext.HMMER.Search.Cols as HMM
-import VPF.Ext.Prodigal (Prodigal, ProdigalError, prodigalConfig, execProdigal)
+import VPF.Ext.Prodigal     (Prodigal, ProdigalError, prodigalConfig, execProdigal)
 
 import VPF.Formats
 import VPF.Frames.Dplyr.Ops
@@ -52,7 +49,6 @@ import qualified VPF.Frames.DSV    as DSV
 import qualified VPF.Frames.InCore as F
 
 import qualified VPF.Model.Class      as Cls
-import qualified VPF.Model.Class.Cols as Cls
 import qualified VPF.Model.Cols       as M
 import qualified VPF.Model.VirusClass as VC
 
@@ -66,7 +62,7 @@ type HitCols = '[M.VirusName, M.ModelName, M.ProteinHitScore]
 type OutputCols = VC.ClassifiedCols HitCols
 type RawOutputCols = VC.RawClassifiedCols HitCols
 
-type Config = Opts.Config (DSV "\t" OutputCols)
+type Config = Opts.Config
 
 type ClassifyM = Eff '[
     Exc FA.ParseError,
@@ -109,9 +105,12 @@ main = MPI.mainMPI $ do
     parser <- Opts.configParserIO slaves
     cfg <- OptP.execParser (opts parser)
 
+
     case MPI.fromRank rank of
       0 -> do
-          result <- masterClassify cfg slaves `MC.catch` \(e :: MC.SomeException) -> do
+          let run = runLift . runFail . handleDSVParseErrors
+
+          result <- run (masterClassify cfg slaves) `MC.catch` \(e :: MC.SomeException) -> do
                       putErrLn "exception was caught in master task"
                       mpiAbortWith 2 (show e)
 
@@ -120,7 +119,9 @@ main = MPI.mainMPI $ do
             Nothing -> mpiAbortWith 1 "errors were produced in master task, aborting"
 
       r -> do
-          result <- slaveClassify cfg r `MC.catch` \(e :: MC.SomeException) -> do
+          let run = runLift . runFail
+
+          result <- run (slaveClassify cfg r) `MC.catch` \(e :: MC.SomeException) -> do
                       putErrLn "exception was caught in slave task"
                       mpiAbortWith 4 (show e)
 
@@ -132,6 +133,86 @@ main = MPI.mainMPI $ do
         OptP.fullDesc
         <> OptP.progDesc "Classify virus sequences using an existing VPF classification"
         <> OptP.header "vpf-class: VPF-based virus sequence classifier"
+
+
+
+masterClassify :: Config
+               -> [MPI.Rank]
+               -> Eff '[Exc DSV.ParseError, Fail, Lift IO] ()
+masterClassify cfg slaves = do
+  modelCfg <- newModelCfg cfg
+
+  hitCounts <- runReader modelCfg $
+      case Opts.inputFiles cfg of
+        -- Opts.GivenHitsFile hitsFile ->
+        --     VC.runModel (VC.GivenHitsFile hitsFile)
+
+        Opts.GivenSequences vpfsFile genomesFile ->
+            withCfgWorkDir cfg $ \workDir ->
+            withProdigalCfg cfg $
+            withHMMSearchCfg cfg $
+            handleFastaParseErrors $ do
+              concOpts <- newConcurrencyOpts cfg (Just slaves) workDir vpfsFile
+
+              VC.runModel (VC.GivenGenomes genomesFile concOpts)
+
+  let classFiles = Map.intersectionWith (,) (Opts.vpfClassFiles cfg)
+                                            (Opts.scoreSampleFiles cfg)
+
+  L.iforMOf_ L.itraversed classFiles $ \classKey (classFile, samplesFile) -> do
+      cls <- Cls.loadClassification classFile
+      scoreSamples <- Cls.loadScoreSamples samplesFile
+
+      let prediction = hitCounts
+            & VC.appendClassification cls
+            & F.select @["virus_name", "class_obj", "protein_hit_score"]
+            & F.reindexed @"virus_name" %~ VC.predictMembership scoreSamples
+            & F.arrange @'[F.Asc "virus_name", F.Desc "membership_ratio"]
+
+      let outputPath = Opts.outputPrefix cfg ++ "." ++ T.unpack classKey ++ ".tsv"
+          tsvOpts = DSV.defWriterOptions '\t'
+
+      lift $ PS.runSafeT $
+          DSV.writeDSV tsvOpts (FS.fileWriter outputPath) prediction
+
+
+slaveClassify :: Config -> MPI.Rank -> Eff '[Fail, Lift IO] ()
+slaveClassify cfg _ = do
+  modelCfg <- newModelCfg cfg
+
+  handleDSVParseErrors $ runReader modelCfg $
+      case Opts.inputFiles cfg of
+        -- Opts.GivenHitsFile hitsFile -> return ()
+
+        Opts.GivenSequences vpfsFile _ ->
+            withCfgWorkDir cfg $ \workDir ->
+            withProdigalCfg cfg $
+            withHMMSearchCfg cfg $
+            handleFastaParseErrors $
+              worker workDir vpfsFile
+  where
+    worker :: Path Directory -> Path HMMERModel -> ClassifyM ()
+    worker workDir vpfsFile = do
+      concOpts <- newConcurrencyOpts cfg Nothing workDir vpfsFile
+
+      liftBaseWith $ \runInIO ->
+          PS.runSafeT $
+            Conc.makeProcessWorker MPI.rootRank tagsClassify MPI.commWorld $ \chunk ->
+                liftIO $ runInIO $
+                  fmap F.toFrameRowStoreRec $
+                    VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
+
+
+newModelCfg :: (Lifted IO r, Member Fail r) => Config -> Eff r VC.ModelConfig
+newModelCfg cfg = do
+  virusNameExtractor <- compileRegex (Opts.virusNameRegex cfg)
+
+  return VC.ModelConfig
+        { VC.modelEValueThreshold    = Opts.evalueThreshold cfg
+        , VC.modelVirusNameExtractor = \protName ->
+            fromMaybe (error $ "Could not extract virus name from protein: " ++ show protName)
+                      (virusNameExtractor protName)
+        }
 
 
 compileRegex :: (Lifted IO r, Member Fail r) => Text -> Eff r (Text -> Maybe Text)
@@ -150,88 +231,6 @@ compileRegex src = do
           (off, len) <- listToMaybe (toList arr)
 
           return (T.decodeUtf8 (BS.drop off (BS.take len btext)))
-
-
-masterClassify :: Config -> [MPI.Rank] -> IO (Maybe ())
-masterClassify cfg slaves =
-    runLift $ runFail $ handleDSVParseErrors $ do
-        modelCfg <- initModelCfg cfg
-
-        hitCounts <- runReader modelCfg $
-            case Opts.inputFiles cfg of
-              -- Opts.GivenHitsFile hitsFile ->
-              --     VC.runModel (VC.GivenHitsFile hitsFile)
-
-              Opts.GivenSequences vpfsFile genomesFile ->
-                  withCfgWorkDir cfg $ \workDir ->
-                  withProdigalCfg cfg $
-                  withHMMSearchCfg cfg $
-                  handleFastaParseErrors $ do
-                    concOpts <- newConcurrencyOpts cfg (Just slaves) workDir vpfsFile
-
-                    VC.runModel (VC.GivenGenomes genomesFile concOpts)
-
-        cls <- Cls.loadClassification (Opts.vpfClassFile cfg)
-
-        let withClassification = VC.appendClassification cls hitCounts
-
-            predict :: FrameRec '[M.VirusName, M.ModelName, M.ProteinHitScore, Cls.ClassObj]
-                    -> FrameRec '[M.VirusName, Cls.ClassName, M.MembershipRatio, M.VirusHitScore]
-            predict = F.select_ |. F.reindexed @"virus_name" %~ VC.predictMembership
-
-            prepareForWriting = F.arrange @'[F.Asc "virus_name", F.Desc "membership_ratio"]
-
-            tsvOpts = DSV.defWriterOptions '\t'
-
-            result = prepareForWriting (predict withClassification)
-
-        lift $
-          case Opts.outputFile cfg of
-            Opts.StdDevice ->
-                DSV.writeDSV tsvOpts FS.stdoutWriter result
-            Opts.FSPath fp ->
-                PS.runSafeT $
-                  DSV.writeDSV tsvOpts (FS.fileWriter (untag fp)) result
-
-
-slaveClassify :: Config -> MPI.Rank -> IO (Maybe ())
-slaveClassify cfg rank =
-    runLift $ runFail $ handleDSVParseErrors $ do
-        modelCfg <- initModelCfg cfg
-
-        runReader modelCfg $
-            case Opts.inputFiles cfg of
-              -- Opts.GivenHitsFile hitsFile -> return ()
-
-              Opts.GivenSequences vpfsFile _ ->
-                  withCfgWorkDir cfg $ \workDir ->
-                  withProdigalCfg cfg $
-                  withHMMSearchCfg cfg $
-                  handleFastaParseErrors $
-                    worker workDir vpfsFile
-  where
-    worker :: Path Directory -> Path HMMERModel -> ClassifyM ()
-    worker workDir vpfsFile = do
-      concOpts <- newConcurrencyOpts cfg Nothing workDir vpfsFile
-
-      liftBaseWith $ \runInIO ->
-          PS.runSafeT $
-            Conc.makeProcessWorker MPI.rootRank tagsClassify MPI.commWorld $ \chunk ->
-                liftIO $ runInIO $
-                  fmap F.toFrameRowStoreRec $
-                    VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
-
-
-initModelCfg :: (Lifted IO r, Member Fail r) => Config -> Eff r VC.ModelConfig
-initModelCfg cfg = do
-  virusNameExtractor <- compileRegex (Opts.virusNameRegex cfg)
-
-  return VC.ModelConfig
-        { VC.modelEValueThreshold    = Opts.evalueThreshold cfg
-        , VC.modelVirusNameExtractor = \protName ->
-            fromMaybe (error $ "Could not extract virus name from protein: " ++ show protName)
-                      (virusNameExtractor protName)
-        }
 
 
 newConcurrencyOpts :: Config
