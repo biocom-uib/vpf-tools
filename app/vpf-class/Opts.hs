@@ -1,4 +1,5 @@
 {-# language ApplicativeDo #-}
+{-# language CPP #-}
 {-# language RecordWildCards #-}
 {-# language StrictData #-}
 module Opts where
@@ -15,7 +16,9 @@ import qualified Data.Text as T
 import Options.Applicative
 import Options.Applicative.Types
 
+#ifdef VPF_ENABLE_MPI
 import qualified Control.Distributed.MPI.Store  as MPI
+#endif
 
 import VPF.Formats
 import VPF.Ext.HMMER (HMMERConfig(HMMERConfig))
@@ -38,7 +41,6 @@ data InputFiles =
 data ConcurrencyOpts = ConcurrencyOpts
   { fastaChunkSize :: Int
   , numWorkers :: Int
-  , useMPI :: Bool
   }
 
 
@@ -73,17 +75,26 @@ kvReader ra rb = ReadM $ ReaderT $ \s ->
     feedReadM ma s = runReaderT (unReadM ma) s
 
 
+#ifdef VPF_ENABLE_MPI
 defaultConcurrencyOpts :: [MPI.Rank] -> IO ConcurrencyOpts
 defaultConcurrencyOpts _ = do
+#else
+defaultConcurrencyOpts :: IO ConcurrencyOpts
+defaultConcurrencyOpts = do
+#endif
     numWorkers <- getNumCapabilities
     let fastaChunkSize = 1
-    let useMPI = False
 
     return ConcurrencyOpts {..}
 
 
+#ifdef VPF_ENABLE_MPI
 configParserIO :: [MPI.Rank] -> IO (Parser Config)
 configParserIO = fmap configParser . defaultConcurrencyOpts
+#else
+configParserIO :: IO (Parser Config)
+configParserIO = fmap configParser defaultConcurrencyOpts
+#endif
 
 configParser :: ConcurrencyOpts -> Parser Config
 configParser defConcOpts = do
@@ -144,8 +155,7 @@ configParser defConcOpts = do
         long "output"
         <> short 'o'
         <> metavar "OUTPUT"
-        <> help "Output file prefix (e.g. -c family=fam.tsv -o output would \
-                 \ produce output.family.tsv)"
+        <> help "Output file prefix (e.g. -c family=fam.tsv -o output would produce output.family.tsv)"
 
     concurrencyOpts <- concOpts
 
@@ -195,11 +205,5 @@ configParser defConcOpts = do
           <> hidden
           <> showDefault
           <> help "Number of sequences to be processed at once by each parallel worker"
-
-      useMPI <- switch $
-          long "mpi"
-          <> hidden
-          <> showDefault
-          <> help "Enable MPI mode"
 
       pure ConcurrencyOpts {..}

@@ -1,18 +1,17 @@
-{-# LANGUAGE PartialTypeSignatures #-}
 {-# language BlockArguments #-}
+{-# language CPP #-}
 {-# language MonoLocalBinds #-}
 {-# language OverloadedStrings #-}
 module Main where
 
 import Control.Applicative ((<**>))
-import qualified Control.Distributed.MPI.Store as MPI
 import Control.Eff (Eff, Member, Lift, Lifted, LiftedBase, lift, runLift)
 import Control.Eff.Reader.Strict (Reader, runReader)
 import Control.Eff.Exception (Exc, runError, Fail, die, runFail)
 import qualified Control.Lens as L
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO(liftIO))
-import Control.Monad.Trans.Control (RunInBase, StM, liftBaseWith, restoreM)
+import Control.Monad.Trans.Control (RunInBase, liftBaseWith)
 
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
@@ -26,7 +25,6 @@ import qualified Text.Regex.Base            as PCRE
 import qualified Text.Regex.PCRE.ByteString as PCRE
 
 import qualified System.Directory as D
-import System.Exit (exitFailure)
 import qualified System.IO as IO
 
 import qualified Pipes         as P
@@ -36,7 +34,6 @@ import qualified Pipes.Safe    as PS
 import qualified Options.Applicative as OptP
 
 import qualified VPF.Concurrency.Async as Conc
-import qualified VPF.Concurrency.MPI   as Conc
 
 import VPF.Eff.Cmd (Cmd)
 import VPF.Ext.HMMER.Search (HMMSearch, HMMSearchError, hmmsearchConfig, execHMMSearch)
@@ -46,7 +43,6 @@ import VPF.Formats
 import VPF.Frames.Dplyr.Ops
 import qualified VPF.Frames.Dplyr  as F
 import qualified VPF.Frames.DSV    as DSV
-import qualified VPF.Frames.InCore as F
 
 import qualified VPF.Model.Class      as Cls
 import qualified VPF.Model.Cols       as M
@@ -56,6 +52,17 @@ import qualified VPF.Util.Fasta as FA
 import qualified VPF.Util.FS    as FS
 
 import qualified Opts
+
+
+#ifdef VPF_ENABLE_MPI
+import qualified Control.Distributed.MPI.Store as MPI
+import Control.Monad.Trans.Control (StM, restoreM)
+
+import System.Exit (exitFailure)
+
+import qualified VPF.Concurrency.MPI   as Conc
+import qualified VPF.Frames.InCore as F
+#endif
 
 
 type HitCols = '[M.VirusName, M.ModelName, M.ProteinHitScore]
@@ -77,14 +84,48 @@ type ClassifyM = Eff '[
     ]
 
 
+putErrLn :: MonadIO m => String -> m ()
+putErrLn = liftIO . IO.hPutStrLn IO.stderr
+
+
+parserInfo :: OptP.Parser a -> OptP.ParserInfo a
+parserInfo parser =
+    OptP.info (parser <**> OptP.helper) $
+        OptP.fullDesc
+        <> OptP.progDesc "Classify virus sequences using an existing VPF classification"
+        <> OptP.header "vpf-class: VPF-based virus sequence classifier"
+
+parseOpts :: OptP.Parser a -> IO a
+parseOpts = OptP.execParser . parserInfo
+
+
+#ifndef VPF_ENABLE_MPI
+
+type Ranks = ()
+
+main :: IO ()
+main = do
+  cfg <- parseOpts =<< Opts.configParserIO
+
+  let run = runLift . runFail . handleDSVParseErrors
+
+  result <- run (masterClassify cfg ()) `MC.catch` \(e :: MC.SomeException) -> do
+      putErrLn "exception was caught in master task"
+      MC.throwM e
+
+  case result of
+    Just () -> return ()
+    Nothing -> putErrLn "errors were produced in master task, aborting"
+
+#else
+
+type Ranks = [MPI.Rank]
+
 tagsClassify :: Conc.JobTags Int Int
                 [FA.FastaEntry Nucleotide]
                 (StM ClassifyM (F.FrameRowStoreRec HitCols))
 tagsClassify = Conc.JobTags (Conc.JobTagIn 0) (Conc.JobTagOut 0)
 
-
-putErrLn :: MonadIO m => String -> m ()
-putErrLn = liftIO . IO.hPutStrLn IO.stderr
 
 mpiAbortWith :: Int -> String -> IO a
 mpiAbortWith ec msg = do
@@ -102,11 +143,9 @@ main = MPI.mainMPI $ do
     size <- MPI.commSize comm
 
     let slaves = [succ MPI.rootRank .. pred size]
-    parser <- Opts.configParserIO slaves
-    cfg <- OptP.execParser (opts parser)
+    cfg <- parseOpts =<< Opts.configParserIO slaves
 
-
-    case MPI.fromRank rank of
+    case rank of
       0 -> do
           let run = runLift . runFail . handleDSVParseErrors
 
@@ -128,17 +167,11 @@ main = MPI.mainMPI $ do
           case result of
             Just _  -> return ()
             Nothing -> mpiAbortWith 3 "errors were produced in slave task, aborting"
-  where
-    opts parser = OptP.info (parser <**> OptP.helper) $
-        OptP.fullDesc
-        <> OptP.progDesc "Classify virus sequences using an existing VPF classification"
-        <> OptP.header "vpf-class: VPF-based virus sequence classifier"
+
+#endif
 
 
-
-masterClassify :: Config
-               -> [MPI.Rank]
-               -> Eff '[Exc DSV.ParseError, Fail, Lift IO] ()
+masterClassify :: Config -> Ranks -> Eff '[Exc DSV.ParseError, Fail, Lift IO] ()
 masterClassify cfg slaves = do
   modelCfg <- newModelCfg cfg
 
@@ -176,6 +209,8 @@ masterClassify cfg slaves = do
           DSV.writeDSV tsvOpts (FS.fileWriter outputPath) prediction
 
 
+#ifdef VPF_ENABLE_MPI
+
 slaveClassify :: Config -> MPI.Rank -> Eff '[Fail, Lift IO] ()
 slaveClassify cfg _ = do
   modelCfg <- newModelCfg cfg
@@ -201,6 +236,8 @@ slaveClassify cfg _ = do
                 liftIO $ runInIO $
                   fmap F.toFrameRowStoreRec $
                     VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
+
+#endif
 
 
 newModelCfg :: (Lifted IO r, Member Fail r) => Config -> Eff r VC.ModelConfig
@@ -234,20 +271,27 @@ compileRegex src = do
 
 
 newConcurrencyOpts :: Config
-                   -> Maybe [MPI.Rank]
+                   -> Maybe Ranks
                    -> Path Directory
                    -> Path HMMERModel
                    -> ClassifyM (VC.ConcurrencyOpts ClassifyM)
 newConcurrencyOpts cfg slaves workDir vpfsFile =
     liftBaseWith $ \runInIO -> return $
+#ifndef VPF_ENABLE_MPI
+        case slaves of
+          Nothing  -> multithreadedMode runInIO
+          Just ()  -> multithreadedMode runInIO
+#else
         case slaves of
           Nothing  -> multithreadedMode runInIO
           Just []  -> multithreadedMode runInIO
           Just slv -> mpiMode runInIO (NE.fromList slv)
+#endif
   where
     nworkers :: Int
     nworkers = max 1 $ Opts.numWorkers (Opts.concurrencyOpts cfg)
 
+#ifdef VPF_ENABLE_MPI
     mpiMode :: RunInBase ClassifyM IO -> NE.NonEmpty MPI.Rank -> VC.ConcurrencyOpts ClassifyM
     mpiMode runInIO slv = VC.ConcurrencyOpts
         { VC.fastaChunkSize  = Opts.fastaChunkSize (Opts.concurrencyOpts cfg) * nworkers
@@ -262,6 +306,7 @@ newConcurrencyOpts cfg slaves workDir vpfsFile =
               asDeserialized = Conc.mapWorkerIO (mapStM F.fromFrameRowStoreRec)
             in
               fmap (Conc.workerToPipe . asDeserialized) mpiWorkers
+#endif
 
     multithreadedMode :: RunInBase ClassifyM IO -> VC.ConcurrencyOpts ClassifyM
     multithreadedMode runInIO = VC.ConcurrencyOpts

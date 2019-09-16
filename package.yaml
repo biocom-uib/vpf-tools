@@ -34,7 +34,6 @@ dependencies:
 - lifted-async
 - mmorph
 - monad-control
-- mpi-hs
 - optparse-applicative
 - pipes
 - pipes-concurrency
@@ -56,6 +55,12 @@ dependencies:
 - vector
 - vector-algorithms
 - vinyl
+
+when:
+- condition: flag(mpi)
+  cpp-options: -DVPF_ENABLE_MPI
+  dependencies:
+  - mpi-hs
 
 default-extensions:
 - BangPatterns
@@ -88,6 +93,11 @@ library:
   ghc-options:
   - -fsimpl-tick-factor=150
 
+  when:
+  - condition: flag(mpi)
+    exposed-modules:
+    - VPF.Concurrency.MPI
+
 executables:
   vpf-class:
     main:                Main.hs
@@ -108,6 +118,12 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - vpf-tools
+    when:
+    - condition: flag(mpi)
+      then:
+        buildable: true
+      else:
+        buildable: false
 
 tests:
   vpf-test:
@@ -119,3 +135,10 @@ tests:
     - -with-rtsopts=-N
     dependencies:
     - vpf-tools
+
+
+flags:
+  mpi:
+    description: Enable MPI support (OpenMPI with mpi-hs)
+    manual: true
+    default: false
