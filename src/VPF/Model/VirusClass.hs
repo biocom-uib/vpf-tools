@@ -172,7 +172,7 @@ processHMMOut aminoacidsFile hitsFile = do
                     |. F.innerJoin proteinSizes
 
               |. F.summarizing @"query_name" %~ do
-                    let normalizedScore row = F.get @"sequence_score" row / F.get @"k_base_size" row
+                    let normalizedScore = F.give $ F.val @"sequence_score" / F.val @"k_base_size"
 
                     F.singleField @"protein_hit_score" . sumOf (folded . to normalizedScore)
 
@@ -191,11 +191,12 @@ predictMembership scoreSamples = F.groups %~ do
       |. F.unnestFrame @"class_obj"
 
       |. F.summarizing @"class_name" %~ do
-            let products row = F.get @"class_percent" row * F.get @"protein_hit_score" row / 100
+            let products = F.give $ F.val @"protein_hit_score" * F.val @"class_percent"/100 * F.val @"protein_hit_score"
 
             F.singleField @"protein_hit_score" . sumOf (folded . to products)
 
-      |. \df -> do
+      |. do
+          \df -> do
             let totalScore = sumOf (folded . M.proteinHitScore) df
                 confidence = percentileRank scoreSamples (Tagged totalScore)
 
@@ -215,7 +216,6 @@ predictMembership scoreSamples = F.groups %~ do
                         f = fromIntegral $ Vec.length equal
                         n = fromIntegral $ Vec.length v
                     in  (c + 0.5*f) / n
-
 
 
 syncPipeline ::

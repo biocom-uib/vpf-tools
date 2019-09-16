@@ -1,4 +1,5 @@
 {-# language AllowAmbiguousTypes #-}
+{-# language ImplicitParams #-}
 {-# language InstanceSigs #-}
 {-# language UndecidableInstances #-}
 module VPF.Frames.Dplyr.Row
@@ -8,6 +9,8 @@ module VPF.Frames.Dplyr.Row
   , rsingleField
   , field
   , get
+  , val
+  , give
 
   -- ss is subsequence of rs if RImage ss rs is strictly monotone
   , rsubseq_
@@ -93,6 +96,24 @@ get :: forall i s a col cols rec.
     -> a
 get = L.view (field @col)
 {-# inline get #-}
+
+
+val :: forall i s a col cols rec.
+    ( FieldSpec cols i col
+    , GetField rec col cols
+    , col ~ '(s, a)
+    , ?row :: Fields rec cols
+    )
+    => a
+val = get @col (?row)
+{-# inline val #-}
+
+
+give :: ((?row :: Fields rec cols) => a) -> Fields rec cols -> a
+give a row =
+    let ?row = row
+    in  a
+{-# inline give #-}
 
 
 -- rsubseq lenses
