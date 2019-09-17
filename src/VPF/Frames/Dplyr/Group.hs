@@ -72,7 +72,7 @@ instance (FieldSpec cols i keys, GroupingKey rec keys cols) => SortKey rec (Asc 
     compareRows = compare `on` getKey @keys
 
 instance (FieldSpec cols i keys, GroupingKey rec keys cols) => SortKey rec (Desc i) cols where
-    compareRows = compare `on` getKey @keys
+    compareRows = flip (compareRows @rec @(Asc i))
 
 instance SortKey rec ('[] :: [SortOrder]) cols where
     compareRows _ _ = EQ
