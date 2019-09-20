@@ -48,7 +48,7 @@ data Prodigal a where
 
 
 data ProdigalConfig = ProdigalConfig
-  { prodigalPath        :: FilePath
+  { prodigalPath        :: Path Executable
   , prodigalDefaultArgs :: [String]
   }
   deriving (Eq, Ord, Show, Generic)
@@ -58,7 +58,7 @@ instance Store ProdigalConfig
 
 data ProdigalError
   = ProdigalError    { cmd :: ProdigalArgs, exitCode :: !Int, stderr :: !Text }
-  | ProdigalNotFound { search :: FilePath }
+  | ProdigalNotFound { search :: Path Executable }
   deriving (Eq, Ord, Show, Generic)
 
 instance Store ProdigalError
@@ -68,13 +68,15 @@ type instance CmdEff Prodigal r = (Member (Exc ProdigalError) r, Lifted IO r)
 
 
 prodigalConfig :: (Member (Exc ProdigalError) r, Lifted IO r)
-               => FilePath -> [String] -> Eff r ProdigalConfig
+               => Path Executable
+               -> [String]
+               -> Eff r ProdigalConfig
 prodigalConfig path defaultArgs = do
-  mpath' <- lift $ resolveExecutable path
+  mpath' <- lift $ resolveExecutable (untag path)
 
   case mpath' of
     Nothing    -> throwError (ProdigalNotFound path)
-    Just path' -> return (ProdigalConfig path' defaultArgs)
+    Just path' -> return (ProdigalConfig (Tagged path') defaultArgs)
 
 
 prodigal :: Member (Cmd Prodigal) r
@@ -102,7 +104,7 @@ execProdigal cfg = runCmd $ \(Prodigal args@ProdigalArgs{..}) -> do
     (exitCode, stderr) <- lift $
         Proc.readProcessStderr $
         Proc.setStdout Proc.nullStream $
-        Proc.proc (prodigalPath cfg) (prodigalDefaultArgs cfg ++ cmdlineArgs)
+        Proc.proc (untag (prodigalPath cfg)) (prodigalDefaultArgs cfg ++ cmdlineArgs)
 
     case exitCode of
       ExitSuccess    -> return ()

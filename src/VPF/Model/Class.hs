@@ -1,13 +1,16 @@
+{-# language DeriveGeneric #-}
 module VPF.Model.Class
-  ( rawClassification
-  , loadRawClassification
+  ( classObjs
   , loadClassification
+  , loadClassObjs
   , loadScoreSamples
-  , Classification
-  , ClassificationCols
-  , RawClassification
-  , RawClassificationCols
+  , ClassificationFiles(..)
+  , traverseClassificationFiles
+  , ClassificationParams(..)
+  , loadClassificationParams
   ) where
+
+import GHC.Generics (Generic)
 
 import Control.Eff
 import Control.Eff.Exception (Exc)
@@ -29,26 +32,26 @@ import VPF.Formats
 import qualified VPF.Frames.DSV as DSV
 
 
-rawClassification :: Iso' (GroupedFrameRec (Field M.ModelName) '[ClassObj])
-                          (GroupedFrameRec (Field M.ModelName) '[ClassName, ClassPercent, ClassCat])
-rawClassification = L.iso (F.groups %~ do
-                             F.col @"class_obj" %~ unnestClassObj |. F.unnestFrame @"class_obj")
-                          (F.groups %~ F.cat
-                             F.singleRow . F.singleField @"class_obj" . summarizeToClassObj)
+classObjs :: Iso' (GroupedFrameRec (Field ModelName) ModelClassCols)
+                  (GroupedFrameRec (Field ModelName) '[ClassObj])
+classObjs = L.iso (F.groups %~ F.cat
+                     F.singleRow . F.singleField @"class_obj" . summarizeToClassObj)
+                  (F.groups %~ do
+                     F.col @"class_obj" %~ unnestClassObj |. F.unnestFrame @"class_obj")
 
 
-loadRawClassification :: (Lifted IO r, Member (Exc DSV.ParseError) r)
-                      => Path (DSV "\t" RawClassificationCols)
-                      -> Eff r (GroupedFrameRec (Field M.ModelName) '[ClassName, ClassPercent, ClassCat])
-loadRawClassification fp = F.setIndex @"model_name" <$> DSV.readFrame fp opts
+loadClassification :: (Lifted IO r, Member (Exc DSV.ParseError) r)
+                   => Path (DSV "\t" ClassificationCols)
+                   -> Eff r (GroupedFrameRec (Field ModelName) ModelClassCols)
+loadClassification fp = F.setIndex @"model_name" <$> DSV.readFrame fp opts
   where
     opts = (DSV.defParserOptions '\t') { DSV.hasHeader = True }
 
 
-loadClassification :: (Lifted IO r, Member (Exc DSV.ParseError) r)
-                   => Path (DSV "\t" RawClassificationCols)
-                   -> Eff r (GroupedFrameRec (Field M.ModelName) '[ClassObj])
-loadClassification = fmap (L.review rawClassification) . loadRawClassification
+loadClassObjs :: (Lifted IO r, Member (Exc DSV.ParseError) r)
+                   => Path (DSV "\t" ClassificationCols)
+                   -> Eff r (GroupedFrameRec (Field ModelName) '[ClassObj])
+loadClassObjs = fmap (L.view classObjs) . loadClassification
 
 
 loadScoreSamples :: (Lifted IO r, Member (Exc DSV.ParseError) r)
@@ -62,3 +65,30 @@ loadScoreSamples fp = do
     unRec = L.review F.untagged . L.view F.rsingleton
 
     opts = (DSV.defParserOptions '\t') { DSV.hasHeader = False }
+
+
+data ClassificationFiles = ClassificationFiles
+    { modelClassesFile :: Path (DSV "\t" ClassificationCols)
+    , scoreSamplesFile :: Path (DSV "\t" '[M.VirusHitScore])
+    }
+    deriving Generic
+
+
+traverseClassificationFiles :: Traversal' ClassificationFiles FilePath
+traverseClassificationFiles f (ClassificationFiles mc ss) =
+    ClassificationFiles <$> L._Wrapped f mc <*> L._Wrapped f ss
+
+
+data ClassificationParams = ClassificationParams
+    { modelClasses :: GroupedFrameRec (Field ModelName) '[ClassName, ClassPercent, ClassCat]
+    , scoreSamples :: Vector (Field M.VirusHitScore)
+    }
+
+loadClassificationParams :: (Lifted IO r, Member (Exc DSV.ParseError) r)
+                         => ClassificationFiles
+                         -> Eff r ClassificationParams
+loadClassificationParams paths = do
+    cls <- loadClassification (modelClassesFile paths)
+    scores <- loadScoreSamples (scoreSamplesFile paths)
+
+    return $ ClassificationParams cls scores

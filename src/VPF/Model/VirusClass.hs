@@ -313,19 +313,14 @@ processHits wd key protsFile hitsFile = do
     return processedHitsFile
 
 
-predictMembership :: GroupedFrameRec (Field M.ModelName) '[Cls.ClassObj]
-                  -> Vector (Field M.VirusHitScore)
+predictMembership :: Cls.ClassificationParams
                   -> GroupedFrameRec (Field M.VirusName) '[M.ModelName, M.ProteinHitScore]
                   -> GroupedFrameRec (Field M.VirusName)
                                      '[Cls.ClassName, M.MembershipRatio, M.VirusHitScore, M.ConfidenceScore]
-predictMembership classes scoreSamples = F.groups %~ do
+predictMembership classParams = F.groups %~ do
     F.cat
-      |. L.iso (F.setIndex @"model_name") F.dropIndex %~ do
-            F.innerJoin do
-              classes & F.groups %~ do
-                  F.cat
-                    |. F.col @"class_obj" %~ Cls.unnestClassObj
-                    |. F.unnestFrame @"class_obj"
+      |. L.iso (F.setIndex @"model_name") F.dropIndex %~
+            F.innerJoin (Cls.modelClasses classParams)
 
       |. F.summarizing @"class_name" %~ do
             let products = F.give $ F.val @"protein_hit_score" * F.val @"class_percent"/100 * F.val @"protein_hit_score"
@@ -335,7 +330,7 @@ predictMembership classes scoreSamples = F.groups %~ do
       |. do
           \df -> do
             let totalScore = sum (df & F.rows %~ F.get @"protein_hit_score")
-                confidence = percentileRank scoreSamples (Tagged totalScore)
+                confidence = percentileRank (Cls.scoreSamples classParams) (Tagged totalScore)
 
             df & F.cat
               |. F.mutate1 @"virus_hit_score"  (const totalScore)
@@ -438,8 +433,7 @@ newtype PredictMembershipConcurrencyOpts m = PredictMembershipConcurrencyOpts
     }
 
 asyncPredictMemberships :: forall r. (LiftedBase IO r, Member (Exc DSV.ParseError) r)
-                        => Map (Field ("class_key" ::: Text))
-                             (Path (DSV "\t" Cls.RawClassificationCols), Path (DSV "\t" '[M.VirusHitScore]))
+                        => Map (Field Cls.ClassKey) Cls.ClassificationFiles
                         -> [Path (DSV "\t" AggregatedHitsCols)]
                         -> Path Directory
                         -> PredictMembershipConcurrencyOpts (Eff r)
@@ -462,11 +456,9 @@ asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
     ((), paths) <- Conc.runAsyncEffect (nworkers+1) $
         Conc.duplicatingAsyncProducer (P.each (Map.toAscList classFiles))
         >||>
-        P.mapM (L._2 . L._1 %%~ Cls.loadClassification)
+        P.mapM (L._2 %%~ Cls.loadClassificationParams)
         >-|>
-        P.mapM (L._2 . L._2 %%~ Cls.loadScoreSamples)
-        >-|>
-        P.map (L._2 %~ \(classes, scores) -> predictAll aggHitss classes scores)
+        P.map (L._2 %~ predictAll aggHitss)
         >-|>
         P.mapM (\(classKey, prediction) -> writeOutput classKey prediction)
         >-|>
@@ -476,13 +468,12 @@ asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
   where
     predictAll :: Monad m
                => [GroupedFrameRec (Field M.VirusName) '[M.ModelName, M.ProteinHitScore]]
-               -> GroupedFrameRec (Field M.ModelName) '[Cls.ClassObj]
-               -> Vector (Field M.VirusHitScore)
+               -> Cls.ClassificationParams
                -> Producer (Record PredictedCols) m ()
-    predictAll aggHitss classes scores =
+    predictAll aggHitss classParams =
         P.each aggHitss
         >-> P.map do
-              predictMembership classes scores
+              predictMembership classParams
                 |. F.groups %~ F.arrange @(F.Desc "membership_ratio")
                 |. F.resetIndex
         >-> P.concat
@@ -545,8 +536,7 @@ data ClassificationStep
             , '[ Exc DSV.ParseError
                ] <:: r
             )
-            => Map (Field ("class_key" ::: Text))
-                 (Path (DSV "\t" Cls.RawClassificationCols), Path (DSV "\t" '[M.VirusHitScore]))
+            => Map (Field Cls.ClassKey) Cls.ClassificationFiles
             -> Path Directory
             -> PredictMembershipConcurrencyOpts (Eff r)
             -> Eff r [Path (DSV "\t" PredictedCols)]

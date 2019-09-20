@@ -4,7 +4,6 @@
 {-# language OverloadedStrings #-}
 module Main where
 
-import Control.Applicative ((<**>))
 import Control.Concurrent (getNumCapabilities)
 import Control.Eff (Eff, Member, Lift, Lifted, lift, runLift)
 import Control.Eff.Reader.Strict (Reader, runReader)
@@ -16,9 +15,9 @@ import Control.Monad.Trans.Control (MonadBaseControl, RunInBase, liftBaseWith)
 
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
-import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.List.NonEmpty as NE
+import qualified Data.Yaml.Aeson as Y
 import Data.Text (Text)
 import qualified Data.Text.Encoding         as T
 import qualified Text.Regex.Base            as PCRE
@@ -31,11 +30,10 @@ import System.Exit (exitWith, ExitCode(..))
 import qualified Pipes         as P
 import qualified Pipes.Prelude as P
 
-import qualified Options.Applicative as OptP
-
 import qualified VPF.Concurrency.Async as Conc
 
 import VPF.Eff.Cmd (Cmd)
+import qualified VPF.Ext.HMMER        as HMM
 import qualified VPF.Ext.HMMER.Search as HMM
 import qualified VPF.Ext.Prodigal     as Pr
 
@@ -88,24 +86,13 @@ putErrLn :: MonadIO m => String -> m ()
 putErrLn = liftIO . IO.hPutStrLn IO.stderr
 
 
-parserInfo :: OptP.Parser a -> OptP.ParserInfo a
-parserInfo parser =
-    OptP.info (parser <**> OptP.helper) $
-        OptP.fullDesc
-        <> OptP.progDesc "Classify virus sequences using an existing VPF classification"
-        <> OptP.header "vpf-class: VPF-based virus sequence classifier"
-
-parseOpts :: OptP.Parser a -> IO a
-parseOpts = OptP.execParser . parserInfo
-
-
 #ifndef VPF_ENABLE_MPI
 
 type Ranks = ()
 
 main :: IO ()
 main = do
-    cfg <- parseOpts =<< Opts.configParserIO
+    cfg <- Opts.parseArgs
 
     ec <- masterClassify cfg () `MC.catch` \(e :: MC.SomeException) -> do
         putErrLn "exception was caught in master task"
@@ -143,7 +130,7 @@ main = MPI.mainMPI $ do
     size <- MPI.commSize comm
 
     let slaves = [succ MPI.rootRank .. pred size]
-    cfg <- parseOpts =<< Opts.configParserIO slaves
+    cfg <- Opts.parseArgs slaves
 
     case rank of
       0 -> do
@@ -168,17 +155,16 @@ main = MPI.mainMPI $ do
 
 
 masterClassify :: Config -> Ranks -> IO ExitCode
-masterClassify cfg slaves = do
-    let genomesFile = Opts.genomesFile cfg
-        vpfsFile    = Opts.vpfsFile cfg
+masterClassify cfg slaves = runLift $ failingWithExitCode 3 $ do
+    dataFilesIndex <- loadDataFilesIndex cfg
 
-    let classFiles = Map.intersectionWith (,) (Opts.vpfClassFiles cfg)
-                                              (Opts.scoreSampleFiles cfg)
+    let genomesFile = Opts.genomesFile cfg
         outputDir = Opts.outputDir cfg
 
-    r <- withCfgWorkDir cfg $ \workDir ->
-        runLift $
-        runFail $
+        classFiles = Opts.classificationFiles dataFilesIndex
+        vpfsFile    = Opts.vpfsFile dataFilesIndex
+
+    outputs <- withCfgWorkDir cfg $ \workDir ->
         handleCheckpointLoadError $
           VC.runClassification workDir genomesFile $ \resume -> \case
               VC.SearchHitsStep run -> do
@@ -217,34 +203,25 @@ masterClassify cfg slaves = do
                   handleDSVParseErrors $
                       run classFiles outputDir concOpts
 
-    case r of
-      Nothing ->
-          return (ExitFailure 3)
-      Just outputs -> do
-          forM_ outputs $ \(Tagged output) ->
-              putErrLn $ "written " ++ output
-          return ExitSuccess
+    forM_ outputs $ \(Tagged output) ->
+        putErrLn $ "written " ++ output
 
 
 #ifdef VPF_ENABLE_MPI
 
 slaveClassify :: Config -> MPI.Rank -> IO ExitCode
-slaveClassify cfg _ = do
-    let vpfsFile = Opts.vpfsFile cfg
+slaveClassify cfg _ = runLift $ failingWithExitCode 4 $ do
+    dataFilesIndex <- loadDataFilesIndex cfg
 
-    r <- runLift $
-      withCfgWorkDir cfg $ \workDir ->
-      runFail $
-      handleCheckpointLoadError $
-      handleDSVParseErrors $
-      withProdigalCfg cfg $
-      withHMMSearchCfg cfg $
-      handleFastaParseErrors $
-          worker workDir vpfsFile
+    let vpfsFile = Opts.vpfsFile dataFilesIndex
 
-    case r of
-      Just () -> return ExitSuccess
-      Nothing -> return (ExitFailure 4)
+    withCfgWorkDir cfg $ \workDir ->
+        handleCheckpointLoadError $
+        handleDSVParseErrors $
+        withProdigalCfg cfg $
+        withHMMSearchCfg cfg $
+        handleFastaParseErrors $
+            worker workDir vpfsFile
   where
     worker :: Path Directory -> Path HMMERModel -> SearchHitsM ()
     worker workDir vpfsFile = do
@@ -366,6 +343,28 @@ withCfgWorkDir cfg fm =
           fm wd
 
 
+failingWithExitCode :: Int -> Eff (Fail ': r) () -> Eff r ExitCode
+failingWithExitCode ec m = do
+    r <- runFail m
+
+    case r of
+      Just () -> return ExitSuccess
+      Nothing -> return (ExitFailure ec)
+
+
+loadDataFilesIndex :: (Lifted IO r, Member Fail r) => Config -> Eff r Opts.DataFilesIndex
+loadDataFilesIndex cfg = do
+    r <- liftIO $ Opts.loadDataFilesIndex (Opts.dataFilesIndexFile cfg)
+
+    case r of
+      Right idx -> return idx
+      Left err -> do
+          putErrLn "error loading data file index:"
+          let indentedPretty = unlines . map ('\t':) . lines . Y.prettyPrintParseException
+          putErrLn (indentedPretty err)
+          die
+
+
 withProdigalCfg :: (Lifted IO r, Member Fail r)
                => Config
                -> Eff (Cmd Pr.Prodigal ': Exc Pr.ProdigalError ': r) a
@@ -392,8 +391,10 @@ withHMMSearchCfg :: (Lifted IO r, Member Fail r)
                  -> Eff (Cmd HMM.HMMSearch ': Exc HMM.HMMSearchError ': r) a
                  -> Eff r a
 withHMMSearchCfg cfg m = do
+    let hmmerConfig = HMM.HMMERConfig (Opts.hmmerPrefix cfg)
+
     handleHMMSearchErrors $ do
-      hmmsearchCfg <- HMM.hmmsearchConfig (Opts.hmmerConfig cfg) []
+      hmmsearchCfg <- HMM.hmmsearchConfig hmmerConfig []
       HMM.execHMMSearch hmmsearchCfg m
   where
     handleHMMSearchErrors :: (Lifted IO r, Member Fail r)

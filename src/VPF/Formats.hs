@@ -3,6 +3,7 @@ module VPF.Formats
   , untag
   , Path
   , Directory
+  , Executable
   , FASTA
   , SeqType(..)
   , GenBank
@@ -12,6 +13,7 @@ module VPF.Formats
   , CSV
   , TSV
   , JSON
+  , YAML
   ) where
 
 import GHC.TypeLits (Symbol)
@@ -24,6 +26,7 @@ import Data.Tagged
 type Path tag = Tagged tag FilePath
 
 data Directory
+data Executable
 
 data FASTA (t :: SeqType)
 data SeqType = Nucleotide | Aminoacid
@@ -39,6 +42,7 @@ type CSV cols = DSV "," cols
 type TSV cols = DSV "\t" cols
 
 data JSON (a :: Type)
+data YAML (a :: Type)
 
 
 instance Store a => Store (Tagged tag a)

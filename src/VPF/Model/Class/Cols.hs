@@ -13,7 +13,7 @@ import Data.Text (Text)
 import Data.Vector (Vector)
 import qualified Data.Vinyl.FromTuple as V
 
-import Frames (Frame(..), Record)
+import Frames (Frame(..))
 import Frames.InCore (VectorFor)
 import Frames.TH (declareColumn)
 
@@ -23,6 +23,8 @@ import VPF.Frames.Types
 
 import qualified VPF.Frames.Dplyr as F
 
+
+declareColumn "class_key" ''Text
 
 declareColumn "model_name" ''Text
 
@@ -41,14 +43,11 @@ type instance VectorFor Class = Vector
 declareColumn "class_obj" ''Class
 
 
-type RawClassificationCols = '[ModelName, ClassName, ClassPercent, ClassCat]
-type RawClassification = Record RawClassificationCols
-
-type ClassificationCols = '[ModelName, ClassObj]
-type Classification = Record ClassificationCols
+type ModelClassCols = '[ClassName, ClassPercent, ClassCat]
+type ClassificationCols = ModelName ': ModelClassCols
 
 
-summarizeToClassObj :: FrameRec '[ClassName, ClassPercent, ClassCat] -> Class
+summarizeToClassObj :: FrameRec ModelClassCols -> Class
 summarizeToClassObj = toClassObj . coerce . fmap V.ruple
   where
     toClassObj :: Frame (Field ClassName, Field ClassPercent, Field ClassCat) -> Class
@@ -64,7 +63,7 @@ summarizeToClassObj = toClassObj . coerce . fmap V.ruple
             NonHomogClass (Map.fromList $ L.toListOf (L.folded . L.to keyValuePairs) df)
 
 
-unnestClassObj :: Class -> FrameRec '[ClassName, ClassPercent, ClassCat]
+unnestClassObj :: Class -> FrameRec ModelClassCols
 unnestClassObj =
     F.cat
       |. F.singleRow . F.singleField @"class_obj"

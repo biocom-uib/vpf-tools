@@ -58,6 +58,7 @@ dependencies:
 - vector
 - vector-algorithms
 - vinyl
+- yaml
 
 when:
 - condition: flag(mpi)

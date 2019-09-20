@@ -1,20 +1,25 @@
+{-# OPTIONS_GHC -Wno-orphans #-}
 {-# language ApplicativeDo #-}
 {-# language CPP #-}
+{-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
 {-# language StrictData #-}
 module Opts where
 
+import GHC.Generics (Generic)
+
 import Control.Concurrent (getNumCapabilities)
-import Control.Monad.Trans.Except (Except, throwE)
-import Control.Monad.Trans.Reader (ReaderT(..))
+import Control.Lens (Traversal')
+import qualified Control.Lens as L
 
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Yaml.Aeson as Y
+
+import qualified System.FilePath as FP
 
 import Options.Applicative
-import Options.Applicative.Types
 
 #ifdef VPF_ENABLE_MPI
 import qualified Control.Distributed.MPI.Store  as MPI
@@ -22,68 +27,76 @@ import qualified Control.Distributed.MPI.Store  as MPI
 
 import VPF.Formats
 import VPF.Frames.Types
-import VPF.Ext.HMMER (HMMERConfig(HMMERConfig))
-import VPF.Model.Class (RawClassificationCols)
-import qualified VPF.Model.Cols as M
+import qualified VPF.Model.Class      as Cls
+import qualified VPF.Model.Class.Cols as Cls
 
 
-data ArgPath t = FSPath (Path t) | StdDevice
-  deriving (Eq, Ord)
+data DataFilesIndex = DataFilesIndex
+    { classificationFiles :: Map (Field Cls.ClassKey) Cls.ClassificationFiles
+    , vpfsFile            :: Path HMMERModel
+    }
+    deriving Generic
 
-instance Show (ArgPath t) where
-  show (FSPath p) = show (untag p)
-  show StdDevice  = "\"-\""
+instance Y.ToJSON Cls.ClassificationFiles
+instance Y.FromJSON Cls.ClassificationFiles
 
+instance Y.ToJSON DataFilesIndex
+instance Y.FromJSON DataFilesIndex
+
+
+traverseDataFilesIndex :: Traversal' DataFilesIndex FilePath
+traverseDataFilesIndex f (DataFilesIndex cf vpfs) =
+    DataFilesIndex <$> traverse (Cls.traverseClassificationFiles f) cf <*> L._Wrapped f vpfs
+
+
+loadDataFilesIndex :: Path (YAML DataFilesIndex) -> IO (Either Y.ParseException DataFilesIndex)
+loadDataFilesIndex fp = do
+    r <- Y.decodeFileEither (untag fp)
+    return $ L.over (L.mapped . traverseDataFilesIndex) makeRelativeToIndex r
+  where
+    makeRelativeToIndex p
+      | FP.isRelative p = relativeTo FP.</> p
+      | otherwise       = p
+
+    relativeTo = FP.takeDirectory (untag fp)
 
 data ConcurrencyOpts = ConcurrencyOpts
-  { fastaChunkSize :: Int
-  , numWorkers :: Int
-  }
+    { fastaChunkSize :: Int
+    , numWorkers :: Int
+    }
+
 
 
 data Config = Config
-  { hmmerConfig      :: HMMERConfig
-  , prodigalPath     :: FilePath
-  , evalueThreshold  :: Double
-  , vpfsFile         :: Path HMMERModel
-  , genomesFile      :: Path (FASTA Nucleotide)
-  , virusNameRegex   :: Text
-  , vpfClassFiles    :: Map (Field ("class_key" ::: Text)) (Path (DSV "\t" RawClassificationCols))
-  , scoreSampleFiles :: Map (Field ("class_key" ::: Text)) (Path (DSV "\t" '[M.VirusHitScore]))
-  , outputDir        :: Path Directory
-  , workDir          :: Maybe (Path Directory)
-  , concurrencyOpts  :: ConcurrencyOpts
-  }
-
-
-argPathReader :: ReadM (ArgPath t)
-argPathReader = maybeReader $ \s ->
-    case s of
-      "-" -> Just StdDevice
-      _   -> Just (FSPath (Tagged s))
-
-
-kvReader :: ReadM a -> ReadM b -> ReadM (a, b)
-kvReader ra rb = ReadM $ ReaderT $ \s ->
-    case break (== '=') s of
-      (sa, '=':sb) -> liftA2 (,) (feedReadM ra sa) (feedReadM rb sb)
-      _            -> throwE (ErrorMsg "could not parse key/value pair")
-  where
-    feedReadM :: ReadM a -> String -> Except ParseError a
-    feedReadM ma s = runReaderT (unReadM ma) s
+    { hmmerPrefix        :: Maybe (Path Directory)
+    , prodigalPath       :: Path Executable
+    , evalueThreshold    :: Double
+    , genomesFile        :: Path (FASTA Nucleotide)
+    , virusNameRegex     :: Text
+    , dataFilesIndexFile :: Path (YAML DataFilesIndex)
+    , outputDir          :: Path Directory
+    , workDir            :: Maybe (Path Directory)
+    , concurrencyOpts    :: ConcurrencyOpts
+    }
 
 
 #ifdef VPF_ENABLE_MPI
-defaultConcurrencyOpts :: [MPI.Rank] -> IO ConcurrencyOpts
-defaultConcurrencyOpts _ = do
+parseArgs :: [MPI.Rank] -> IO Config
+parseArgs slaves = do
+    parser <- configParserIO slaves
 #else
-defaultConcurrencyOpts :: IO ConcurrencyOpts
-defaultConcurrencyOpts = do
+parseArgs :: IO Config
+parseArgs = do
+    parser <- configParserIO
 #endif
-    numWorkers <- getNumCapabilities
-    let fastaChunkSize = 1
-
-    return ConcurrencyOpts {..}
+    execParser (parserInfo parser)
+  where
+    parserInfo :: Parser a -> ParserInfo a
+    parserInfo parser =
+        info (parser <**> helper) $
+            fullDesc
+            <> progDesc "Classify virus sequences using an existing VPF classification"
+            <> header "vpf-class: VPF-based virus sequence classifier"
 
 
 #ifdef VPF_ENABLE_MPI
@@ -94,9 +107,25 @@ configParserIO :: IO (Parser Config)
 configParserIO = fmap configParser defaultConcurrencyOpts
 #endif
 
+
+#ifdef VPF_ENABLE_MPI
+defaultConcurrencyOpts :: [MPI.Rank] -> IO ConcurrencyOpts
+defaultConcurrencyOpts _slaves = do
+#else
+defaultConcurrencyOpts :: IO ConcurrencyOpts
+defaultConcurrencyOpts = do
+#endif
+    numWorkers <- getNumCapabilities
+    let fastaChunkSize = 1
+
+    return ConcurrencyOpts {..}
+
+
+
+
 configParser :: ConcurrencyOpts -> Parser Config
 configParser defConcOpts = do
-    prodigalPath <- strOption $
+    prodigalPath <- fmap Tagged $ strOption $
         long "prodigal"
         <> metavar "PRODIGAL"
         <> hidden
@@ -104,7 +133,7 @@ configParser defConcOpts = do
         <> value "prodigal"
         <> help "Path to the prodigal executable (or in $PATH)"
 
-    hmmerConfig <- fmap HMMERConfig $ optional $ strOption $
+    hmmerPrefix <- optional $ fmap Tagged $ strOption $
         long "hmmer-prefix"
         <> metavar "HMMER"
         <> hidden
@@ -127,11 +156,10 @@ configParser defConcOpts = do
         <> hidden
         <> help "Generate temporary files in DIR instead of creating a temporary one"
 
-    vpfsFile <- strOption $
-        long "vpf"
-        <> short 'v'
-        <> metavar "VPF_HMMS"
-        <> help ".hmms file containing query VPF profiles"
+    dataFilesIndexFile <- strOption $
+        long "data-index"
+        <> metavar "DATA_INDEX"
+        <> help ".yaml file containing references to all required data files"
 
     genomesFile <- strOption $
         long "input-seqs"
@@ -146,18 +174,6 @@ configParser defConcOpts = do
         <> hidden
         <> showDefault
         <> help "PCRE regex matching the virus identifier from a gene identifier (options PCRE_ANCHORED | PCRE_UTF8)"
-
-    vpfClassFiles <- fmap Map.fromList $ some $ option (kvReader str str) $
-        long "vpf-classes"
-        <> short 'c'
-        <> metavar "CLASS_FILE"
-        <> help "Tab-separated file containing the classification of the VPFs"
-
-    scoreSampleFiles <- fmap Map.fromList $ some $ option (kvReader str str) $
-        long "scores"
-        <> short 's'
-        <> metavar "SCORE_FILE"
-        <> help "Score samples (one per line) to take percentiles on, same format as --vpf-classes"
 
     outputDir <- fmap Tagged $ strOption $
         long "output-dir"
