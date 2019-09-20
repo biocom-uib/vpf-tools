@@ -6,20 +6,15 @@ import Data.Text (Text)
 import Data.Semigroup.Foldable (foldMap1)
 import qualified Data.Text.IO as T
 
-import Control.Concurrent (threadDelay)
 import qualified Control.Monad.Catch as MC
 import qualified Control.Foldl as L
 import Control.Lens (folded)
-import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Control.Distributed.MPI.Store as MPI
 
 import qualified Data.List.NonEmpty as NE
-import Data.Semigroup.Traversable (traverse1)
 
-import Pipes ((>->))
 import qualified Pipes         as P
-import qualified Pipes.Prelude as P
 import qualified Pipes.Safe    as PS
 
 import System.Exit (exitWith, ExitCode(..))
@@ -31,10 +26,6 @@ import qualified VPF.Concurrency.Pipes as Conc
 
 import VPF.Formats
 import qualified VPF.Util.Fasta as FA
-import qualified VPF.Util.FS    as FS
-
-import Control.Concurrent (myThreadId)
-import Foreign.StablePtr (newStablePtr)
 
 
 data MyTag = MyTag
@@ -56,7 +47,7 @@ main = MPI.mainMPI $ do
   rank <- MPI.commRank comm
   size <- MPI.commSize comm
 
-  case MPI.fromRank rank of
+  case rank of
     0 -> do
         r <- rootMain (NE.fromList [succ rank..pred size]) comm `MC.catch` \e -> do
                print (e :: MC.SomeException)
@@ -94,6 +85,6 @@ rootMain slaves comm = do
 
 
 workerMain :: MPI.Rank -> MPI.Rank -> MPI.Comm -> IO ()
-workerMain master me comm = do
+workerMain master _ comm = do
     PS.runSafeT $ Conc.makeProcessWorker master jobTags comm $ \chunk -> do
         return (map FA.entryName chunk)
