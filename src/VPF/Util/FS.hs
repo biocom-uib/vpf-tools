@@ -1,8 +1,9 @@
 module VPF.Util.FS where
 
-import Control.Monad (forever)
+import Control.Monad (forever, when)
 import Control.Monad.Catch (MonadCatch, MonadMask, try)
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Base (liftBase)
 import Control.Monad.Trans.Control (MonadBaseControl(..), liftBaseOp)
 
 import Data.Tagged (Tagged(..), untag)
@@ -16,6 +17,7 @@ import qualified Pipes.Safe         as P
 import qualified Pipes.Safe.Prelude as P
 
 import qualified System.Directory as D
+import qualified System.FilePath  as FP
 import qualified System.IO        as IO
 import qualified System.IO.Error  as IO
 import qualified System.IO.Temp   as Temp
@@ -51,6 +53,13 @@ resolveExecutable path = do
     hasPermission = fmap D.executable . D.getPermissions
 
 
+whenNotExists :: MonadIO m => Path tag -> m () -> m ()
+whenNotExists fp m = do
+    exists <- liftIO $ D.doesFileExist (untag fp)
+
+    when (not exists) m
+
+
 withTmpDir :: forall m n a. (MonadIO m, MonadMask m, MonadBaseControl m n)
            => Path Directory
            -> String
@@ -59,6 +68,7 @@ withTmpDir :: forall m n a. (MonadIO m, MonadMask m, MonadBaseControl m n)
 withTmpDir workdir template f =
     liftBaseOp (Temp.withTempDirectory (untag workdir) template)
         (f . Tagged)
+
 
 withTmpFile :: forall tag m n a. (MonadIO m, MonadMask m, MonadBaseControl m n)
             => Path Directory
@@ -74,6 +84,20 @@ withTmpFile workdir template = liftBaseOp op
     op f = Temp.withTempFile (untag workdir) template $ \fp h -> do
         hCloseM h
         f (Tagged fp)
+
+
+atomicCreateFile :: forall tag m n a. (MonadIO m, MonadMask m, MonadBaseControl m n)
+                 => Path tag
+                 -> (Path tag -> n a)
+                 -> n a
+atomicCreateFile finalPath create =
+    withTmpFile (Tagged workdir) template $ \path -> do
+        a <- create path
+        liftBase $ liftIO $ D.renameFile (untag path) (untag finalPath)
+        return a
+  where
+    (workdir, finalFileName) = FP.splitFileName (untag finalPath)
+    template = "tmp-" ++ finalFileName
 
 
 emptyTmpFile :: forall tag m. MonadIO m

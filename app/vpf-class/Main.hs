@@ -5,13 +5,14 @@
 module Main where
 
 import Control.Applicative ((<**>))
-import Control.Eff (Eff, Member, Lift, Lifted, LiftedBase, lift, runLift)
+import Control.Concurrent (getNumCapabilities)
+import Control.Eff (Eff, Member, Lift, Lifted, lift, runLift)
 import Control.Eff.Reader.Strict (Reader, runReader)
 import Control.Eff.Exception (Exc, runError, Fail, die, runFail)
-import qualified Control.Lens as L
+import Control.Monad (forM_)
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO(liftIO))
-import Control.Monad.Trans.Control (RunInBase, liftBaseWith)
+import Control.Monad.Trans.Control (MonadBaseControl, RunInBase, liftBaseWith)
 
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
@@ -19,33 +20,28 @@ import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
-import qualified Data.Text                  as T
 import qualified Data.Text.Encoding         as T
 import qualified Text.Regex.Base            as PCRE
 import qualified Text.Regex.PCRE.ByteString as PCRE
 
 import qualified System.Directory as D
-import qualified System.IO as IO
+import qualified System.IO   as IO
+import System.Exit (exitWith, ExitCode(..))
 
 import qualified Pipes         as P
 import qualified Pipes.Prelude as P
-import qualified Pipes.Safe    as PS
 
 import qualified Options.Applicative as OptP
 
 import qualified VPF.Concurrency.Async as Conc
 
 import VPF.Eff.Cmd (Cmd)
-import VPF.Ext.HMMER.Search (HMMSearch, HMMSearchError, hmmsearchConfig, execHMMSearch)
-import VPF.Ext.Prodigal     (Prodigal, ProdigalError, prodigalConfig, execProdigal)
+import qualified VPF.Ext.HMMER.Search as HMM
+import qualified VPF.Ext.Prodigal     as Pr
 
 import VPF.Formats
-import VPF.Frames.Dplyr.Ops
-import qualified VPF.Frames.Dplyr  as F
 import qualified VPF.Frames.DSV    as DSV
 
-import qualified VPF.Model.Class      as Cls
-import qualified VPF.Model.Cols       as M
 import qualified VPF.Model.VirusClass as VC
 
 import qualified VPF.Util.Fasta as FA
@@ -56,31 +52,35 @@ import qualified Opts
 
 #ifdef VPF_ENABLE_MPI
 import qualified Control.Distributed.MPI.Store as MPI
-import Control.Monad.Trans.Control (StM, restoreM)
+import Control.Monad.Trans.Control (StM)
 
-import System.Exit (exitFailure)
+import Pipes.Safe (runSafeT)
 
-import qualified VPF.Concurrency.MPI   as Conc
-import qualified VPF.Frames.InCore as F
+import qualified VPF.Concurrency.MPI as Conc
 #endif
 
 
-type HitCols = '[M.VirusName, M.ModelName, M.ProteinHitScore]
-type OutputCols = VC.ClassifiedCols HitCols
-type RawOutputCols = VC.RawClassifiedCols HitCols
-
 type Config = Opts.Config
 
-type ClassifyM = Eff '[
-    Exc FA.ParseError,
-    Cmd HMMSearch,
-    Exc HMMSearchError,
-    Cmd Prodigal,
-    Exc ProdigalError,
-    Reader VC.ModelConfig,
-    Exc DSV.ParseError,
-    Fail,
-    Lift IO
+type SearchHitsM = Eff
+   '[ Exc FA.ParseError
+    , Cmd HMM.HMMSearch
+    , Exc HMM.HMMSearchError
+    , Cmd Pr.Prodigal
+    , Exc Pr.ProdigalError
+    , Exc DSV.ParseError
+    , Exc VC.CheckpointLoadError
+    , Fail
+    , Lift IO
+    ]
+
+type ProcessHitsM = Eff
+   '[ Exc FA.ParseError
+    , Reader VC.ModelConfig
+    , Exc DSV.ParseError
+    , Exc VC.CheckpointLoadError
+    , Fail
+    , Lift IO
     ]
 
 
@@ -105,26 +105,26 @@ type Ranks = ()
 
 main :: IO ()
 main = do
-  cfg <- parseOpts =<< Opts.configParserIO
+    cfg <- parseOpts =<< Opts.configParserIO
 
-  let run = runLift . runFail . handleDSVParseErrors
+    ec <- masterClassify cfg () `MC.catch` \(e :: MC.SomeException) -> do
+        putErrLn "exception was caught in master task"
+        MC.throwM e
 
-  result <- run (masterClassify cfg ()) `MC.catch` \(e :: MC.SomeException) -> do
-      putErrLn "exception was caught in master task"
-      MC.throwM e
-
-  case result of
-    Just () -> return ()
-    Nothing -> putErrLn "errors were produced in master task, aborting"
+    exitWith ec
 
 #else
 
 type Ranks = [MPI.Rank]
 
-tagsClassify :: Conc.JobTags Int Int
+tagsSearchHits :: Conc.JobTags Int Int
                 [FA.FastaEntry Nucleotide]
-                (StM ClassifyM (F.FrameRowStoreRec HitCols))
-tagsClassify = Conc.JobTags (Conc.JobTagIn 0) (Conc.JobTagOut 0)
+                (StM SearchHitsM [ ( VC.GenomeChunkKey
+                                   , Path (FASTA Aminoacid)
+                                   , Path (HMMERTable HMM.ProtSearchHitCols)
+                                   )
+                                 ])
+tagsSearchHits = Conc.JobTags (Conc.JobTagIn 0) (Conc.JobTagOut 0)
 
 
 mpiAbortWith :: Int -> String -> IO a
@@ -133,7 +133,7 @@ mpiAbortWith ec msg = do
   IO.hPutStrLn IO.stderr msg
   IO.hFlush IO.stderr
   MPI.abort MPI.commWorld ec
-  exitFailure
+  exitWith (ExitFailure ec)
 
 
 main :: IO ()
@@ -147,105 +147,124 @@ main = MPI.mainMPI $ do
 
     case rank of
       0 -> do
-          let run = runLift . runFail . handleDSVParseErrors
-
-          result <- run (masterClassify cfg slaves) `MC.catch` \(e :: MC.SomeException) -> do
+          ec <- masterClassify cfg slaves `MC.catch` \(e :: MC.SomeException) -> do
                       putErrLn "exception was caught in master task"
-                      mpiAbortWith 2 (show e)
+                      mpiAbortWith 1 (show e)
 
-          case result of
-            Just _  -> return ()
-            Nothing -> mpiAbortWith 1 "errors were produced in master task, aborting"
+          case ec of
+            ExitSuccess   -> return ()
+            ExitFailure i -> mpiAbortWith i "errors were produced in master task, aborting"
 
       r -> do
-          let run = runLift . runFail
-
-          result <- run (slaveClassify cfg r) `MC.catch` \(e :: MC.SomeException) -> do
+          ec <- slaveClassify cfg r `MC.catch` \(e :: MC.SomeException) -> do
                       putErrLn "exception was caught in slave task"
-                      mpiAbortWith 4 (show e)
+                      mpiAbortWith 2 (show e)
 
-          case result of
-            Just _  -> return ()
-            Nothing -> mpiAbortWith 3 "errors were produced in slave task, aborting"
+          case ec of
+            ExitSuccess   -> return ()
+            ExitFailure i -> mpiAbortWith i "errors were produced in slave task, aborting"
 
 #endif
 
 
-masterClassify :: Config -> Ranks -> Eff '[Exc DSV.ParseError, Fail, Lift IO] ()
+masterClassify :: Config -> Ranks -> IO ExitCode
 masterClassify cfg slaves = do
-  modelCfg <- newModelCfg cfg
+    let genomesFile = Opts.genomesFile cfg
+        vpfsFile    = Opts.vpfsFile cfg
 
-  hitCounts <- runReader modelCfg $
-      case Opts.inputFiles cfg of
-        -- Opts.GivenHitsFile hitsFile ->
-        --     VC.runModel (VC.GivenHitsFile hitsFile)
+    let classFiles = Map.intersectionWith (,) (Opts.vpfClassFiles cfg)
+                                              (Opts.scoreSampleFiles cfg)
+        outputDir = Opts.outputDir cfg
 
-        Opts.GivenSequences vpfsFile genomesFile ->
-            withCfgWorkDir cfg $ \workDir ->
-            withProdigalCfg cfg $
-            withHMMSearchCfg cfg $
-            handleFastaParseErrors $ do
-              concOpts <- newConcurrencyOpts cfg (Just slaves) workDir vpfsFile
+    r <- withCfgWorkDir cfg $ \workDir ->
+        runLift $
+        runFail $
+        handleCheckpointLoadError $
+          VC.runClassification workDir genomesFile $ \resume -> \case
+              VC.SearchHitsStep run -> do
+                  putErrLn "searching hits"
 
-              VC.runModel (VC.GivenGenomes genomesFile concOpts)
+                  checkpoint <-
+                      handleDSVParseErrors $
+                      withProdigalCfg cfg $
+                      withHMMSearchCfg cfg $
+                      handleFastaParseErrors $ do
+                          concOpts <- newSearchHitsConcOpts cfg (Just slaves) workDir vpfsFile
+                          run genomesFile concOpts
 
-  let classFiles = Map.intersectionWith (,) (Opts.vpfClassFiles cfg)
-                                            (Opts.scoreSampleFiles cfg)
+                  resume checkpoint
 
-  L.iforMOf_ L.itraversed classFiles $ \classKey (classFile, samplesFile) -> do
-      cls <- Cls.loadClassification classFile
-      scoreSamples <- Cls.loadScoreSamples samplesFile
+              VC.ProcessHitsStep run -> do
+                  putErrLn "processing hits"
+                  modelCfg <- newModelCfg cfg
 
-      let prediction = hitCounts
-            & VC.appendClassification cls
-            & F.select @["virus_name", "class_obj", "protein_hit_score"]
-            & F.reindexed @"virus_name" %~ VC.predictMembership scoreSamples
-            & F.arrange @'[F.Asc "virus_name", F.Desc "membership_ratio"]
+                  checkpoint <-
+                      handleDSVParseErrors $
+                      runReader modelCfg $
+                      handleFastaParseErrors $
+                          run =<< newProcessHitsConcOpts cfg workDir
 
-      let outputPath = Opts.outputPrefix cfg ++ "." ++ T.unpack classKey ++ ".tsv"
-          tsvOpts = DSV.defWriterOptions '\t'
+                  resume checkpoint
 
-      lift $ PS.runSafeT $
-          DSV.writeDSV tsvOpts (FS.fileWriter outputPath) prediction
+              VC.PredictMembershipStep run -> do
+                  putErrLn "predicting memberships"
+
+                  let concOpts = VC.PredictMembershipConcurrencyOpts {
+                          VC.predictingNumWorkers = fromIntegral $
+                              Opts.numWorkers (Opts.concurrencyOpts cfg)
+                      }
+
+                  handleDSVParseErrors $
+                      run classFiles outputDir concOpts
+
+    case r of
+      Nothing ->
+          return (ExitFailure 3)
+      Just outputs -> do
+          forM_ outputs $ \(Tagged output) ->
+              putErrLn $ "written " ++ output
+          return ExitSuccess
 
 
 #ifdef VPF_ENABLE_MPI
 
-slaveClassify :: Config -> MPI.Rank -> Eff '[Fail, Lift IO] ()
+slaveClassify :: Config -> MPI.Rank -> IO ExitCode
 slaveClassify cfg _ = do
-  modelCfg <- newModelCfg cfg
+    let vpfsFile = Opts.vpfsFile cfg
 
-  handleDSVParseErrors $ runReader modelCfg $
-      case Opts.inputFiles cfg of
-        -- Opts.GivenHitsFile hitsFile -> return ()
+    r <- runLift $
+      withCfgWorkDir cfg $ \workDir ->
+      runFail $
+      handleCheckpointLoadError $
+      handleDSVParseErrors $
+      withProdigalCfg cfg $
+      withHMMSearchCfg cfg $
+      handleFastaParseErrors $
+          worker workDir vpfsFile
 
-        Opts.GivenSequences vpfsFile _ ->
-            withCfgWorkDir cfg $ \workDir ->
-            withProdigalCfg cfg $
-            withHMMSearchCfg cfg $
-            handleFastaParseErrors $
-              worker workDir vpfsFile
+    case r of
+      Just () -> return ExitSuccess
+      Nothing -> return (ExitFailure 4)
   where
-    worker :: Path Directory -> Path HMMERModel -> ClassifyM ()
+    worker :: Path Directory -> Path HMMERModel -> SearchHitsM ()
     worker workDir vpfsFile = do
-      concOpts <- newConcurrencyOpts cfg Nothing workDir vpfsFile
+      concOpts <- newSearchHitsConcOpts cfg Nothing workDir vpfsFile
 
       liftBaseWith $ \runInIO ->
-          PS.runSafeT $
-            Conc.makeProcessWorker MPI.rootRank tagsClassify MPI.commWorld $ \chunk ->
-                liftIO $ runInIO $
-                  fmap F.toFrameRowStoreRec $
-                    VC.asyncPipeline (fmap Right $ P.each chunk) concOpts
+          runSafeT $ Conc.makeProcessWorker MPI.rootRank tagsSearchHits MPI.commWorld $ \chunk ->
+              liftIO $ runInIO $
+                  VC.asyncSearchHits (fmap Right $ P.each chunk) concOpts
 
 #endif
 
 
 newModelCfg :: (Lifted IO r, Member Fail r) => Config -> Eff r VC.ModelConfig
 newModelCfg cfg = do
-  virusNameExtractor <- compileRegex (Opts.virusNameRegex cfg)
+    virusNameExtractor <- compileRegex (Opts.virusNameRegex cfg)
 
-  return VC.ModelConfig
+    return VC.ModelConfig
         { VC.modelEValueThreshold    = Opts.evalueThreshold cfg
+
         , VC.modelVirusNameExtractor = \protName ->
             fromMaybe (error $ "Could not extract virus name from protein: " ++ show protName)
                       (virusNameExtractor protName)
@@ -270,12 +289,12 @@ compileRegex src = do
           return (T.decodeUtf8 (BS.drop off (BS.take len btext)))
 
 
-newConcurrencyOpts :: Config
-                   -> Maybe Ranks
-                   -> Path Directory
-                   -> Path HMMERModel
-                   -> ClassifyM (VC.ConcurrencyOpts ClassifyM)
-newConcurrencyOpts cfg slaves workDir vpfsFile =
+newSearchHitsConcOpts :: Config
+                      -> Maybe Ranks
+                      -> Path Directory
+                      -> Path HMMERModel
+                      -> SearchHitsM (VC.SearchHitsConcurrencyOpts SearchHitsM)
+newSearchHitsConcOpts cfg slaves workDir vpfsFile =
     liftBaseWith $ \runInIO -> return $
 #ifndef VPF_ENABLE_MPI
         case slaves of
@@ -292,61 +311,72 @@ newConcurrencyOpts cfg slaves workDir vpfsFile =
     nworkers = max 1 $ Opts.numWorkers (Opts.concurrencyOpts cfg)
 
 #ifdef VPF_ENABLE_MPI
-    mpiMode :: RunInBase ClassifyM IO -> NE.NonEmpty MPI.Rank -> VC.ConcurrencyOpts ClassifyM
-    mpiMode runInIO slv = VC.ConcurrencyOpts
-        { VC.fastaChunkSize  = Opts.fastaChunkSize (Opts.concurrencyOpts cfg) * nworkers
-        , VC.pipelineWorkers = pipelineWorkers
+    mpiMode :: RunInBase SearchHitsM IO -> NE.NonEmpty MPI.Rank -> VC.SearchHitsConcurrencyOpts SearchHitsM
+    mpiMode _ slv = VC.SearchHitsConcurrencyOpts
+        { VC.fastaChunkSize   = Opts.fastaChunkSize (Opts.concurrencyOpts cfg) * nworkers
+        , VC.searchingWorkers = pipelineWorkers
         }
       where
-        pipelineWorkers :: NE.NonEmpty (VC.Pipeline ClassifyM)
+        pipelineWorkers :: NE.NonEmpty (VC.SearchHitsPipeline SearchHitsM)
         pipelineWorkers =
-            let
-              mpiWorkers = Conc.mpiWorkers slv tagsClassify MPI.commWorld
-              mapStM f = runInIO . fmap f . restoreM
-              asDeserialized = Conc.mapWorkerIO (mapStM F.fromFrameRowStoreRec)
-            in
-              fmap (Conc.workerToPipe . asDeserialized) mpiWorkers
+            fmap Conc.workerToPipe $ Conc.mpiWorkers slv tagsSearchHits MPI.commWorld
 #endif
 
-    multithreadedMode :: RunInBase ClassifyM IO -> VC.ConcurrencyOpts ClassifyM
-    multithreadedMode runInIO = VC.ConcurrencyOpts
-        { VC.fastaChunkSize = Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
-        , VC.pipelineWorkers = pipelineWorkers
+    multithreadedMode :: RunInBase SearchHitsM IO -> VC.SearchHitsConcurrencyOpts SearchHitsM
+    multithreadedMode runInIO = VC.SearchHitsConcurrencyOpts
+        { VC.fastaChunkSize   = Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
+        , VC.searchingWorkers = pipelineWorkers
         }
       where
-        pipelineWorkers :: NE.NonEmpty (VC.Pipeline ClassifyM)
+        pipelineWorkers :: NE.NonEmpty (VC.SearchHitsPipeline SearchHitsM)
         pipelineWorkers =
             let
-              workerBody chunk = liftIO $ runInIO $
-                  VC.syncPipeline workDir vpfsFile (P.each chunk)
+              workerBody chunk = liftIO $ runInIO $ do
+                  hitsFiles <- VC.searchGenomeHits workDir vpfsFile (P.each chunk)
+                  return [hitsFiles]
             in
               Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
 
 
-withCfgWorkDir :: LiftedBase IO r
+newProcessHitsConcOpts :: Config -> Path Directory -> ProcessHitsM (VC.ProcessHitsConcurrencyOpts ProcessHitsM)
+newProcessHitsConcOpts _ workDir = do
+    nworkers <- liftIO $ getNumCapabilities
+
+    liftBaseWith $ \runInIO -> do
+        let workerBody (key, protsFile, hitsFile) = liftIO $ runInIO $ do
+              aggHitsFile <- VC.processHits workDir key protsFile hitsFile
+              return (key, aggHitsFile)
+
+
+        return $ VC.ProcessHitsConcurrencyOpts {
+            VC.processingHitsWorkers = Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
+        }
+
+
+withCfgWorkDir :: (MonadIO m, MonadBaseControl IO m)
                => Config
-               -> (Path Directory -> Eff r a)
-               -> Eff r a
+               -> (Path Directory -> m a)
+               -> m a
 withCfgWorkDir cfg fm =
     case Opts.workDir cfg of
       Nothing ->
           FS.withTmpDir "." "vpf-work" fm
       Just wd -> do
-          lift $ D.createDirectoryIfMissing True (untag wd)
+          liftIO $ D.createDirectoryIfMissing True (untag wd)
           fm wd
 
 
 withProdigalCfg :: (Lifted IO r, Member Fail r)
                => Config
-               -> Eff (Cmd Prodigal ': Exc ProdigalError ': r) a
+               -> Eff (Cmd Pr.Prodigal ': Exc Pr.ProdigalError ': r) a
                -> Eff r a
 withProdigalCfg cfg m = do
     handleProdigalErrors $ do
-      prodigalCfg <- prodigalConfig (Opts.prodigalPath cfg) []
-      execProdigal prodigalCfg m
+      prodigalCfg <- Pr.prodigalConfig (Opts.prodigalPath cfg) []
+      Pr.execProdigal prodigalCfg m
   where
     handleProdigalErrors :: (Lifted IO r, Member Fail r)
-                         => Eff (Exc ProdigalError ': r) a -> Eff r a
+                         => Eff (Exc Pr.ProdigalError ': r) a -> Eff r a
     handleProdigalErrors m = do
         res <- runError m
 
@@ -359,15 +389,15 @@ withProdigalCfg cfg m = do
 
 withHMMSearchCfg :: (Lifted IO r, Member Fail r)
                  => Config
-                 -> Eff (Cmd HMMSearch ': Exc HMMSearchError ': r) a
+                 -> Eff (Cmd HMM.HMMSearch ': Exc HMM.HMMSearchError ': r) a
                  -> Eff r a
 withHMMSearchCfg cfg m = do
     handleHMMSearchErrors $ do
-      hmmsearchCfg <- hmmsearchConfig (Opts.hmmerConfig cfg) []
-      execHMMSearch hmmsearchCfg m
+      hmmsearchCfg <- HMM.hmmsearchConfig (Opts.hmmerConfig cfg) []
+      HMM.execHMMSearch hmmsearchCfg m
   where
     handleHMMSearchErrors :: (Lifted IO r, Member Fail r)
-                          => Eff (Exc HMMSearchError ': r) a -> Eff r a
+                          => Eff (Exc HMM.HMMSearchError ': r) a -> Eff r a
     handleHMMSearchErrors m = do
         res <- runError m
 
@@ -376,6 +406,21 @@ withHMMSearchCfg cfg m = do
           Left e -> do
             putErrLn $ "hmmsearch error: " ++ show e
             die
+
+
+handleCheckpointLoadError :: (Lifted IO r, Member Fail r)
+                          => Eff (Exc VC.CheckpointLoadError ': r) a
+                          -> Eff r a
+handleCheckpointLoadError m = do
+    res <- runError m
+
+    case res of
+      Right a -> return a
+
+      Left (VC.CheckpointJSONLoadError e) -> do
+        putErrLn $ "Error loading checkpoint: " ++ e
+        putErrLn "  try deleting the checkpoint file and restarting from scratch"
+        die
 
 
 handleFastaParseErrors :: (Lifted IO r, Member Fail r)

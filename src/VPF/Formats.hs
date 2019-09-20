@@ -11,6 +11,7 @@ module VPF.Formats
   , DSV
   , CSV
   , TSV
+  , JSON
   ) where
 
 import GHC.TypeLits (Symbol)
@@ -36,6 +37,8 @@ data DSV (sep :: Symbol) (cols :: [(Symbol, Type)])
 
 type CSV cols = DSV "," cols
 type TSV cols = DSV "\t" cols
+
+data JSON (a :: Type)
 
 
 instance Store a => Store (Tagged tag a)

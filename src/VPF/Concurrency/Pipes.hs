@@ -17,6 +17,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Control (MonadBaseControl, StM, restoreM)
 
 import Data.Function (fix)
+import Data.Monoid (Ap(..))
 import Numeric.Natural (Natural)
 
 import Pipes (Producer, Pipe, (>->))
@@ -43,6 +44,12 @@ restoreProducerWith :: (Monad m, MonadBaseControl IO n)
 restoreProducerWith f producer = hoist f producer >-> P.mapM restoreM
 
 
+runAsyncSafeT :: MonadIO n
+              => AsyncProducer a m r (PS.SafeT IO) s
+              -> AsyncProducer a m r n s
+runAsyncSafeT = hoist (liftIO . PS.runSafeT)
+
+
 restoreProducer :: MonadBaseControl b m => Pipe (StM m a) a m r
 restoreProducer = P.mapM restoreM
 
@@ -62,7 +69,16 @@ stealingAsyncProducer_ :: (MonadAsync m, PS.MonadSafe m, Monoid r)
                        => Natural
                        -> Producer a m r
                        -> IO (AsyncProducer a m () m r)
-stealingAsyncProducer_ queueSize = fmap (premapProducer (mempty <$)) . stealingAsyncProducer queueSize
+stealingAsyncProducer_ queueSize =
+    fmap (premapProducer (mempty <$)) . stealingAsyncProducer queueSize
+
+
+stealingAsyncProducerA :: (MonadAsync m, PS.MonadSafe m, Applicative f, Monoid r)
+                       => Natural
+                       -> Producer a m (f r)
+                       -> IO (AsyncProducer a m () m (f r))
+stealingAsyncProducerA queueSize =
+    fmap (fmap getAp) . stealingAsyncProducer_ queueSize . fmap Ap
 
 
 stealingBufferedProducer :: (MonadAsync m, PS.MonadSafe m)

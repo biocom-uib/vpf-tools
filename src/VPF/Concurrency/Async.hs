@@ -9,9 +9,9 @@ module VPF.Concurrency.Async
   , AsyncConsumer'
   , AsyncEffect
   , premapProducer
-  , mapProducer
+  , mapProducerM
   , premapConsumer
-  , mapConsumer
+  , mapConsumerM
   , duplicatingAsyncProducer
   , asyncProducer
   , asyncConsumer
@@ -87,8 +87,8 @@ premapProducer :: (Consumer a' m' r' -> Consumer a m r)
                -> AsyncProducer a' m' r' n s
 premapProducer f (AsyncProducer p) = AsyncProducer (p . f)
 
-mapProducer :: Monad n => (s -> n t) -> AsyncProducer a m r n s -> AsyncProducer a m r n t
-mapProducer f (AsyncProducer p) = AsyncProducer (f <=< p)
+mapProducerM :: Monad n => (s -> n t) -> AsyncProducer a m r n s -> AsyncProducer a m r n t
+mapProducerM f (AsyncProducer p) = AsyncProducer (f <=< p)
 
 
 newtype AsyncConsumer a m r n s = AsyncConsumer { feedTo :: Producer a m r -> n s }
@@ -119,8 +119,8 @@ premapConsumer :: (Producer a' m' r' -> Producer a m r)
                -> AsyncConsumer a' m' r' n s
 premapConsumer f (AsyncConsumer c) = AsyncConsumer (c . f)
 
-mapConsumer :: Monad n => (s -> n t) -> AsyncConsumer a m r n s -> AsyncConsumer a m r n t
-mapConsumer f (AsyncConsumer c) = AsyncConsumer (f <=< c)
+mapConsumerM :: Monad n => (s -> n t) -> AsyncConsumer a m r n s -> AsyncConsumer a m r n t
+mapConsumerM f (AsyncConsumer c) = AsyncConsumer (f <=< c)
 
 
 data AsyncEffect a m m' n rs where

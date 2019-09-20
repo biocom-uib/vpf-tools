@@ -45,7 +45,7 @@ reindex = reindexBy (\row -> (getKey @keys row, row))
 {-# inline reindex #-}
 
 
-reindex' :: forall i keys cols quot_cols rec.
+setIndex :: forall i keys cols quot_cols rec.
          ( FieldSpec cols i keys
          , GroupingKey rec keys cols
          , RecQuotient rec keys cols quot_cols
@@ -53,8 +53,8 @@ reindex' :: forall i keys cols quot_cols rec.
          )
          => FrameFields rec cols
          -> GroupedFrameFields rec (KeyType keys rec) quot_cols
-reindex' = reindexBy (\row -> (getKey @keys row, rquotient @keys row))
-{-# inline reindex' #-}
+setIndex = reindexBy (\row -> (getKey @keys row, rquotient @keys row))
+{-# inline setIndex #-}
 
 
 mapIndexMonotonic :: (k -> k') -> GroupedFrame k row -> GroupedFrame k' row

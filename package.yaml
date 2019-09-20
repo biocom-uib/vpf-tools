@@ -21,8 +21,10 @@ description:         Please see the README on GitHub at <https://github.com/bioc
 dependencies:
 - base >= 4.7 && < 5
 - Frames
+- aeson
 - array
 - bytestring
+- cryptonite
 - constraints
 - containers
 - directory
@@ -32,6 +34,7 @@ dependencies:
 - foldl
 - lens
 - lifted-async
+- memory
 - mmorph
 - monad-control
 - optparse-applicative

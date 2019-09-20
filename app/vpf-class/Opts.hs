@@ -21,6 +21,7 @@ import qualified Control.Distributed.MPI.Store  as MPI
 #endif
 
 import VPF.Formats
+import VPF.Frames.Types
 import VPF.Ext.HMMER (HMMERConfig(HMMERConfig))
 import VPF.Model.Class (RawClassificationCols)
 import qualified VPF.Model.Cols as M
@@ -34,10 +35,6 @@ instance Show (ArgPath t) where
   show StdDevice  = "\"-\""
 
 
-data InputFiles =
-    GivenSequences { vpfsFile :: Path HMMERModel, genomesFile :: Path (FASTA Nucleotide) }
-  -- | GivenHitsFile { hitsFile :: Path (HMMERTable ProtSearchHitCols) }
-
 data ConcurrencyOpts = ConcurrencyOpts
   { fastaChunkSize :: Int
   , numWorkers :: Int
@@ -48,11 +45,12 @@ data Config = Config
   { hmmerConfig      :: HMMERConfig
   , prodigalPath     :: FilePath
   , evalueThreshold  :: Double
-  , inputFiles       :: InputFiles
+  , vpfsFile         :: Path HMMERModel
+  , genomesFile      :: Path (FASTA Nucleotide)
   , virusNameRegex   :: Text
-  , vpfClassFiles    :: Map Text (Path (DSV "\t" RawClassificationCols))
-  , scoreSampleFiles :: Map Text (Path (DSV "\t" '[M.VirusHitScore]))
-  , outputPrefix     :: FilePath
+  , vpfClassFiles    :: Map (Field ("class_key" ::: Text)) (Path (DSV "\t" RawClassificationCols))
+  , scoreSampleFiles :: Map (Field ("class_key" ::: Text)) (Path (DSV "\t" '[M.VirusHitScore]))
+  , outputDir        :: Path Directory
   , workDir          :: Maybe (Path Directory)
   , concurrencyOpts  :: ConcurrencyOpts
   }
@@ -123,13 +121,23 @@ configParser defConcOpts = do
         <> help "Accept hits with e-value <= THRESHOLD"
 
     workDir <- optional $ fmap Tagged $ strOption $
-        long "workdir"
+        long "work-dir"
         <> short 'd'
         <> metavar "DIR"
         <> hidden
         <> help "Generate temporary files in DIR instead of creating a temporary one"
 
-    inputFiles <- givenSequences -- <|> givenHitsFile
+    vpfsFile <- strOption $
+        long "vpf"
+        <> short 'v'
+        <> metavar "VPF_HMMS"
+        <> help ".hmms file containing query VPF profiles"
+
+    genomesFile <- strOption $
+        long "input-seqs"
+        <> short 'i'
+        <> metavar "SEQS_FILE"
+        <> help "FASTA file containg full input sequences"
 
     virusNameRegex <- fmap T.pack $ strOption $
         long "virus-pattern"
@@ -151,59 +159,33 @@ configParser defConcOpts = do
         <> metavar "SCORE_FILE"
         <> help "Score samples (one per line) to take percentiles on, same format as --vpf-classes"
 
-    outputPrefix <- strOption $
-        long "output"
+    outputDir <- fmap Tagged $ strOption $
+        long "output-dir"
         <> short 'o'
-        <> metavar "OUTPUT"
-        <> help "Output file prefix (e.g. -c family=fam.tsv -o output would produce output.family.tsv)"
+        <> metavar "OUTPUT_DIR"
+        <> help "Output directory (e.g. -c family=fam.tsv -o output would produce output/family.tsv)"
 
     concurrencyOpts <- concOpts
 
     pure Config {..}
 
   where
-    givenSequences :: Parser InputFiles
-    givenSequences = do
-      vpfsFile <- strOption $
-          long "vpf"
-          <> short 'v'
-          <> metavar "VPF_HMMS"
-          <> help ".hmms file containing query VPF profiles"
-
-      genomesFile <- strOption $
-          long "input-seqs"
-          <> short 'i'
-          <> metavar "SEQS_FILE"
-          <> help "FASTA file containg full input sequences"
-
-      pure GivenSequences {..}
-
-    -- givenHitsFile :: Parser InputFiles
-    -- givenHitsFile = do
-    --   hitsFile <- strOption $
-    --       long "hits"
-    --       <> short 'h'
-    --       <> metavar "HITS_FILE"
-    --       <> help "HMMER tblout file containing protein search hits against the VPFs"
-
-    --   pure GivenHitsFile {..}
-
     concOpts :: Parser ConcurrencyOpts
     concOpts = do
-      numWorkers <- option auto $
-          long "workers"
-          <> metavar "NW"
-          <> value (numWorkers defConcOpts)
-          <> hidden
-          <> showDefault
-          <> help "Number of parallel workers processing the FASTA file"
+        numWorkers <- option auto $
+            long "workers"
+            <> metavar "NW"
+            <> value (numWorkers defConcOpts)
+            <> hidden
+            <> showDefault
+            <> help "Number of threads to use"
 
-      fastaChunkSize <- option auto $
-          long "chunk-size"
-          <> metavar "CHUNK_SZ"
-          <> value (fastaChunkSize defConcOpts)
-          <> hidden
-          <> showDefault
-          <> help "Number of sequences to be processed at once by each parallel worker"
+        fastaChunkSize <- option auto $
+            long "chunk-size"
+            <> metavar "CHUNK_SZ"
+            <> value (fastaChunkSize defConcOpts)
+            <> hidden
+            <> showDefault
+            <> help "Number of sequences to be processed at once by prodigal/hmmsearch"
 
-      pure ConcurrencyOpts {..}
+        pure ConcurrencyOpts {..}
