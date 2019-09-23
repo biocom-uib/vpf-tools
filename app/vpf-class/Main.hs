@@ -129,11 +129,11 @@ tagsSearchHits = Conc.JobTags (Conc.JobTagIn 0) (Conc.JobTagOut 0)
 
 mpiAbortWith :: Int -> String -> IO a
 mpiAbortWith ec msg = do
-  IO.hFlush IO.stdout
-  IO.hPutStrLn IO.stderr msg
-  IO.hFlush IO.stderr
-  MPI.abort MPI.commWorld ec
-  exitWith (ExitFailure ec)
+    IO.hFlush IO.stdout
+    IO.hPutStrLn IO.stderr msg
+    IO.hFlush IO.stderr
+    MPI.abort MPI.commWorld ec
+    exitWith (ExitFailure ec)
 
 
 main :: IO ()
@@ -233,14 +233,14 @@ slaveClassify cfg _ = do
     let vpfsFile = Opts.vpfsFile cfg
 
     r <- runLift $
-      withCfgWorkDir cfg $ \workDir ->
-      runFail $
-      handleCheckpointLoadError $
-      handleDSVParseErrors $
-      withProdigalCfg cfg $
-      withHMMSearchCfg cfg $
-      handleFastaParseErrors $
-          worker workDir vpfsFile
+        withCfgWorkDir cfg $ \workDir ->
+        runFail $
+        handleCheckpointLoadError $
+        handleDSVParseErrors $
+        withProdigalCfg cfg $
+        withHMMSearchCfg cfg $
+        handleFastaParseErrors $
+            worker workDir vpfsFile
 
     case r of
       Just () -> return ExitSuccess
@@ -372,8 +372,11 @@ withProdigalCfg :: (Lifted IO r, Member Fail r)
                -> Eff r a
 withProdigalCfg cfg m = do
     handleProdigalErrors $ do
-      prodigalCfg <- Pr.prodigalConfig (Opts.prodigalPath cfg) []
-      Pr.execProdigal prodigalCfg m
+        prodigalCfg <- Pr.prodigalConfig
+                           (Opts.prodigalPath cfg)
+                           ["-p", Opts.prodigalProcedure cfg]
+
+        Pr.execProdigal prodigalCfg m
   where
     handleProdigalErrors :: (Lifted IO r, Member Fail r)
                          => Eff (Exc Pr.ProdigalError ': r) a -> Eff r a
@@ -393,8 +396,8 @@ withHMMSearchCfg :: (Lifted IO r, Member Fail r)
                  -> Eff r a
 withHMMSearchCfg cfg m = do
     handleHMMSearchErrors $ do
-      hmmsearchCfg <- HMM.hmmsearchConfig (Opts.hmmerConfig cfg) []
-      HMM.execHMMSearch hmmsearchCfg m
+        hmmsearchCfg <- HMM.hmmsearchConfig (Opts.hmmerConfig cfg) []
+        HMM.execHMMSearch hmmsearchCfg m
   where
     handleHMMSearchErrors :: (Lifted IO r, Member Fail r)
                           => Eff (Exc HMM.HMMSearchError ': r) a -> Eff r a
@@ -404,8 +407,8 @@ withHMMSearchCfg cfg m = do
         case res of
           Right a -> return a
           Left e -> do
-            putErrLn $ "hmmsearch error: " ++ show e
-            die
+              putErrLn $ "hmmsearch error: " ++ show e
+              die
 
 
 handleCheckpointLoadError :: (Lifted IO r, Member Fail r)
@@ -418,9 +421,9 @@ handleCheckpointLoadError m = do
       Right a -> return a
 
       Left (VC.CheckpointJSONLoadError e) -> do
-        putErrLn $ "Error loading checkpoint: " ++ e
-        putErrLn "  try deleting the checkpoint file and restarting from scratch"
-        die
+          putErrLn $ "Error loading checkpoint: " ++ e
+          putErrLn "  try deleting the checkpoint file and restarting from scratch"
+          die
 
 
 handleFastaParseErrors :: (Lifted IO r, Member Fail r)
@@ -433,16 +436,16 @@ handleFastaParseErrors m = do
       Right a -> return a
 
       Left (FA.ExpectedNameLine found) -> do
-        putErrLn $ "FASTA parsing error: expected name line but found " ++ show found
-        die
+          putErrLn $ "FASTA parsing error: expected name line but found " ++ show found
+          die
 
       Left (FA.ExpectedSequenceLine []) -> do
-        putErrLn $ "FASTA parsing error: expected sequence but found EOF"
-        die
+          putErrLn $ "FASTA parsing error: expected sequence but found EOF"
+          die
 
       Left (FA.ExpectedSequenceLine (l:_)) -> do
-        putErrLn $ "FASTA parsing error: expected sequence but found " ++ show l
-        die
+          putErrLn $ "FASTA parsing error: expected sequence but found " ++ show l
+          die
 
 
 handleDSVParseErrors :: (Lifted IO r, Member Fail r)
@@ -454,6 +457,6 @@ handleDSVParseErrors m = do
     case res of
       Right a -> return a
       Left (DSV.ParseError ctx row) -> do
-        putErrLn $ "DSV parse error in " ++ show ctx ++ ": "
-                     ++ "could not parse row " ++ show row
-        die
+          putErrLn $ "DSV parse error in " ++ show ctx ++ ": "
+                       ++ "could not parse row " ++ show row
+          die

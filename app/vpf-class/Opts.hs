@@ -42,17 +42,18 @@ data ConcurrencyOpts = ConcurrencyOpts
 
 
 data Config = Config
-  { hmmerConfig      :: HMMERConfig
-  , prodigalPath     :: FilePath
-  , evalueThreshold  :: Double
-  , vpfsFile         :: Path HMMERModel
-  , genomesFile      :: Path (FASTA Nucleotide)
-  , virusNameRegex   :: Text
-  , vpfClassFiles    :: Map (Field ("class_key" ::: Text)) (Path (DSV "\t" RawClassificationCols))
-  , scoreSampleFiles :: Map (Field ("class_key" ::: Text)) (Path (DSV "\t" '[M.VirusHitScore]))
-  , outputDir        :: Path Directory
-  , workDir          :: Maybe (Path Directory)
-  , concurrencyOpts  :: ConcurrencyOpts
+  { hmmerConfig       :: HMMERConfig
+  , prodigalPath      :: FilePath
+  , prodigalProcedure :: String
+  , evalueThreshold   :: Double
+  , vpfsFile          :: Path HMMERModel
+  , genomesFile       :: Path (FASTA Nucleotide)
+  , virusNameRegex    :: Text
+  , vpfClassFiles     :: Map (Field ("class_key" ::: Text)) (Path (DSV "\t" RawClassificationCols))
+  , scoreSampleFiles  :: Map (Field ("class_key" ::: Text)) (Path (DSV "\t" '[M.VirusHitScore]))
+  , outputDir         :: Path Directory
+  , workDir           :: Maybe (Path Directory)
+  , concurrencyOpts   :: ConcurrencyOpts
   }
 
 
@@ -103,6 +104,14 @@ configParser defConcOpts = do
         <> showDefault
         <> value "prodigal"
         <> help "Path to the prodigal executable (or in $PATH)"
+
+    prodigalProcedure <- strOption $
+        long "prodigal-procedure"
+        <> metavar "PROCEDURE"
+        <> hidden
+        <> showDefault
+        <> value "single"
+        <> help "Prodigal procedure (-p) to use (for version 2.6.3: single or meta)"
 
     hmmerConfig <- fmap HMMERConfig $ optional $ strOption $
         long "hmmer-prefix"
