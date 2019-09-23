@@ -41,8 +41,9 @@ import qualified Pipes         as P
 import qualified Pipes.Prelude as P
 import Pipes.Safe (SafeT, runSafeT)
 
-import System.FilePath ((</>), takeFileName)
 import System.Directory as D
+import System.FilePath ((</>), takeFileName)
+import System.IO as IO
 
 import VPF.Concurrency.Async ((>||>), (>|->), (>-|>))
 import qualified VPF.Concurrency.Async as Conc
@@ -126,7 +127,7 @@ genomesFileFor :: Path Directory -> GenomeChunkKey -> Path (FASTA Nucleotide)
 genomesFileFor dir (GenomeChunkKey hash) =
     Tagged (untag dir </> name)
   where
-    name = "split-hits-" ++ hash ++ ".fna"
+    name = "split-genomes-" ++ hash ++ ".fna"
 
 
 checkpointFileFor :: Path Directory -> GenomeChunkKey -> Path (JSON Checkpoint)
@@ -174,21 +175,6 @@ processedHitsFileFor dir (GenomeChunkKey hash) =
     name = "processed-hits-" ++ hash ++ ".tsv"
 
 
-writeHashGenomeChunk :: Path Directory
-                     -> Producer (FA.FastaEntry Nucleotide) (SafeT IO) ()
-                     -> IO (GenomeChunkKey, Path (FASTA Nucleotide))
-writeHashGenomeChunk genomesDir genomes = do
-    tmpGenomesFile <- FS.emptyTmpFile @(FASTA Nucleotide) genomesDir "split-genomes.fna"
-    runSafeT $ P.runEffect $ genomes >-> FA.fastaFileWriter tmpGenomesFile
-
-    key <- liftIO $ getGenomeChunkKey tmpGenomesFile
-
-    let genomesFile = genomesFileFor genomesDir key
-    D.renameFile (untag tmpGenomesFile) (untag genomesFile)
-
-    return (key, genomesFile)
-
-
 searchGenomeHits ::
                  ( LiftedBase IO r
                  , Member (Cmd HMMSearch) r
@@ -217,10 +203,28 @@ searchGenomeHits wd vpfsFile genomes = do
     hitsDir <- liftIO $ createHitsSubdir wd
     let hitsFile = hitsFileFor hitsDir key
 
-    FS.whenNotExists hitsFile $ FS.atomicCreateFile hitsFile $ \tmpHitsFile ->
-        hmmsearch vpfsFile protsFile tmpHitsFile
+    FS.whenNotExists hitsFile $ FS.atomicCreateFile hitsFile $ \tmpHitsFile -> do
+        protsFileIsEmpty <- liftIO $ isEmptyFAA protsFile
+
+        if protsFileIsEmpty then
+            liftIO $ createEmptyHitsFile tmpHitsFile
+        else
+            hmmsearch vpfsFile protsFile tmpHitsFile
 
     return (key, protsFile, hitsFile)
+  where
+    isEmptyFAA :: Path (FASTA Aminoacid) -> IO Bool
+    isEmptyFAA fp = runSafeT $ do
+        firstItem <- P.next (FA.fastaFileReader fp)
+
+        case firstItem of
+          Left (Left _e)  -> return False
+          Left (Right ()) -> return True
+          Right (_, _)    -> return False
+
+    createEmptyHitsFile :: Path (HMMERTable ProtSearchHitCols) -> IO ()
+    createEmptyHitsFile fp = IO.withFile (untag fp) IO.WriteMode $ \h ->
+        IO.hPutStrLn h ""
 
 
 aggregateHits :: forall r.

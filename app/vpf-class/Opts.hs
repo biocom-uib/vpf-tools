@@ -50,15 +50,18 @@ traverseDataFilesIndex f (DataFilesIndex cf vpfs) =
 
 
 loadDataFilesIndex :: Path (YAML DataFilesIndex) -> IO (Either Y.ParseException DataFilesIndex)
-loadDataFilesIndex fp = do
-    r <- Y.decodeFileEither (untag fp)
+loadDataFilesIndex indexFile = do
+    r <- Y.decodeFileEither (untag indexFile)
     return $ L.over (L.mapped . traverseDataFilesIndex) makeRelativeToIndex r
   where
+    indexDir :: FilePath
+    indexDir = FP.takeDirectory (untag indexFile)
+
+    makeRelativeToIndex :: FilePath -> FilePath
     makeRelativeToIndex p
-      | FP.isRelative p = relativeTo FP.</> p
+      | FP.isRelative p = indexDir FP.</> p
       | otherwise       = p
 
-    relativeTo = FP.takeDirectory (untag fp)
 
 data ConcurrencyOpts = ConcurrencyOpts
     { fastaChunkSize :: Int
@@ -66,10 +69,10 @@ data ConcurrencyOpts = ConcurrencyOpts
     }
 
 
-
 data Config = Config
     { hmmerPrefix        :: Maybe (Path Directory)
     , prodigalPath       :: Path Executable
+    , prodigalProcedure  :: String
     , evalueThreshold    :: Double
     , genomesFile        :: Path (FASTA Nucleotide)
     , virusNameRegex     :: Text
@@ -121,8 +124,6 @@ defaultConcurrencyOpts = do
     return ConcurrencyOpts {..}
 
 
-
-
 configParser :: ConcurrencyOpts -> Parser Config
 configParser defConcOpts = do
     prodigalPath <- fmap Tagged $ strOption $
@@ -133,7 +134,15 @@ configParser defConcOpts = do
         <> value "prodigal"
         <> help "Path to the prodigal executable (or in $PATH)"
 
-    hmmerPrefix <- optional $ fmap Tagged $ strOption $
+    prodigalProcedure <- strOption $
+        long "prodigal-procedure"
+        <> metavar "PROCEDURE"
+        <> hidden
+        <> showDefault
+        <> value "single"
+        <> help "Prodigal procedure (-p) to use (for version 2.6.3: single or meta)"
+
+    hmmerPrefix <- optional $ strOption $
         long "hmmer-prefix"
         <> metavar "HMMER"
         <> hidden
@@ -184,7 +193,6 @@ configParser defConcOpts = do
     concurrencyOpts <- concOpts
 
     pure Config {..}
-
   where
     concOpts :: Parser ConcurrencyOpts
     concOpts = do
