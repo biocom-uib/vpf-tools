@@ -11,7 +11,6 @@ module VPF.Concurrency.MPI where
 import GHC.Generics (Generic)
 
 import Control.Concurrent (yield)
-
 import Control.Monad ((>=>))
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO(..))
@@ -19,6 +18,7 @@ import Control.Monad.IO.Class (MonadIO(..))
 import qualified Control.Distributed.MPI.Store  as MPI
 
 import Data.Function (fix)
+import Data.Profunctor
 import Data.Store (Store)
 
 import Pipes (Producer, Pipe, Consumer, (>->))
@@ -40,6 +40,10 @@ data Worker a b = Worker (a -> IO (StreamItem b)) (IO ())
 instance Store a => Store (StreamItem a)
 
 
+instance Profunctor Worker where
+    dimap fxa fbc (Worker fab finalizer) = Worker (fmap (fmap fbc) . fab . fxa) finalizer
+
+
 mapWorker :: (b -> c) -> Worker a b -> Worker a c
 mapWorker fbc (Worker fab finalizer) = Worker ((fmap.fmap.fmap) fbc fab) finalizer
 
@@ -56,20 +60,22 @@ waitYielding_ req = loop
         Just a  -> return a
         Nothing -> yield >> loop
 
+
 sendYielding_ :: Store a => a -> MPI.Rank -> MPI.Tag -> MPI.Comm -> IO ()
 sendYielding_ a rank tag comm = MC.mask_ $
     MPI.isend a rank tag comm >>= waitYielding_
+
 
 recvYielding_ :: Store b => MPI.Rank -> MPI.Tag -> MPI.Comm -> IO b
 recvYielding_ rank tag comm = MC.mask_ $
     MPI.irecv rank tag comm >>= waitYielding_
 
+
 sendrecvYielding_ :: (Store a, Store b)
-                => a -> MPI.Rank -> MPI.Tag -> MPI.Rank -> MPI.Tag -> MPI.Comm -> IO b
+                  => a -> MPI.Rank -> MPI.Tag -> MPI.Rank -> MPI.Tag -> MPI.Comm -> IO b
 sendrecvYielding_ a rank tag rank' tag' comm = MC.mask_ $ do
     MPI.isend a rank tag comm >>= waitYielding_
     MPI.irecv rank' tag' comm >>= waitYielding_
-
 
 
 messagesFrom :: forall tag m a. (Enum tag, PS.MonadSafe m, Store a)

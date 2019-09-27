@@ -37,6 +37,7 @@ dependencies:
 - memory
 - mmorph
 - monad-control
+- mtl
 - optparse-applicative
 - pipes
 - pipes-concurrency
@@ -44,6 +45,7 @@ dependencies:
 - pipes-parse
 - pipes-safe
 - primitive
+- profunctors
 - regex-base
 - regex-pcre-builtin
 - semigroupoids
@@ -144,5 +146,5 @@ tests:
 flags:
   mpi:
     description: Enable MPI support (OpenMPI with mpi-hs)
-    manual: true
-    default: false
+    manual: false
+    default: true

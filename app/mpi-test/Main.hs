@@ -22,6 +22,7 @@ import System.Exit (exitWith, ExitCode(..))
 import VPF.Concurrency.Async ((>||>), (>-|>))
 import qualified VPF.Concurrency.Async as Conc
 import qualified VPF.Concurrency.MPI   as Conc
+import qualified VPF.Concurrency.MPI.Polymorphic as Conc
 import qualified VPF.Concurrency.Pipes as Conc
 
 import VPF.Formats
