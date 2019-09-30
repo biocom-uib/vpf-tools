@@ -139,7 +139,7 @@ configParser defConcOpts = do
         <> metavar "PROCEDURE"
         <> hidden
         <> showDefault
-        <> value "single"
+        <> value "meta"
         <> help "Prodigal procedure (-p) to use (for version 2.6.3: single or meta)"
 
     hmmerPrefix <- optional $ strOption $
