@@ -103,49 +103,49 @@ withMPI a _ = return a
 
 data DidInit = DidInit | DidNotInit
 
-runMPI :: (MonadMask (Eff r), MonadIO (Eff r)) => MPI.Comm -> Eff (MPI m ': r) a -> Eff r a
-runMPI mpiComm e = bracket initMPI finalizeMPI $ do
-    h <- liftIO newHandle
-
-    fix (handle_relay withMPI) e h
-  where
-    newHandle :: IO MPIHandle
-    newHandle = do
-        let rootRank = MPI.rootRank
-
-        selfRank <- liftIO $ MPI.commRank mpiComm
-        size <- liftIO $ MPI.commSize mpiComm
-
-        let slaveRanks = NE.fromList [succ rootRank .. pred size]
-        rankTags <- liftIO $ traverse (\_ -> newIORef 0) slaveRanks
-
-        return MPIHandle {..}
-
-    initMPI :: IO DidInit
-    initMPI = do
-        isInit <- CMPI.initialized
-
-        if isInit then
-           return DidNotInit
-
-        else do
-           ts <- CMPI.initThread CMPI.ThreadMultiple
-
-           when (ts < CMPI.ThreadMultiple) $
-               throwM $ MPI.MPIException $
-                   "CMPI.init: Insufficient thread support: requiring " ++
-                   show CMPI.ThreadMultiple ++
-                   ", but CMPI library provided only " ++ show ts
-           return DidInit
-
-    finalizeMPI :: DidInit -> IO ()
-    finalizeMPI DidInit =
-      do isFinalized <- CMPI.finalized
-         if isFinalized
-           then return ()
-           else do CMPI.finalize
-    finalizeMPI DidNotInit = return ()
-
-
-runMPIWorld :: (MonadMask (Eff r), MonadIO (Eff r)) => Eff (MPI m ': r) a -> Eff r a
-runMPIWorld = runMPI MPI.commWorld
+-- runMPI :: (MonadMask (Eff r), MonadIO (Eff r)) => MPI.Comm -> Eff (MPI m ': r) a -> Eff r a
+-- runMPI mpiComm e = bracket initMPI finalizeMPI $ do
+--     h <- liftIO newHandle
+--
+--     fix (handle_relay withMPI) e h
+--   where
+--     newHandle :: IO MPIHandle
+--     newHandle = do
+--         let rootRank = MPI.rootRank
+--
+--         selfRank <- liftIO $ MPI.commRank mpiComm
+--         size <- liftIO $ MPI.commSize mpiComm
+--
+--         let slaveRanks = NE.fromList [succ rootRank .. pred size]
+--         rankTags <- liftIO $ traverse (\_ -> newIORef 0) slaveRanks
+--
+--         return MPIHandle {..}
+--
+--     initMPI :: IO DidInit
+--     initMPI = do
+--         isInit <- CMPI.initialized
+--
+--         if isInit then
+--            return DidNotInit
+--
+--         else do
+--            ts <- CMPI.initThread CMPI.ThreadMultiple
+--
+--            when (ts < CMPI.ThreadMultiple) $
+--                throwM $ MPI.MPIException $
+--                    "CMPI.init: Insufficient thread support: requiring " ++
+--                    show CMPI.ThreadMultiple ++
+--                    ", but CMPI library provided only " ++ show ts
+--            return DidInit
+--
+--     finalizeMPI :: DidInit -> IO ()
+--     finalizeMPI DidInit =
+--       do isFinalized <- CMPI.finalized
+--          if isFinalized
+--            then return ()
+--            else do CMPI.finalize
+--     finalizeMPI DidNotInit = return ()
+--
+--
+-- runMPIWorld :: (MonadMask (Eff r), MonadIO (Eff r)) => Eff (MPI m ': r) a -> Eff r a
+-- runMPIWorld = runMPI MPI.commWorld

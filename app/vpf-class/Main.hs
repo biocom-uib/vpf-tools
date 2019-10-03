@@ -32,6 +32,7 @@ import qualified Pipes.Prelude as P
 
 import qualified VPF.Concurrency.Async as Conc
 
+import Control.Effect.MTL
 import VPF.Eff.Cmd (Cmd)
 import qualified VPF.Ext.HMMER        as HMM
 import qualified VPF.Ext.HMMER.Search as HMM

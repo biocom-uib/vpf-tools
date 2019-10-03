@@ -32,6 +32,8 @@ dependencies:
 - extensible-effects
 - filepath
 - foldl
+- fused-effects
+- kan-extensions
 - lens
 - lifted-async
 - memory
@@ -52,6 +54,7 @@ dependencies:
 - stm
 - store
 - tagged
+- template-haskell
 - temporary
 - text
 - transformers
