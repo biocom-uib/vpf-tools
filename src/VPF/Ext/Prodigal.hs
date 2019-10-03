@@ -4,6 +4,7 @@
 {-# language RecordWildCards #-}
 {-# language StandaloneDeriving #-}
 {-# language TemplateHaskell #-}
+{-# language UndecidableInstances #-}
 module VPF.Ext.Prodigal
   ( Cmd
   , Prodigal
@@ -16,10 +17,9 @@ module VPF.Ext.Prodigal
   , runProdigal
   ) where
 
-import GHC.Generics (Generic)
+import GHC.Generics (Generic, Generic1)
 
 import qualified Data.ByteString.Lazy as BL (toStrict)
-import Data.Functor (($>))
 import Data.Store (Store)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
@@ -54,14 +54,10 @@ instance Store ProdigalArgs
 
 data Prodigal m k where
     Prodigal :: ProdigalArgs -> m k -> Prodigal m k
+    deriving (Functor, Generic1)
 
-deriving instance Functor m => Functor (Prodigal m)
-
-instance HFunctor Prodigal where
-    hmap f (Prodigal args k) = Prodigal args (f k)
-
-instance Effect Prodigal where
-    handle state handler (Prodigal args k) = Prodigal args (handler (state $> k))
+instance HFunctor Prodigal
+instance Effect Prodigal
 
 
 prodigal :: (Carrier sig m, Member Prodigal sig)
@@ -141,11 +137,6 @@ execProdigal args@ProdigalArgs{..} = do
       ExitFailure ec -> throwProdigalError $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
 
 
-instance
-    ( MT.MonadIO m
-    , Carrier sig m, Effect sig
-    )
-    => Carrier (Prodigal :+: sig) (ProdigalT m) where
-
+instance (MT.MonadIO m, Carrier sig m, Effect sig) => Carrier (Prodigal :+: sig) (ProdigalT m) where
     eff (L (Prodigal args k)) = execProdigal args >> k
-    eff (R other) = relayTransControl fmap other
+    eff (R other)             = relayTransControl fmap other
