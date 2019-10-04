@@ -5,6 +5,10 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Control.Effect.MTL where
 
+import Data.Coerce
+import Data.Kind (Type)
+import Data.Tuple (swap)
+
 import Control.Effect.Carrier
 import Control.Effect.Error
 import Control.Effect.Lift
@@ -26,6 +30,54 @@ newtype StT t a = StT { unStT :: MTC.StT t a }
 newtype YoStT t a = YoStT { unYoStT :: Yoneda (StT t) a }
   deriving Functor via Yoneda (StT t)
 
+
+relayCarrier :: forall t' t sig alg' m a.
+    ( Effect sig
+    , Carrier (alg' :+: sig)  (t' m)
+    , Functor (t m)
+    )
+    => (forall x. t m x -> t' m x)
+    -> (forall x. t' m x -> t m x)
+    -> sig (t m) a
+    -> t m a
+relayCarrier tt' t't = t't . eff . R . hmap tt'
+
+
+
+relayCoerce0 :: forall t (m :: Type -> Type) sig (a :: Type).
+    ( Coercible (t m) m
+    , Coercible (m a) (t m a)
+    , Effect sig
+    , Carrier sig m
+    , Functor (t m)
+    )
+    => sig (t m) a
+    -> t m a
+relayCoerce0 = coerce @(m a) @(t m a) . eff . handleCoercible
+
+
+class InjR sub sup where injR :: sub m a -> sup m a
+
+instance InjR sub sub where
+    injR = id
+instance {-# overlappable #-} InjR sub (sub' :+: sub)where
+    injR = R
+instance {-# overlappable #-} InjR sub sup => InjR sub (sub' :+: sup) where
+    injR = R . injR
+
+
+relayCoerceInner :: forall (m' :: Type -> Type) sig' t (m :: Type -> Type) sig (a :: Type).
+    ( Coercible (t m) m'
+    , Coercible (m' a) (t m a)
+    , Effect sig
+    , Carrier sig' m'
+    , InjR sig sig'
+    , Functor (t m)
+    )
+    => (forall x. m' x -> t m x)
+    -> sig (t m) a
+    -> t m a
+relayCoerceInner _ = coerce @(m' a) @(t m a) . eff . injR @sig @sig' . handleCoercible
 
 
 relayTransControl :: forall sig t m a.
@@ -71,7 +123,7 @@ relayTransControl fmap' sig = do
 instance (Monad m, Carrier sig m, Effect sig) => Carrier (Error e :+: sig) (MT.ExceptT e m) where
     eff (L (Throw e))     = MT.throwE e
     eff (L (Catch m h k)) = MT.catchE m h >>= k
-    eff (R other)         = relayTransControl fmap other
+    eff (R other)         = relayCarrier (ErrorC . MT.runExceptT) (MT.ExceptT . runErrorC) other
 
 
 instance (Monad m, Carrier sig m, Effect sig) => Carrier (Lift m) (MT.IdentityT m) where
@@ -81,10 +133,10 @@ instance (Monad m, Carrier sig m, Effect sig) => Carrier (Lift m) (MT.IdentityT 
 instance (Monad m, Carrier sig m, Effect sig) => Carrier (Reader r :+: sig) (MT.ReaderT r m) where
     eff (L (Ask k))       = MT.ask >>= k
     eff (L (Local g m k)) = MT.local g m >>= k
-    eff (R other)         = relayTransControl id other
+    eff (R other)         = relayCarrier (ReaderC . MT.runReaderT) (MT.ReaderT . runReaderC) other
 
 
 instance (Monad m, Carrier sig m, Effect sig) => Carrier (State s :+: sig) (MT.StateT s m) where
     eff (L (Get k))   = MT.get >>= k
     eff (L (Put s k)) = MT.put s >> k
-    eff (R other)     = relayTransControl (\f (a, s) -> (f a, s)) other
+    eff (R other)     = relayCarrier (StateC . (fmap swap .) . MT.runStateT) (MT.StateT . (fmap swap .) . runStateC) other

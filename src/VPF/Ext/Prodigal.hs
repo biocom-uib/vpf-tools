@@ -2,7 +2,7 @@
 {-# language DeriveGeneric #-}
 {-# language GeneralizedNewtypeDeriving #-}
 {-# language RecordWildCards #-}
-{-# language StandaloneDeriving #-}
+{-# language StrictData #-}
 {-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
 module VPF.Ext.Prodigal
@@ -26,8 +26,7 @@ import Data.Text.Encoding (decodeUtf8)
 
 import Control.Effect
 import Control.Effect.Carrier
-import Control.Effect.MTL (relayTransControl)
-import Control.Effect.MTL.TH (deriveMonadTrans)
+import Control.Effect.MTL.TH
 
 import qualified Control.Monad.IO.Class      as MT
 import qualified Control.Monad.Morph         as MT
@@ -89,7 +88,6 @@ instance Store ProdigalError
 newtype ProdigalT m a = ProdigalT (MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m) a)
     deriving (Functor, Applicative, Monad)
 
-
 deriveMonadTrans ''ProdigalT
 
 
@@ -112,13 +110,9 @@ runProdigal path defaultArgs m = MT.runExceptT $ do
     runProdigalWith cfg m
 
 
-throwProdigalError :: Monad m => ProdigalError -> ProdigalT m a
-throwProdigalError = ProdigalT . MT.throwE
-
-
-execProdigal :: MT.MonadIO m => ProdigalArgs -> ProdigalT m ()
-execProdigal args@ProdigalArgs{..} = do
-    cfg <- ProdigalT (MT.lift MT.ask)
+interpretProdigalT :: MT.MonadIO m => Prodigal (ProdigalT m) k -> ProdigalT m k
+interpretProdigalT (Prodigal args@ProdigalArgs{..} k) = do
+    cfg <- ProdigalT $ MT.lift MT.ask
 
     let cmdlineArgs =
           [ "-i", untag inputFile
@@ -133,10 +127,7 @@ execProdigal args@ProdigalArgs{..} = do
         Proc.proc (untag (prodigalPath cfg)) (prodigalDefaultArgs cfg ++ cmdlineArgs)
 
     case exitCode of
-      ExitSuccess    -> return ()
-      ExitFailure ec -> throwProdigalError $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
+      ExitSuccess    -> k
+      ExitFailure ec -> ProdigalT . MT.throwE $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
 
-
-instance (MT.MonadIO m, Carrier sig m, Effect sig) => Carrier (Prodigal :+: sig) (ProdigalT m) where
-    eff (L (Prodigal args k)) = execProdigal args >> k
-    eff (R other)             = relayTransControl fmap other
+deriveCarrier ''ProdigalT 'interpretProdigalT
