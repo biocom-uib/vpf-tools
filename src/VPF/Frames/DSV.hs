@@ -27,12 +27,12 @@ module VPF.Frames.DSV
 import GHC.Generics (Generic)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 
-import Control.Eff (Member, Lifted, lift, Eff)
-import Control.Eff.Exception (Exc, liftEither)
+import Control.Effect (Carrier, Member)
+import Control.Effect.Error (Error, throwError)
 import Control.Monad (when, (>=>))
 import Control.Exception (try)
 import Control.Monad.Catch (Exception, MonadThrow(throwM))
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO(liftIO))
 
 import Data.List (intercalate)
 import Data.Proxy (Proxy(..))
@@ -124,12 +124,14 @@ pipeEitherRows opts =
 
 
 produceEitherRows :: forall m sep cols.
-                  ( MonadSafe m, MonadIO m
-                  , KnownSymbol sep, ColumnHeaders cols, CSV.ReadRec cols
-                  )
-                  => Path (DSV sep cols)
-                  -> ParserOptions
-                  -> Producer (Either ParseError (Record cols)) m ()
+    ( KnownSymbol sep
+    , ColumnHeaders cols
+    , CSV.ReadRec cols
+    , MonadSafe m
+    )
+    => Path (DSV sep cols)
+    -> ParserOptions
+    -> Producer (Either ParseError (Record cols)) m ()
 produceEitherRows fp opts =
     CSV.produceTextLines (untag fp) >-> pipeEitherRows opts
   where
@@ -145,25 +147,27 @@ throwLeftsM = P.mapM (either throwM return)
 
 
 inCoreAoSExc ::
-             ( RecVec cols
-             , Lifted IO r
-             , Member (Exc ParseError) r
-             )
-             => Producer (Record cols) (SafeT IO) ()
-             -> Eff r (FrameRec cols)
+    ( RecVec cols
+    , MonadIO m
+    , Carrier sig m
+    , Member (Error ParseError) sig
+    )
+    => Producer (Record cols) (SafeT IO) ()
+    -> m (FrameRec cols)
 inCoreAoSExc =
-    lift . try @ParseError . inCoreAoS >=> liftEither
+    liftIO . try @ParseError . inCoreAoS >=> either throwError return
 
 
 readFrame ::
-          ( KnownSymbol sep, ColumnHeaders cols
-          , CSV.ReadRec cols, RecVec cols
-          , Lifted IO r
-          , Member (Exc ParseError) r
-          )
-          => Path (DSV sep cols)
-          -> ParserOptions
-          -> Eff r (FrameRec cols)
+    ( KnownSymbol sep, ColumnHeaders cols
+    , CSV.ReadRec cols, RecVec cols
+    , MonadIO m
+    , Carrier sig m
+    , Member (Error ParseError) sig
+    )
+    => Path (DSV sep cols)
+    -> ParserOptions
+    -> m (FrameRec cols)
 readFrame fp opts =
     inCoreAoSExc (produceEitherRows fp opts >-> throwLeftsM)
 
@@ -183,20 +187,18 @@ defWriterOptions sep = WriterOptions
     }
 
 
-produceFromFrame :: (Foldable f, Monad m)
-                 => f (Record cols)
-                 -> Producer (Record cols) m ()
+produceFromFrame :: (Foldable f, Monad m) => f (Record cols) -> Producer (Record cols) m ()
 produceFromFrame = P.each
 
 
 pipeDSVLines :: forall cols m.
-             ( RecMapMethod CSV.ShowCSV ElField cols
-             , RecordToList cols
-             , ColumnHeaders cols
-             , Monad m
-             )
-             => WriterOptions
-             -> Pipe (Record cols) Text m ()
+    ( RecMapMethod CSV.ShowCSV ElField cols
+    , RecordToList cols
+    , ColumnHeaders cols
+    , Monad m
+    )
+    => WriterOptions
+    -> Pipe (Record cols) Text m ()
 pipeDSVLines opts = do
     let headers = map T.pack (columnHeaders (Proxy @(Record cols)))
         sep     = T.singleton (writeSeparator opts)
@@ -208,32 +210,32 @@ pipeDSVLines opts = do
 
 
 produceDSVLinesFromFrame ::
-                         ( RecMapMethod CSV.ShowCSV ElField cols
-                         , RecordToList cols
-                         , ColumnHeaders cols
-                         , Monad m
-                         , Foldable f
-                         )
-                         => WriterOptions
-                         -> f (Record cols)
-                         -> Producer Text m ()
+    ( RecMapMethod CSV.ShowCSV ElField cols
+    , RecordToList cols
+    , ColumnHeaders cols
+    , Monad m
+    , Foldable f
+    )
+    => WriterOptions
+    -> f (Record cols)
+    -> Producer Text m ()
 produceDSVLinesFromFrame opts frame =
     produceFromFrame frame >-> pipeDSVLines opts
 
 
 writeDSV ::
-         ( RecMapMethod CSV.ShowCSV ElField cols
-         , RecordToList cols
-         , ColumnHeaders cols
-         , Foldable f
-         , Monad m
-         )
-         => WriterOptions
-         -> Consumer Text m ()
-         -> f (Record cols)
-         -> m ()
+    ( RecMapMethod CSV.ShowCSV ElField cols
+    , RecordToList cols
+    , ColumnHeaders cols
+    , Foldable f
+    , Monad m
+    )
+    => WriterOptions
+    -> Consumer Text m ()
+    -> f (Record cols)
+    -> m ()
 writeDSV opts writer frame =
     runEffect $
-      produceFromFrame frame
-      >-> pipeDSVLines opts
-      >-> writer
+        produceFromFrame frame
+        >-> pipeDSVLines opts
+        >-> writer

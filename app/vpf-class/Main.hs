@@ -61,6 +61,15 @@ import qualified VPF.Concurrency.MPI as Conc
 
 type Config = Opts.Config
 
+type SearchHitsT m =
+    ExceptT FA.ParseError
+     (HMMSearchT
+      (ProdigalT
+       (ExceptT DSV.ParseError
+        (ExceptT VC.CheckpointLoadError
+         (MaybeT m)))))
+
+
 type SearchHitsM = Eff
    '[ Exc FA.ParseError
     , Cmd HMM.HMMSearch

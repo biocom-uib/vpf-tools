@@ -133,4 +133,4 @@ interpretHMMSearchT (HMMSearch args@HMMSearchArgs{..} k) = do
       ExitSuccess    -> k
       ExitFailure ec -> HMMSearchT . MT.throwE $! HMMSearchError args ec (decodeUtf8 (BL.toStrict stderr))
 
-deriveCarrier ''HMMSearchT 'interpretHMMSearchT
+deriveCarrier 'interpretHMMSearchT

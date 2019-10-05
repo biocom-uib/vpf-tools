@@ -1,8 +1,11 @@
 {-# language TemplateHaskell #-}
 module Control.Effect.MTL.TH where
 
+import Data.Bifunctor (first)
 import Data.Coerce (coerce)
-import Data.List (foldl')
+import Data.List ((\\), foldl')
+import qualified Data.Map as Map
+import Data.Maybe (fromMaybe)
 
 import Control.Effect.Carrier
 import Control.Effect.MTL
@@ -17,207 +20,303 @@ import Language.Haskell.TH
 import Language.Haskell.TH.Lens
 
 
-deriveMonadTrans :: Name -> Q [Dec]
-deriveMonadTrans carrierName = do
-    TyConI (NewtypeD [] _ tyvars Nothing con _) <- reify carrierName
 
-    let tyvarNames :: [Name]
-        tyvarNames = map (L.view name) tyvars
-
-        carrierT :: TypeQ
-        carrierT = return $ foldl' AppT (ConT carrierName)
-                        (map VarT (take (length tyvars -2) tyvarNames))
-
-        conName :: Name
-        conName =
-          case L.preview name con of
-            Just conName -> conName
-
-        carrierConE :: ExpQ
-        carrierConE = conE conName
-
-        carrierConP :: String -> PatQ
-        carrierConP varName = conP conName [varP (mkName varName)]
-
-        innerM :: Type
-        innerM =
-          case L.preview types con of
-            Just (AppT innerM (VarT _a)) -> innerM
-
-    case innerM of
-      VarT _m -> [d|
-          instance MT.MonadIO m => MT.MonadIO ($carrierT m) where
-              liftIO = $carrierConE . MT.liftIO
-
-          instance MT.MFunctor $carrierT where
-              hoist f $(conP conName [varP (mkName "m")]) = $carrierConE (f m)
-
-          instance MT.MonadTrans $carrierT where
-              lift = $carrierConE
-
-          instance MT.MonadTransControl $carrierT where
-              type StT $carrierT a = a
-              liftWith f = coerce (f coerce)
-              restoreT = MT.defaultRestoreT $carrierConE
-
-          instance MT.MonadBase b m => MT.MonadBase b ($carrierT m) where
-              liftBase = $carrierConE . MT.liftBase
-
-          instance MT.MonadBaseControl b m => MT.MonadBaseControl b ($carrierT m) where
-              type StM ($carrierT m) a = MT.ComposeSt $carrierT m a
-              liftBaseWith = MT.defaultLiftBaseWith
-              restoreM = MT.defaultRestoreM
-         |]
-
-      AppT innerTrans (VarT _m) -> [d|
-          instance MT.MonadIO m => MT.MonadIO ($carrierT m) where
-              liftIO = $carrierConE . MT.liftIO
-
-          instance MT.MFunctor $carrierT where
-              hoist f $(carrierConP "m") = $carrierConE (MT.hoist f m)
-
-          instance MT.MonadTrans $carrierT where
-              lift = $carrierConE . MT.lift
-
-          instance MT.MonadTransControl $carrierT where
-              type StT $carrierT a = MT.StT $(return innerTrans) a
-              liftWith = MT.defaultLiftWith $carrierConE coerce
-              restoreT = MT.defaultRestoreT $carrierConE
-
-          instance MT.MonadBase b m => MT.MonadBase b ($carrierT m) where
-              liftBase = $carrierConE . MT.liftBase
-
-          instance MT.MonadBaseControl b m => MT.MonadBaseControl b ($carrierT m) where
-              type StM ($carrierT m) a = MT.ComposeSt $carrierT m a
-              liftBaseWith = MT.defaultLiftBaseWith
-              restoreM = MT.defaultRestoreM
-         |]
-
-      AppT innerT1 (AppT innerT2 (VarT _m)) -> [d|
-          instance MT.MonadIO m => MT.MonadIO ($carrierT m) where
-              liftIO = $carrierConE . MT.liftIO
-
-          instance MT.MFunctor $carrierT where
-              hoist f $(carrierConP "m") = $carrierConE (MT.hoist (MT.hoist f) m)
-
-          instance MT.MonadTrans $carrierT where
-              lift = $carrierConE . MT.lift . MT.lift
-
-          instance MT.MonadTransControl $carrierT where
-              type StT $carrierT a = MT.StT $(return innerT1) (MT.StT $(return innerT2) a)
-              liftWith = MT.defaultLiftWith2 $carrierConE coerce
-              restoreT = MT.defaultRestoreT2 $carrierConE
-
-          instance MT.MonadBase b m => MT.MonadBase b ($carrierT m) where
-              liftBase = $carrierConE . MT.liftBase
-
-          instance MT.MonadBaseControl b m => MT.MonadBaseControl b ($carrierT m) where
-              type StM ($carrierT m) a = MT.ComposeSt $carrierT m a
-              liftBaseWith = MT.defaultLiftBaseWith
-              restoreM = MT.defaultRestoreM
-         |]
+tyConName :: Type -> Q Name
+tyConName (ConT n)    = return n
+tyConName (AppT ty _) = tyConName ty
+tyConName ty          = fail $ "cannot find concrete type constructor of " ++ show ty
 
 
-deriveCarrier :: Name -> Name -> Q [Dec]
-deriveCarrier carrierName interpName = do
-    TyConI (NewtypeD [] _ tyvars Nothing con _) <- reify carrierName
+replaceTyVars :: Type -> Type -> Type
+replaceTyVars (AppT t1 t2)         (AppT t1' t2')          = AppT (replaceTyVars t1 t1') (replaceTyVars t2 t2')
+-- replaceTyVars (AppKindT t k)       (AppKindT t' k')        = AppKindT (replaceTyVars t t') (replaceTyVars k k')
+replaceTyVars (SigT t k)           (SigT t' k')            = SigT (replaceTyVars t t') (replaceTyVars k k')
+replaceTyVars (VarT _n)            (VarT n')               = VarT n'
+replaceTyVars (ConT n)             (ConT _n')              = ConT n
+replaceTyVars (PromotedT n)        (PromotedT _n)          = PromotedT n
+replaceTyVars (InfixT t1 _n t2)    (InfixT t1' n' t2')     = InfixT (replaceTyVars t1 t1') n' (replaceTyVars t2 t2')
+replaceTyVars (UInfixT t1 _n t2)   (UInfixT t1' n' t2')    = UInfixT (replaceTyVars t1 t1') n' (replaceTyVars t2 t2')
+replaceTyVars (ParensT t)          (ParensT t')            = ParensT (replaceTyVars t t')
+replaceTyVars (TupleT i)           (TupleT _i')            = TupleT i
+replaceTyVars (UnboxedTupleT i)    (UnboxedTupleT _i')     = UnboxedTupleT i
+replaceTyVars (UnboxedSumT a)      (UnboxedSumT _a')       = UnboxedSumT a
+replaceTyVars ArrowT               ArrowT                  = ArrowT
+replaceTyVars EqualityT            EqualityT               = EqualityT
+replaceTyVars ListT                ListT                   = ListT
+replaceTyVars (PromotedTupleT i)   (PromotedTupleT _i')    = PromotedTupleT i
+replaceTyVars PromotedNilT         PromotedNilT            = PromotedNilT
+replaceTyVars PromotedConsT        PromotedConsT           = PromotedConsT
+replaceTyVars StarT                StarT                   = StarT
+replaceTyVars ConstraintT          ConstraintT             = ConstraintT
+replaceTyVars (LitT lit)           (LitT _lit')            = LitT lit
+replaceTyVars WildCardT            WildCardT               = WildCardT
+-- replaceTyVars (ImplicitParamT s t) (ImplicitParamT _s' t') = ImplicitParamT s (replaceTyVars t t')
 
-    let conName :: Name
-        conName =
-          case L.preview name con of
-            Just conName -> conName
 
-        carrierConE :: ExpQ
-        carrierConE = conE conName
+decomposeTransStack :: Type -> ([Type], Type)
+decomposeTransStack = go
+  where
+    go :: Type -> ([Type], Type)
+    go (AppT t m) = first (t:) (go m)
+    go m          = ([], m)
 
-        carrierConP :: String -> PatQ
-        carrierConP varName = conP conName [varP (mkName varName)]
 
-    VarI _ interpType _ <- reify interpName
+applyTransStack :: [Type] -> Type -> Type
+applyTransStack ts m = foldr AppT m ts
 
-    let (interpCxt, algT, carrierT, m, a) =
-          case interpType of
-            ForallT _ interpCxt (AppT (AppT ArrowT tyAlgMA) tyCarrierMA) ->
-                case tyAlgMA of
-                  AppT (AppT algT carrierM) (VarT a) ->
-                      case tyCarrierMA of
-                        AppT carrierM'@(AppT carrierT (VarT m)) (VarT a')
-                          | carrierM == carrierM' && a == a' ->
-                              (interpCxt, return algT, return carrierT, varT m, varT a)
 
-                        _ -> error $ "the given interpreter does not return the carrier type: " ++ show carrierM
-                  _ -> error $ "don't know how to read algebra type in the interpreter type signature: " ++ show tyAlgMA
-            _ -> error $ "don't know how to read interpreter Type: " ++ show interpType
+cxtType :: Cxt -> Type
+cxtType cxt = foldl' AppT (TupleT (length cxt)) cxt
 
-    let innerM :: TypeQ
-        innerM =
-          case L.preview types con of
-            Just (AppT innerM (VarT _a)) -> replaceUnderlyingMonad innerM m
 
-    let classCxtT = return $ foldl' AppT (TupleT (length interpCxt)) interpCxt
-        interpE = varE interpName
+makeRenamer :: [Name] -> [Name] -> Map.Map Name Type
+makeRenamer ns1 ns2 = Map.fromList $ zipWith (\n1 n2 -> (n1, VarT n2)) ns1 ns2
 
-    algName <- newName "alg"
-    let algP = varP algName
-        algE = varE algName
 
+data CarrierInfo = CarrierInfo
+    { carrierTypeName    :: Name
+    , carrierConName     :: Name
+    , carrierExtraTyVars :: [Name]
+    , carrierInnerStack  :: [Type]
+    , carrierBaseMonad   :: Name
+    , carrierBaseValue   :: Name
+    , carrierDerives     :: [DerivClause]
+    }
+
+
+getCarrierInfo :: Maybe [Name] -> Name -> Q CarrierInfo
+getCarrierInfo mayTyArgs carrierName = do
+    TyConI carrierDec <- reify carrierName
+
+    (tyVars, carrierConName, innerCarrierM, a, derives) <-
+        case carrierDec of
+          NewtypeD [] _name conTyVars _kind con derives
+            | [satInnerCarrierType] <- L.toListOf types con -> do
+
+                let conTyVarNames = L.toListOf typeVars conTyVars
+                    tyVars        = fromMaybe conTyVarNames mayTyArgs
+                    conName       = L.view name con
+
+                case doRenaming mayTyArgs satInnerCarrierType of
+                  AppT innerCarrierM (VarT a) ->
+                      return (tyVars, conName, innerCarrierM, a, derives)
+
+                  t -> fail $ "error: the inner carrier type is not of the form M a: " ++ show t
+
+          _ -> fail $ "invalid carrier declaration: " ++ show carrierDec
+
+    (stack, m) <-
+        case decomposeTransStack innerCarrierM of
+          (ts, VarT m) -> return (ts, m)
+          _ -> fail "the carrier stack does not have a free type variable as base monad"
+
+    return CarrierInfo
+        { carrierTypeName    = carrierName
+        , carrierConName     = carrierConName
+        , carrierExtraTyVars = tyVars \\ [m, a]
+        , carrierInnerStack  = stack
+        , carrierBaseMonad   = m
+        , carrierBaseValue   = a
+        , carrierDerives     = derives
+        }
+  where
+    doRenaming =
+        case mayTyArgs of
+          Nothing      -> const id
+          Just renames -> \tyVars ->
+            let renamer = makeRenamer (L.toListOf typeVars tyVars) renames
+            in  substType renamer
+
+
+carrierTrans :: CarrierInfo -> Type
+carrierTrans c = foldl' AppT (ConT (carrierTypeName c)) (map VarT (carrierExtraTyVars c))
+
+
+data InterpInfo = InterpInfo
+    { interpCxt       :: [Pred]
+    , interpEffType   :: Type
+    , interpCarrierT  :: Type
+    , interpBaseM     :: Name
+    , interpBaseValue :: Name
+    }
+
+
+getInterpInfo :: Name -> Q InterpInfo
+getInterpInfo interpName = do
+    VarI _name interpType _rhs <- reify interpName
+
+    (interpCxt, satEffType, satCarrierType) <-
+        case interpType of
+          ForallT _tyVars cxt (AppT (AppT ArrowT effType) cType) ->
+              return (cxt, effType, cType)
+
+          _ -> fail $ "could not match interpreter type with forall <vars>. Cxt => Eff M a -> M a: "
+                        ++ show interpType
+
+    (effType, carrierM, a) <-
+        case satEffType of
+          AppT (AppT effType carrierM) (VarT a) ->
+              return (effType, carrierM, a)
+
+          _ -> fail $ "could not match saturated effect type with Eff M a: " ++ show satEffType
+
+    (carrierT, m) <-
+        case satCarrierType of
+          AppT carrierM' (VarT a')
+            | AppT carrierT (VarT m) <- carrierM'
+            , carrierM == carrierM' && a == a' ->
+                 return (carrierT, m)
+          _ -> fail "error inspecting carrier type"
+
+    return InterpInfo
+        { interpCxt       = interpCxt
+        , interpEffType   = effType
+        , interpCarrierT  = carrierT
+        , interpBaseM     = m
+        , interpBaseValue = a
+        }
+
+
+interpSatCarrier :: InterpInfo -> Type
+interpSatCarrier i =
+    interpCarrierT i
+        `AppT` VarT (interpBaseM i)
+        `AppT` VarT (interpBaseValue i)
+
+
+interpCarrierTyVars :: InterpInfo -> [Name]
+interpCarrierTyVars = L.toListOf typeVars . interpSatCarrier
+
+
+deriveCarrier :: Name -> Q [Dec]
+deriveCarrier interpName = do
+    interp <- getInterpInfo interpName
+
+    carrierName <- tyConName (interpCarrierT interp)
+
+    carrier <- getCarrierInfo (Just (interpCarrierTyVars interp))
+                            carrierName
+
+    sigName <- newName "sig"
     innerSigName <- newName "innerSig"
-    let innerSigT = varT innerSigName
+    effName <- newName "eff"
 
-    sigVarName <- newName "sig"
-    let sigT = varT sigVarName
+    let sigQ = varT sigName
+        carrierTQ = return (interpCarrierT interp)
+        carrierConQ = conE (carrierConName carrier)
+        cxtQ = return (cxtType (interpCxt interp))
+
+        m = VarT (interpBaseM interp)
+
+        innerSigQ = varT innerSigName
+        innerMQ = return (applyTransStack (carrierInnerStack carrier) m)
+        mQ = return m
+
+        interpQ = varE interpName
+        effTQ = return (interpEffType interp)
+        effPQ = varP effName
+        effEQ = varE effName
 
     [d|
         instance
-            ( Effect $sigT
-            , Carrier $sigT $m
-            , Carrier $innerSigT $innerM
-            , InjR $sigT $innerSigT
-            , $classCxtT
+            ( Effect $sigQ
+            , Carrier $sigQ $mQ
+            , Carrier $innerSigQ $innerMQ
+            , InjR $sigQ $innerSigQ
+            , $cxtQ
             )
-            => Carrier ($algT :+: $sigT) ($carrierT $m) where
+            => Carrier ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
 
-            eff (L $algP) = $interpE $algE
-            eff (R other) = relayCoerceInner $carrierConE other
+            eff (L $effPQ) = $interpQ $effEQ
+            eff (R other)  = relayCoerceInner $carrierConQ other
       |]
-  where
-    replaceUnderlyingMonad :: Type -> TypeQ -> TypeQ
-    replaceUnderlyingMonad innerM m =
-        case innerM of
-          VarT _m             -> m
-          AppT innerT innerM' -> AppT innerT <$> replaceUnderlyingMonad innerM' m
-
-    transformerDepth :: Type -> Int
-    transformerDepth (VarT _m)              = 0
-    transformerDepth (AppT _innerT innerM') = 1 + transformerDepth innerM'
-
-    inj :: Int -> ExpQ
-    inj n = iterate (\f -> [e| $f . R |]) [e| id |] !! n
-
- --VarT _m -> [d|
-
-      -- AppT innerTrans (VarT _m) -> do
-      --       innerAlg <- newName "malg"
-      --       let innerAlgT = varT innerAlg
-      --       [d|
-      --           instance (Effect $innerAlgT, Carrier ($innerAlgT :+: $sigT) ($(return innerTrans) $m), $classCxtT)
-      --               => Carrier ($algT $m $a :+: $sigT) ($carrierT $m) where
-
-      --               eff (L $algP) = $interpE $algE
-      --               eff (R other) = relayCarrier (\ $(carrierConP "m1") -> m1) $carrierConE other
-      --           |]
 
 
-      -- AppT innerTrans1 (AppT innerTrans2 (VarT _m)) -> do
-      --       innerAlg1 <- newName "malg"
-      --       let innerAlg1T = varT innerAlg1
+deriveMonadTrans :: Name -> Q [Dec]
+deriveMonadTrans carrierName = do
+    carrier <- getCarrierInfo Nothing carrierName
 
-      --       innerAlg2 <- newName "malg"
-      --       let innerAlg2T = varT innerAlg2
-      --       [d|
-      --           instance (Effect $innerAlgT, Carrier ($innerAlgT :+: $sigT) ($(return innerTrans) $m), $classCxtT)
-      --               => Carrier ($algT $m $a :+: $sigT) ($carrierT $m) where
+    let carrierConE :: ExpQ
+        carrierConE = conE (carrierConName carrier)
 
-      --               eff (L $algP) = $interpE $algE
-      --               eff (R other) = relayCarrier (\ $(carrierConP "m1") -> m1) $carrierConE other
-      --           |]
+        carrierConP :: String -> PatQ
+        carrierConP varName = conP (carrierConName carrier) [varP (mkName varName)]
+
+        carrierQ :: TypeQ
+        carrierQ = return (carrierTrans carrier)
+
+        ts :: [Type]
+        ts = carrierInnerStack carrier
+
+        innerT :: TypeQ -> TypeQ
+        innerT = fmap (applyTransStack ts)
+
+        mapConstraint :: TypeQ -> [Type] -> TypeQ
+        mapConstraint cq tys = do
+            c <- cq
+            return $ foldl' (\cxt t -> AppT cxt (AppT c t)) (TupleT (length tys)) ts
+
+    let liftWithLayer :: Type -> (ExpQ -> ExpQ) -> ExpQ -> ExpQ
+        liftWithLayer _t innerExp runs = do
+            runName <- newName "run"
+            let runP = varP runName
+                runE = varE runName
+
+            [e| MT.liftWith (\ $runP -> $(innerExp [e| $runE . $runs |])) |]
+
+        mkLiftWith :: ExpQ -> ExpQ
+        mkLiftWith f = foldr liftWithLayer
+                            (\runs -> [e| $f $runs |])
+                            ts
+                            [e| coerce |]
+
+    [d|
+        instance (Monad ($carrierQ m), MT.MonadIO $(innerT [t| m |]))
+            => MT.MonadIO ($carrierQ m) where
+
+            liftIO io = $carrierConE (MT.liftIO io)
+
+        instance $(mapConstraint [t| MT.MFunctor |] ts)
+            => MT.MFunctor $carrierQ where
+
+            hoist f $(carrierConP "m") =
+                $carrierConE $
+                    $(foldr (\_t f' -> [e| MT.hoist $f' |]) [e| f |] ts)
+                    m
+
+        instance $(mapConstraint [t| MT.MonadTrans |] ts)
+            => MT.MonadTrans $carrierQ where
+
+            lift m =
+                $carrierConE
+                    $(foldr (\_t m' -> [e| MT.lift $m' |]) [e| m |] ts)
+
+        instance $(mapConstraint [t| MT.MonadTransControl |] ts)
+            => MT.MonadTransControl $carrierQ where
+
+            type StT $carrierQ a =
+              $(foldr (\t st -> [t| MT.StT $(return t) $st |]) [t| a |] ts)
+
+            liftWith f = $carrierConE $(mkLiftWith [e| f |])
+
+            restoreT st =
+                $carrierConE
+                    $(foldr (\_t st' -> [e| MT.restoreT $st' |]) [e| st |] ts)
+
+        instance (Monad b, Monad ($carrierQ m), MT.MonadBase b $(innerT [t| m |]))
+            => MT.MonadBase b ($carrierQ m) where
+
+            liftBase b = $carrierConE (MT.liftBase b)
+
+        instance (Monad b, Monad ($carrierQ m), MT.MonadBaseControl b $(innerT [t| m |]))
+            => MT.MonadBaseControl b ($carrierQ m) where
+
+            type StM ($carrierQ m) a = MT.StM $(innerT [t| m |]) a
+
+            liftBaseWith f = $carrierConE (MT.liftBaseWith (\run -> f (run . unwrap)))
+              where
+                unwrap :: $carrierQ m a -> $(innerT [t| m |]) a
+                unwrap $(carrierConP "m") = m
+
+            restoreM st = $carrierConE (MT.restoreM st)
+      |]

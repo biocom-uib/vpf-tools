@@ -9,9 +9,9 @@ module VPF.Model.VirusClass where
 
 import GHC.Generics (Generic)
 
-import Control.Eff
-import Control.Eff.Reader.Strict (Reader, reader)
-import Control.Eff.Exception (Exc, liftEither, throwError)
+import Control.Effect
+import Control.Effect.Reader (Reader, asks)
+import Control.Effect.Error (Error, throwError)
 import qualified Control.Lens as L
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Trans.Control (MonadBaseControl, StM)
@@ -49,7 +49,6 @@ import VPF.Concurrency.Async ((>||>), (>|->), (>-|>))
 import qualified VPF.Concurrency.Async as Conc
 import qualified VPF.Concurrency.Pipes as Conc
 
-import VPF.Eff.Cmd (Cmd)
 import VPF.Ext.Prodigal (Prodigal, prodigal)
 import VPF.Ext.HMMER.Search (HMMSearch, ProtSearchHitCols, hmmsearch)
 import qualified VPF.Ext.HMMER.Search.Cols as HMM
@@ -176,14 +175,16 @@ processedHitsFileFor dir (GenomeChunkKey hash) =
 
 
 searchGenomeHits ::
-                 ( LiftedBase IO r
-                 , Member (Cmd HMMSearch) r
-                 , Member (Cmd Prodigal) r
+                 ( MonadBaseControl IO m
+                 , MonadIO m
+                 , Member HMMSearch sig
+                 , Member Prodigal sig
+                 , Carrier sig m
                  )
                  => Path Directory
                  -> Path HMMERModel
                  -> Producer (FA.FastaEntry Nucleotide) (SafeT IO) ()
-                 -> Eff r (GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))
+                 -> m (GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))
 searchGenomeHits wd vpfsFile genomes = do
     genomesDir <- liftIO $ createGenomesSubdir wd
 
@@ -227,23 +228,23 @@ searchGenomeHits wd vpfsFile genomes = do
         IO.hPutStrLn h ""
 
 
-aggregateHits :: forall r.
-              ( Lifted IO r
-              , '[ Reader ModelConfig
-                 , Exc DSV.ParseError
-                 , Exc FA.ParseError
-                 ] <:: r
+aggregateHits :: forall sig m.
+              ( Carrier sig m
+              , Member (Reader ModelConfig) sig
+              , Member (Error DSV.ParseError) sig
+              , Member (Error FA.ParseError) sig
+              , MonadIO m
               )
               => Path (FASTA Aminoacid)
               -> Path (HMMERTable ProtSearchHitCols)
-              -> Eff r (FrameRec AggregatedHitsCols)
+              -> m (FrameRec AggregatedHitsCols)
 aggregateHits aminoacidsFile hitsFile = do
     proteinSizes <- loadProteinSizes
 
     let hitRows = Tbl.produceRows hitsFile
 
-    thr <- reader modelEValueThreshold
-    getVirusName <- reader modelVirusNameExtractor
+    thr <- asks modelEValueThreshold
+    getVirusName <- asks modelVirusNameExtractor
 
     hitsFrame <- DSV.inCoreAoSExc $
         hitRows
@@ -261,14 +262,14 @@ aggregateHits aminoacidsFile hitsFile = do
           , #k_base_size  =: fromIntegral (FA.entrySeqNumBases entry) / 1000
           )
 
-    loadProteinSizes :: Eff r (GroupedFrameRec (Field M.ProteinName) '[M.KBaseSize])
+    loadProteinSizes :: m (GroupedFrameRec (Field M.ProteinName) '[M.KBaseSize])
     loadProteinSizes = do
-        (colVecs, errs) <- lift $ runSafeT $
+        (colVecs, errs) <- liftIO $ runSafeT $
             Fold.impurely P.foldM' (F.colVecsFoldM 128) $
                 FA.fastaFileReader aminoacidsFile
                   >-> P.mapM (\entry -> return $! fastaEntryToRow entry)
 
-        liftEither errs
+        either throwError return errs
         return $! F.setIndex @"protein_name" (F.fromColVecs colVecs)
 
     aggregate :: GroupedFrameRec (Field M.ProteinName) '[M.KBaseSize]
@@ -291,18 +292,18 @@ aggregateHits aminoacidsFile hitsFile = do
             |. F.rename @"query_name" @"model_name"
 
 
-processHits :: forall r.
-              ( Lifted IO r
-              , '[ Reader ModelConfig
-                 , Exc DSV.ParseError
-                 , Exc FA.ParseError
-                 ] <:: r
-              )
-              => Path Directory
-              -> GenomeChunkKey
-              -> Path (FASTA Aminoacid)
-              -> Path (HMMERTable ProtSearchHitCols)
-              -> Eff r (Path (DSV "\t" AggregatedHitsCols))
+processHits ::
+    ( MonadIO m
+    , Carrier sig m
+    , Member (Reader ModelConfig) sig
+    , Member (Error DSV.ParseError) sig
+    , Member (Error FA.ParseError) sig
+    )
+    => Path Directory
+    -> GenomeChunkKey
+    -> Path (FASTA Aminoacid)
+    -> Path (HMMERTable ProtSearchHitCols)
+    -> m (Path (DSV "\t" AggregatedHitsCols))
 processHits wd key protsFile hitsFile = do
     aggregatedHits <- aggregateHits protsFile hitsFile
 
@@ -356,11 +357,12 @@ predictMembership classParams = F.groups %~ do
 
 -- asynchronous versions
 
-pipeAsyncWorkers :: forall n m a b c. (MonadIO n, MonadIO m, MonadBaseControl IO m)
-                 => Conc.AsyncProducer a n () m ()
-                 -> NE.NonEmpty (Pipe a (StM m b) n ())
-                 -> Conc.AsyncConsumer b m () m c
-                 -> m c
+pipeAsyncWorkers :: forall n m a b c.
+    (MonadIO n, MonadIO m, MonadBaseControl IO m)
+    => Conc.AsyncProducer a n () m ()
+    -> NE.NonEmpty (Pipe a (StM m b) n ())
+    -> Conc.AsyncConsumer b m () m c
+    -> m c
 pipeAsyncWorkers asyncProducer workers asyncConsumer = do
     let nworkers = fromIntegral $ length workers
 
@@ -383,22 +385,25 @@ data SearchHitsConcurrencyOpts m = SearchHitsConcurrencyOpts
     , searchingWorkers :: NE.NonEmpty (SearchHitsPipeline m)
     }
 
-asyncSearchHits :: forall r.
-                ( LiftedBase IO r
-                , '[ Exc FA.ParseError
-                   ] <:: r
-                )
-                => Producer (FA.FastaEntry Nucleotide) (SafeT IO) (Either FA.ParseError ())
-                -> SearchHitsConcurrencyOpts (Eff r)
-                -> Eff r [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
+asyncSearchHits :: forall sig m.
+    ( MonadBaseControl IO m
+    , MonadIO m
+    , Carrier sig m
+    , Member (Error FA.ParseError) sig
+    )
+    => Producer (FA.FastaEntry Nucleotide) (SafeT IO) (Either FA.ParseError ())
+    -> SearchHitsConcurrencyOpts m
+    -> m [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
 asyncSearchHits genomes concOpts = do
     let nworkers = fromIntegral $ length (searchingWorkers concOpts)
 
     asyncChunkProducer <- liftIO $ Conc.stealingAsyncProducerA (nworkers+1) $
         Conc.bufferedChunks (fastaChunkSize concOpts) genomes
 
-    let asyncEffProducer :: Conc.AsyncProducer [FA.FastaEntry Nucleotide] (SafeT IO) () (Eff r) ()
-        asyncEffProducer = Conc.mapProducerM liftEither $ Conc.runAsyncSafeT asyncChunkProducer
+    let asyncEffProducer :: Conc.AsyncProducer [FA.FastaEntry Nucleotide] (SafeT IO) () m ()
+        asyncEffProducer =
+            Conc.mapProducerM (either throwError return) $
+                Conc.runAsyncSafeT asyncChunkProducer
 
     pipeAsyncWorkers asyncEffProducer
                      (searchingWorkers concOpts)
@@ -414,14 +419,16 @@ type ProcessHitsPipeline m =
          (SafeT IO)
          ()
 
+
 newtype ProcessHitsConcurrencyOpts m = ProcessHitsConcurrencyOpts
     { processingHitsWorkers :: NE.NonEmpty (ProcessHitsPipeline m)
     }
 
-asyncProcessHits :: LiftedBase IO r
+
+asyncProcessHits :: (MonadIO m, MonadBaseControl IO m)
                  => [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
-                 -> ProcessHitsConcurrencyOpts (Eff r)
-                 -> Eff r [(GenomeChunkKey, Path (DSV "\t" AggregatedHitsCols))]
+                 -> ProcessHitsConcurrencyOpts m
+                 -> m [(GenomeChunkKey, Path (DSV "\t" AggregatedHitsCols))]
 asyncProcessHits hitsFiles concOpts = do
     let nworkers = fromIntegral $ length (processingHitsWorkers concOpts)
 
@@ -436,12 +443,18 @@ newtype PredictMembershipConcurrencyOpts m = PredictMembershipConcurrencyOpts
     { predictingNumWorkers :: Natural
     }
 
-asyncPredictMemberships :: forall r. (LiftedBase IO r, Member (Exc DSV.ParseError) r)
-                        => Map (Field Cls.ClassKey) Cls.ClassificationFiles
-                        -> [Path (DSV "\t" AggregatedHitsCols)]
-                        -> Path Directory
-                        -> PredictMembershipConcurrencyOpts (Eff r)
-                        -> Eff r [Path (DSV "\t" PredictedCols)]
+
+asyncPredictMemberships :: forall sig m.
+    ( MonadBaseControl IO m
+    , MonadIO m
+    , Carrier sig m
+    , Member (Error DSV.ParseError) sig
+    )
+    => Map (Field Cls.ClassKey) Cls.ClassificationFiles
+    -> [Path (DSV "\t" AggregatedHitsCols)]
+    -> Path Directory
+    -> PredictMembershipConcurrencyOpts m
+    -> m [Path (DSV "\t" PredictedCols)]
 asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
     let nworkers :: Num a => a
         nworkers = fromIntegral $ predictingNumWorkers concOpts
@@ -470,10 +483,11 @@ asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
 
     return paths
   where
-    predictAll :: Monad m
-               => [GroupedFrameRec (Field M.VirusName) '[M.ModelName, M.ProteinHitScore]]
-               -> Cls.ClassificationParams
-               -> Producer (Record PredictedCols) m ()
+    predictAll ::
+        Monad n
+        => [GroupedFrameRec (Field M.VirusName) '[M.ModelName, M.ProteinHitScore]]
+        -> Cls.ClassificationParams
+        -> Producer (Record PredictedCols) n ()
     predictAll aggHitss classParams =
         P.each aggHitss
         >-> P.map do
@@ -482,9 +496,10 @@ asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
                 |. F.resetIndex
         >-> P.concat
 
-    writeOutput :: Field ("class_key" ::: Text)
-                -> Producer (Record PredictedCols) (SafeT IO) ()
-                -> Eff r (Path (DSV "\t" PredictedCols))
+    writeOutput ::
+        Field Cls.ClassKey
+        -> Producer (Record PredictedCols) (SafeT IO) ()
+        -> m (Path (DSV "\t" PredictedCols))
     writeOutput classKey rows = do
         let path = untag outputDir </> T.unpack (untag classKey) ++ ".tsv"
 
@@ -514,42 +529,49 @@ newtype CheckpointLoadError = CheckpointJSONLoadError String
 
 data ClassificationStep
     = SearchHitsStep {
-        runSearchHitsStep :: forall r.
-            ( LiftedBase IO r
-            , '[ Exc FA.ParseError
-               ] <:: r
+        runSearchHitsStep :: forall sig m.
+            ( MonadBaseControl IO m
+            , MonadIO m
+            , Carrier sig m
+            , Member (Error FA.ParseError) sig
             )
             => Path (FASTA Nucleotide)
-            -> SearchHitsConcurrencyOpts (Eff r)
-            -> Eff r Checkpoint
+            -> SearchHitsConcurrencyOpts m
+            -> m Checkpoint
     }
     | ProcessHitsStep {
-        runProcessHitsStep :: forall r.
-            ( LiftedBase IO r
-            , '[ Reader ModelConfig
-               , Exc DSV.ParseError
-               , Exc FA.ParseError
-               ] <:: r
+        runProcessHitsStep :: forall sig m.
+            ( MonadBaseControl IO m
+            , MonadIO m
+            , Carrier sig m
+            , Member (Reader ModelConfig) sig
+            , Member (Error DSV.ParseError) sig
+            , Member (Error FA.ParseError) sig
             )
-            => ProcessHitsConcurrencyOpts (Eff r)
-            -> Eff r Checkpoint
+            => ProcessHitsConcurrencyOpts m
+            -> m Checkpoint
     }
     | PredictMembershipStep {
-        runPredictMembershipStep :: forall r.
-            ( LiftedBase IO r
-            , '[ Exc DSV.ParseError
-               ] <:: r
+        runPredictMembershipStep :: forall sig m.
+            ( MonadBaseControl IO m
+            , MonadIO m
+            , Carrier sig m
+            , Member (Error DSV.ParseError) sig
             )
             => Map (Field Cls.ClassKey) Cls.ClassificationFiles
             -> Path Directory
-            -> PredictMembershipConcurrencyOpts (Eff r)
-            -> Eff r [Path (DSV "\t" PredictedCols)]
+            -> PredictMembershipConcurrencyOpts m
+            -> m [Path (DSV "\t" PredictedCols)]
     }
 
 
-tryLoadCheckpoint :: (Lifted IO r, Member (Exc CheckpointLoadError) r)
-                  => Path (JSON Checkpoint)
-                  -> Eff r (Maybe Checkpoint)
+tryLoadCheckpoint ::
+    ( MonadIO m
+    , Carrier sig m
+    , Member (Error CheckpointLoadError) sig
+    )
+    => Path (JSON Checkpoint)
+    -> m (Maybe Checkpoint)
 tryLoadCheckpoint checkpointFile = do
     exists <- liftIO $ D.doesFileExist (untag checkpointFile)
 
@@ -601,11 +623,15 @@ checkpointStep wd checkpoint =
 
 -- run the whole process
 
-runClassification :: forall r a. (Lifted IO r, Member (Exc CheckpointLoadError) r)
-                  => Path Directory
-                  -> Path (FASTA Nucleotide)
-                  -> ((Checkpoint -> Eff r a) -> ClassificationStep -> Eff r a)
-                  -> Eff r a
+runClassification :: forall sig m a.
+    ( MonadIO m
+    , Carrier sig m
+    , Member (Error CheckpointLoadError) sig
+    )
+    => Path Directory
+    -> Path (FASTA Nucleotide)
+    -> ((Checkpoint -> m a) -> ClassificationStep -> m a)
+    -> m a
 runClassification wd fullGenomesFile runSteps = do
     key <- liftIO $ getGenomeChunkKey fullGenomesFile
 
@@ -617,7 +643,7 @@ runClassification wd fullGenomesFile runSteps = do
 
     runSteps (resume checkpointFile) (checkpointStep wd checkpoint)
   where
-    resume :: Path (JSON Checkpoint) -> Checkpoint -> Eff r a
+    resume :: Path (JSON Checkpoint) -> Checkpoint -> m a
     resume checkpointFile checkpoint = do
         liftIO $ saveCheckpoint checkpointFile checkpoint
         runSteps (resume checkpointFile) (checkpointStep wd checkpoint)

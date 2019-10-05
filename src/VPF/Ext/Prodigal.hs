@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -ddump-splices #-}
 {-# language DeriveFunctor #-}
 {-# language DeriveGeneric #-}
 {-# language GeneralizedNewtypeDeriving #-}
@@ -130,4 +131,5 @@ interpretProdigalT (Prodigal args@ProdigalArgs{..} k) = do
       ExitSuccess    -> k
       ExitFailure ec -> ProdigalT . MT.throwE $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
 
-deriveCarrier ''ProdigalT 'interpretProdigalT
+
+deriveCarrier 'interpretProdigalT

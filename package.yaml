@@ -29,7 +29,6 @@ dependencies:
 - containers
 - directory
 - exceptions
-- extensible-effects
 - filepath
 - foldl
 - fused-effects
