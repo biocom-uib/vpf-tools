@@ -9,7 +9,6 @@ import Control.Concurrent (getNumCapabilities)
 
 import Control.Effect (Carrier, Member)
 import Control.Effect.Errors (Error, ExceptsT, handleErrorCase, runLastExceptT, throwError)
-import Control.Effect.Reader (Reader)
 
 import Control.Monad (forM_)
 import qualified Control.Monad.Catch as MC
