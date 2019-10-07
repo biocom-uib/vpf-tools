@@ -1,20 +1,20 @@
 {-# language DeriveGeneric #-}
-{-# language GeneralizedNewtypeDeriving #-}
 {-# language RecordWildCards #-}
 {-# language StandaloneDeriving #-}
 {-# language StrictData #-}
 {-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
 module VPF.Ext.HMMER.Search
-  ( Cmd
-  , HMMSearch
+  ( HMMSearch
+  , hmmsearch
+  , HMMSearchError(..)
   , HMMSearchConfig
   , hmmsearchPath
   , hmmsearchDefaultArgs
   , newHMMSearchConfig
-  , HMMSearchError(..)
-  , hmmsearch
-  , runHMMSearch
+  , HMMSearchT
+  , runHMMSearchTWith
+  , runHMMSearchT
   , ProtSearchHitCols
   , ProtSearchHit
   ) where
@@ -38,18 +38,17 @@ import qualified Control.Monad.Trans.Reader  as MT
 import System.Exit (ExitCode(..))
 import qualified System.Process.Typed as Proc
 
-import VPF.Eff.Cmd
 import VPF.Formats
 import VPF.Ext.HMMER (HMMERConfig, resolveHMMERTool)
 import VPF.Ext.HMMER.Search.Cols (ProtSearchHitCols, ProtSearchHit)
 
 
 data HMMSearchArgs = HMMSearchArgs
-  { inputModelFile :: Path HMMERModel
-  , inputSeqsFile  :: Path (FASTA Aminoacid)
-  , outputFile     :: Path (HMMERTable ProtSearchHitCols)
-  }
-  deriving (Eq, Ord, Show, Generic)
+    { inputModelFile :: Path HMMERModel
+    , inputSeqsFile  :: Path (FASTA Aminoacid)
+    , outputFile     :: Path (HMMERTable ProtSearchHitCols)
+    }
+    deriving (Eq, Ord, Show, Generic)
 
 instance Store HMMSearchArgs
 
@@ -62,11 +61,12 @@ instance HFunctor HMMSearch
 instance Effect HMMSearch
 
 
-hmmsearch :: (Carrier sig m, Member HMMSearch sig)
-          => Path HMMERModel
-          -> Path (FASTA Aminoacid)
-          -> Path (HMMERTable ProtSearchHitCols)
-          -> m ()
+hmmsearch ::
+    (Carrier sig m, Member HMMSearch sig)
+    => Path HMMERModel
+    -> Path (FASTA Aminoacid)
+    -> Path (HMMERTable ProtSearchHitCols)
+    -> m ()
 hmmsearch inputModelFile inputSeqsFile outputFile =
     send (HMMSearch HMMSearchArgs {..} (pure ()))
 
@@ -83,34 +83,46 @@ instance Store HMMSearchConfig
 data HMMSearchError
     = HMMSearchError    { cmd :: HMMSearchArgs, exitCode :: Int, stderr :: Text }
     | HMMSearchNotFound { hmmerConfig :: HMMERConfig }
-  deriving (Eq, Ord, Show, Generic)
+    deriving (Eq, Ord, Show, Generic)
 
 instance Store HMMSearchError
 
 
 newtype HMMSearchT m a = HMMSearchT (MT.ExceptT HMMSearchError (MT.ReaderT HMMSearchConfig m) a)
-    deriving (Functor, Applicative, Monad)
 
 deriveMonadTrans ''HMMSearchT
 
 
-newHMMSearchConfig :: MT.MonadIO m => HMMERConfig -> [String] -> MT.ExceptT HMMSearchError m HMMSearchConfig
+newHMMSearchConfig ::
+    MT.MonadIO m
+    => HMMERConfig
+    -> [String]
+    -> MT.ExceptT HMMSearchError m HMMSearchConfig
 newHMMSearchConfig cfg defaultArgs = do
-  mpath' <- MT.liftIO $ resolveHMMERTool cfg "hmmsearch"
+    mpath' <- MT.liftIO $ resolveHMMERTool cfg "hmmsearch"
 
-  case mpath' of
-    Nothing    -> MT.throwE (HMMSearchNotFound cfg)
-    Just path' -> return (HMMSearchConfig path' defaultArgs)
-
-
-runHMMSearchWith :: MT.MonadIO m => HMMSearchConfig -> HMMSearchT m a -> MT.ExceptT HMMSearchError m a
-runHMMSearchWith cfg (HMMSearchT m) = MT.hoist (\rm -> MT.runReaderT rm cfg) m
+    case mpath' of
+      Nothing    -> MT.throwE (HMMSearchNotFound cfg)
+      Just path' -> return (HMMSearchConfig path' defaultArgs)
 
 
-runHMMSearch :: MT.MonadIO m => HMMERConfig -> [String] -> HMMSearchT m a -> m (Either HMMSearchError a)
-runHMMSearch cfg defaultArgs m = MT.runExceptT $ do
+runHMMSearchTWith ::
+    MT.MonadIO m
+    => HMMSearchConfig
+    -> HMMSearchT m a
+    -> MT.ExceptT HMMSearchError m a
+runHMMSearchTWith cfg (HMMSearchT m) = MT.hoist (\rm -> MT.runReaderT rm cfg) m
+
+
+runHMMSearchT ::
+    MT.MonadIO m
+    => HMMERConfig
+    -> [String]
+    -> HMMSearchT m a
+    -> m (Either HMMSearchError a)
+runHMMSearchT cfg defaultArgs m = MT.runExceptT $ do
     cfg <- newHMMSearchConfig cfg defaultArgs
-    runHMMSearchWith cfg m
+    runHMMSearchTWith cfg m
 
 
 interpretHMMSearchT :: MT.MonadIO m => HMMSearch (HMMSearchT m) a -> HMMSearchT m a

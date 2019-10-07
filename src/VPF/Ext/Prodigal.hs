@@ -1,21 +1,19 @@
-{-# OPTIONS_GHC -ddump-splices #-}
-{-# language DeriveFunctor #-}
 {-# language DeriveGeneric #-}
-{-# language GeneralizedNewtypeDeriving #-}
 {-# language RecordWildCards #-}
 {-# language StrictData #-}
 {-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
 module VPF.Ext.Prodigal
-  ( Cmd
-  , Prodigal
-  , ProdigalConfig
+  ( Prodigal
+  , prodigal
   , ProdigalError(..)
+  , ProdigalConfig
   , prodigalPath
   , prodigalDefaultArgs
-  , prodigal
   , newProdigalConfig
-  , runProdigal
+  , ProdigalT
+  , runProdigalTWith
+  , runProdigalT
   ) where
 
 import GHC.Generics (Generic, Generic1)
@@ -37,7 +35,6 @@ import qualified Control.Monad.Trans.Reader  as MT
 import System.Exit (ExitCode(..))
 import qualified System.Process.Typed as Proc
 
-import VPF.Eff.Cmd
 import VPF.Formats
 import VPF.Util.FS (resolveExecutable)
 
@@ -54,7 +51,7 @@ instance Store ProdigalArgs
 
 data Prodigal m k where
     Prodigal :: ProdigalArgs -> m k -> Prodigal m k
-    deriving (Functor, Generic1)
+    deriving (Generic1)
 
 instance HFunctor Prodigal
 instance Effect Prodigal
@@ -87,12 +84,15 @@ instance Store ProdigalError
 
 
 newtype ProdigalT m a = ProdigalT (MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m) a)
-    deriving (Functor, Applicative, Monad)
 
 deriveMonadTrans ''ProdigalT
 
 
-newProdigalConfig :: MT.MonadIO m => Path Executable -> [String] -> MT.ExceptT ProdigalError m ProdigalConfig
+newProdigalConfig ::
+    MT.MonadIO m
+    => Path Executable
+    -> [String]
+    -> MT.ExceptT ProdigalError m ProdigalConfig
 newProdigalConfig path defaultArgs = do
     mpath' <- MT.liftIO $ resolveExecutable (untag path)
 
@@ -101,14 +101,23 @@ newProdigalConfig path defaultArgs = do
       Just path' -> return $ ProdigalConfig (Tagged path') defaultArgs
 
 
-runProdigalWith :: Monad m => ProdigalConfig -> ProdigalT m a -> MT.ExceptT ProdigalError m a
-runProdigalWith cfg (ProdigalT m) = MT.hoist (\rm -> MT.runReaderT rm cfg) m
+runProdigalTWith ::
+    Monad m
+    => ProdigalConfig
+    -> ProdigalT m a
+    -> MT.ExceptT ProdigalError m a
+runProdigalTWith cfg (ProdigalT m) = MT.hoist (\rm -> MT.runReaderT rm cfg) m
 
 
-runProdigal :: MT.MonadIO m => Path Executable -> [String] -> ProdigalT m a -> m (Either ProdigalError a)
-runProdigal path defaultArgs m = MT.runExceptT $ do
+runProdigalT ::
+    MT.MonadIO m
+    => Path Executable
+    -> [String]
+    -> ProdigalT m a
+    -> m (Either ProdigalError a)
+runProdigalT path defaultArgs m = MT.runExceptT $ do
     cfg <- newProdigalConfig path defaultArgs
-    runProdigalWith cfg m
+    runProdigalTWith cfg m
 
 
 interpretProdigalT :: MT.MonadIO m => Prodigal (ProdigalT m) k -> ProdigalT m k
@@ -129,7 +138,8 @@ interpretProdigalT (Prodigal args@ProdigalArgs{..} k) = do
 
     case exitCode of
       ExitSuccess    -> k
-      ExitFailure ec -> ProdigalT . MT.throwE $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
+      ExitFailure ec ->
+          ProdigalT . MT.throwE $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
 
 
 deriveCarrier 'interpretProdigalT

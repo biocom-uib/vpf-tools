@@ -47,6 +47,7 @@ dependencies:
 - pipes-safe
 - primitive
 - profunctors
+- reflection
 - regex-base
 - regex-pcre-builtin
 - semigroupoids
@@ -74,6 +75,7 @@ default-extensions:
 - BangPatterns
 - ConstraintKinds
 - DataKinds
+- DerivingStrategies
 - FlexibleContexts
 - FlexibleInstances
 - FunctionalDependencies

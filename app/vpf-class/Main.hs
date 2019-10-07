@@ -1,23 +1,29 @@
 {-# language BlockArguments #-}
 {-# language CPP #-}
+{-# language GeneralizedNewtypeDeriving #-}
 {-# language MonoLocalBinds #-}
 {-# language OverloadedStrings #-}
 module Main where
 
 import Control.Concurrent (getNumCapabilities)
-import Control.Eff (Eff, Member, Lift, Lifted, lift, runLift)
-import Control.Eff.Reader.Strict (Reader, runReader)
-import Control.Eff.Exception (Exc, runError, Fail, die, runFail)
+
+import Control.Effect (Carrier, Member)
+import Control.Effect.Errors (Error, ExceptsT, handleErrorCase, runLastExceptT, throwError)
+import Control.Effect.Reader (Reader)
+
 import Control.Monad (forM_)
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO(liftIO))
-import Control.Monad.Trans.Control (MonadBaseControl, RunInBase, liftBaseWith)
+import Control.Monad.Trans.Control (MonadBaseControl(liftBaseWith), RunInBase)
+import Control.Monad.Trans.Identity (IdentityT, runIdentityT)
+import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Yaml.Aeson as Y
+import Data.Store (Store)
 import Data.Text (Text)
 import qualified Data.Text.Encoding         as T
 import qualified Text.Regex.Base            as PCRE
@@ -32,8 +38,6 @@ import qualified Pipes.Prelude as P
 
 import qualified VPF.Concurrency.Async as Conc
 
-import Control.Effect.MTL
-import VPF.Eff.Cmd (Cmd)
 import qualified VPF.Ext.HMMER        as HMM
 import qualified VPF.Ext.HMMER.Search as HMM
 import qualified VPF.Ext.Prodigal     as Pr
@@ -61,39 +65,41 @@ import qualified VPF.Concurrency.MPI as Conc
 
 type Config = Opts.Config
 
-type SearchHitsT m =
-    ExceptT FA.ParseError
-     (HMMSearchT
-      (ProdigalT
-       (ExceptT DSV.ParseError
-        (ExceptT VC.CheckpointLoadError
-         (MaybeT m)))))
+newtype DieMsg = DieMsg String
+    deriving Store
 
-
-type SearchHitsM = Eff
-   '[ Exc FA.ParseError
-    , Cmd HMM.HMMSearch
-    , Exc HMM.HMMSearchError
-    , Cmd Pr.Prodigal
-    , Exc Pr.ProdigalError
-    , Exc DSV.ParseError
-    , Exc VC.CheckpointLoadError
-    , Fail
-    , Lift IO
-    ]
-
-type ProcessHitsM = Eff
-   '[ Exc FA.ParseError
-    , Reader VC.ModelConfig
-    , Exc DSV.ParseError
-    , Exc VC.CheckpointLoadError
-    , Fail
-    , Lift IO
-    ]
+type Die = Error DieMsg
 
 
 putErrLn :: MonadIO m => String -> m ()
 putErrLn = liftIO . IO.hPutStrLn IO.stderr
+
+dieWith :: (Carrier sig m, Member Die sig) => String -> m a
+dieWith = throwError . DieMsg
+
+
+type family Trans ts m where
+    Trans '[]       m = m
+    Trans (t ': ts) m = t (Trans ts m)
+
+
+type SearchHitsStack =
+    '[ Pr.ProdigalT
+     , HMM.HMMSearchT
+     , ExceptsT '[FA.ParseError, DSV.ParseError, VC.CheckpointLoadError, DieMsg]
+     , IdentityT
+     ]
+
+type SearchHitsM = Trans SearchHitsStack IO
+
+
+type ProcessHitsStack =
+    '[ ReaderT VC.ModelConfig
+     , ExceptsT '[FA.ParseError, DSV.ParseError, VC.CheckpointLoadError, DieMsg]
+     , IdentityT
+     ]
+
+type ProcessHitsM = Trans ProcessHitsStack IO
 
 
 #ifndef VPF_ENABLE_MPI
@@ -165,7 +171,7 @@ main = MPI.mainMPI $ do
 
 
 masterClassify :: Config -> Ranks -> IO ExitCode
-masterClassify cfg slaves = runLift $ failingWithExitCode 3 $ do
+masterClassify cfg slaves = runIdentityT $ dyingWithExitCode 3 $ do
     dataFilesIndex <- loadDataFilesIndex cfg
 
     let genomesFile = Opts.genomesFile cfg
@@ -182,9 +188,9 @@ masterClassify cfg slaves = runLift $ failingWithExitCode 3 $ do
 
                   checkpoint <-
                       handleDSVParseErrors $
-                      withProdigalCfg cfg $
+                      handleFastaParseErrors $
                       withHMMSearchCfg cfg $
-                      handleFastaParseErrors $ do
+                      withProdigalCfg cfg $ do
                           concOpts <- newSearchHitsConcOpts cfg (Just slaves) workDir vpfsFile
                           run genomesFile concOpts
 
@@ -196,8 +202,8 @@ masterClassify cfg slaves = runLift $ failingWithExitCode 3 $ do
 
                   checkpoint <-
                       handleDSVParseErrors $
-                      runReader modelCfg $
                       handleFastaParseErrors $
+                      flip runReaderT modelCfg $
                           run =<< newProcessHitsConcOpts cfg workDir
 
                   resume checkpoint
@@ -220,7 +226,7 @@ masterClassify cfg slaves = runLift $ failingWithExitCode 3 $ do
 #ifdef VPF_ENABLE_MPI
 
 slaveClassify :: Config -> MPI.Rank -> IO ExitCode
-slaveClassify cfg _ = runLift $ failingWithExitCode 4 $ do
+slaveClassify cfg _ = runIdentityT $ dyingWithExitCode 4 $ do
     dataFilesIndex <- loadDataFilesIndex cfg
 
     let vpfsFile = Opts.vpfsFile dataFilesIndex
@@ -228,9 +234,9 @@ slaveClassify cfg _ = runLift $ failingWithExitCode 4 $ do
     withCfgWorkDir cfg $ \workDir ->
         handleCheckpointLoadError $
         handleDSVParseErrors $
-        withProdigalCfg cfg $
-        withHMMSearchCfg cfg $
         handleFastaParseErrors $
+        withHMMSearchCfg cfg $
+        withProdigalCfg cfg $
             worker workDir vpfsFile
   where
     worker :: Path Directory -> Path HMMERModel -> SearchHitsM ()
@@ -245,7 +251,7 @@ slaveClassify cfg _ = runLift $ failingWithExitCode 4 $ do
 #endif
 
 
-newModelCfg :: (Lifted IO r, Member Fail r) => Config -> Eff r VC.ModelConfig
+newModelCfg :: (MonadIO m, Carrier sig m, Member Die sig) => Config -> m VC.ModelConfig
 newModelCfg cfg = do
     virusNameExtractor <- compileRegex (Opts.virusNameRegex cfg)
 
@@ -258,15 +264,14 @@ newModelCfg cfg = do
         }
 
 
-compileRegex :: (Lifted IO r, Member Fail r) => Text -> Eff r (Text -> Maybe Text)
+compileRegex :: (MonadIO m, Carrier sig m, Member Die sig) => Text -> m (Text -> Maybe Text)
 compileRegex src = do
-    erx <- lift $ PCRE.compile (PCRE.compUTF8 + PCRE.compAnchored)
-                               (PCRE.execAnchored + PCRE.execNoUTF8Check)
-                               (T.encodeUtf8 src)
+    erx <- liftIO $ PCRE.compile (PCRE.compUTF8 + PCRE.compAnchored)
+                                 (PCRE.execAnchored + PCRE.execNoUTF8Check)
+                                 (T.encodeUtf8 src)
     case erx of
-      Left (_, err) -> do
-          putErrLn $ "Could not compile the regex " ++ show src ++ ": " ++ err
-          die
+      Left (_, err) ->
+          dieWith $ "Could not compile the regex " ++ show src ++ ": " ++ err
 
       Right rx -> return $ \text -> do
           let btext = T.encodeUtf8 text
@@ -276,11 +281,12 @@ compileRegex src = do
           return (T.decodeUtf8 (BS.drop off (BS.take len btext)))
 
 
-newSearchHitsConcOpts :: Config
-                      -> Maybe Ranks
-                      -> Path Directory
-                      -> Path HMMERModel
-                      -> SearchHitsM (VC.SearchHitsConcurrencyOpts SearchHitsM)
+newSearchHitsConcOpts ::
+    Config
+    -> Maybe Ranks
+    -> Path Directory
+    -> Path HMMERModel
+    -> SearchHitsM (VC.SearchHitsConcurrencyOpts SearchHitsM)
 newSearchHitsConcOpts cfg slaves workDir vpfsFile =
     liftBaseWith $ \runInIO -> return $
 #ifndef VPF_ENABLE_MPI
@@ -325,7 +331,10 @@ newSearchHitsConcOpts cfg slaves workDir vpfsFile =
               Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
 
 
-newProcessHitsConcOpts :: Config -> Path Directory -> ProcessHitsM (VC.ProcessHitsConcurrencyOpts ProcessHitsM)
+newProcessHitsConcOpts ::
+    Config
+    -> Path Directory
+    -> ProcessHitsM (VC.ProcessHitsConcurrencyOpts ProcessHitsM)
 newProcessHitsConcOpts _ workDir = do
     nworkers <- liftIO $ getNumCapabilities
 
@@ -340,10 +349,7 @@ newProcessHitsConcOpts _ workDir = do
         }
 
 
-withCfgWorkDir :: (MonadIO m, MonadBaseControl IO m)
-               => Config
-               -> (Path Directory -> m a)
-               -> m a
+withCfgWorkDir :: (MonadIO m, MonadBaseControl IO m) => Config -> (Path Directory -> m a) -> m a
 withCfgWorkDir cfg fm =
     case Opts.workDir cfg of
       Nothing ->
@@ -353,121 +359,90 @@ withCfgWorkDir cfg fm =
           fm wd
 
 
-failingWithExitCode :: Int -> Eff (Fail ': r) () -> Eff r ExitCode
-failingWithExitCode ec m = do
-    r <- runFail m
+dyingWithExitCode :: MonadIO m => Int -> ExceptsT '[DieMsg] m () -> m ExitCode
+dyingWithExitCode ec m = do
+    r <- runLastExceptT m
 
     case r of
-      Just () -> return ExitSuccess
-      Nothing -> return (ExitFailure ec)
+      Right ()        -> return ExitSuccess
+      Left (DieMsg e) -> do
+          putErrLn e
+          return (ExitFailure ec)
 
 
-loadDataFilesIndex :: (Lifted IO r, Member Fail r) => Config -> Eff r Opts.DataFilesIndex
+loadDataFilesIndex :: (MonadIO m, Carrier sig m, Member Die sig) => Config -> m Opts.DataFilesIndex
 loadDataFilesIndex cfg = do
     r <- liftIO $ Opts.loadDataFilesIndex (Opts.dataFilesIndexFile cfg)
 
     case r of
-      Right idx -> return idx
-      Left err -> do
-          putErrLn "error loading data file index:"
+      Right idx ->
+          return idx
+      Left err ->
           let indentedPretty = unlines . map ('\t':) . lines . Y.prettyPrintParseException
-          putErrLn (indentedPretty err)
-          die
+          in  dieWith $ "error loading data file index:\n" ++ indentedPretty err
 
 
-withProdigalCfg :: (Lifted IO r, Member Fail r)
-               => Config
-               -> Eff (Cmd Pr.Prodigal ': Exc Pr.ProdigalError ': r) a
-               -> Eff r a
+withProdigalCfg :: (MonadIO m, Carrier sig m, Member Die sig) => Config -> Pr.ProdigalT m a -> m a
 withProdigalCfg cfg m = do
-    handleProdigalErrors $ do
-        prodigalCfg <- Pr.prodigalConfig
-                           (Opts.prodigalPath cfg)
-                           ["-p", Opts.prodigalProcedure cfg]
+    res <- Pr.runProdigalT (Opts.prodigalPath cfg) ["-p", Opts.prodigalProcedure cfg] m
 
-        Pr.execProdigal prodigalCfg m
-  where
-    handleProdigalErrors :: (Lifted IO r, Member Fail r)
-                         => Eff (Exc Pr.ProdigalError ': r) a -> Eff r a
-    handleProdigalErrors m = do
-        res <- runError m
-
-        case res of
-          Right a -> return a
-          Left e -> do
-            putErrLn $ "prodigal error: " ++ show e
-            die
+    case res of
+      Right a -> return a
+      Left e  -> dieWith $ "prodigal error: " ++ show e
 
 
-withHMMSearchCfg :: (Lifted IO r, Member Fail r)
-                 => Config
-                 -> Eff (Cmd HMM.HMMSearch ': Exc HMM.HMMSearchError ': r) a
-                 -> Eff r a
+withHMMSearchCfg :: (MonadIO m, Carrier sig m, Member Die sig) => Config -> HMM.HMMSearchT m a -> m a
 withHMMSearchCfg cfg m = do
     let hmmerConfig = HMM.HMMERConfig (Opts.hmmerPrefix cfg)
 
-    handleHMMSearchErrors $ do
-        hmmsearchCfg <- HMM.hmmsearchConfig hmmerConfig []
-        HMM.execHMMSearch hmmsearchCfg m
-  where
-    handleHMMSearchErrors :: (Lifted IO r, Member Fail r)
-                          => Eff (Exc HMM.HMMSearchError ': r) a -> Eff r a
-    handleHMMSearchErrors m = do
-        res <- runError m
-
-        case res of
-          Right a -> return a
-          Left e -> do
-              putErrLn $ "hmmsearch error: " ++ show e
-              die
-
-
-handleCheckpointLoadError :: (Lifted IO r, Member Fail r)
-                          => Eff (Exc VC.CheckpointLoadError ': r) a
-                          -> Eff r a
-handleCheckpointLoadError m = do
-    res <- runError m
+    res <- HMM.runHMMSearchT hmmerConfig [] m
 
     case res of
       Right a -> return a
-
-      Left (VC.CheckpointJSONLoadError e) -> do
-          putErrLn $ "Error loading checkpoint: " ++ e
-          putErrLn "  try deleting the checkpoint file and restarting from scratch"
-          die
+      Left e  -> dieWith $ "hmmsearch error: " ++ show e
 
 
-handleFastaParseErrors :: (Lifted IO r, Member Fail r)
-                       => Eff (Exc FA.ParseError ': r) a
-                       -> Eff r a
-handleFastaParseErrors m = do
-    res <- runError m
-
-    case res of
-      Right a -> return a
-
-      Left (FA.ExpectedNameLine found) -> do
-          putErrLn $ "FASTA parsing error: expected name line but found " ++ show found
-          die
-
-      Left (FA.ExpectedSequenceLine []) -> do
-          putErrLn $ "FASTA parsing error: expected sequence but found EOF"
-          die
-
-      Left (FA.ExpectedSequenceLine (l:_)) -> do
-          putErrLn $ "FASTA parsing error: expected sequence but found " ++ show l
-          die
+handleCheckpointLoadError ::
+    ( Monad m
+    , Carrier sig (ExceptsT es m)
+    , Member Die sig
+    )
+    => ExceptsT (VC.CheckpointLoadError ': es) m a
+    -> ExceptsT es m a
+handleCheckpointLoadError = handleErrorCase $ \case
+    VC.CheckpointJSONLoadError e ->
+        dieWith $
+            "Error loading checkpoint: " ++ e ++ "\n" ++
+            "  try deleting the checkpoint file and restarting from scratch"
 
 
-handleDSVParseErrors :: (Lifted IO r, Member Fail r)
-                     => Eff (Exc DSV.ParseError ': r) a
-                     -> Eff r a
-handleDSVParseErrors m = do
-    res <- runError m
+handleFastaParseErrors ::
+    ( Monad m
+    , Carrier sig (ExceptsT es m)
+    , Member Die sig
+    )
+    => ExceptsT (FA.ParseError ': es) m a
+    -> ExceptsT es m a
+handleFastaParseErrors = handleErrorCase $ \case
+    FA.ExpectedNameLine found ->
+        dieWith $ "FASTA parsing error: expected name line but found " ++ show found
 
-    case res of
-      Right a -> return a
-      Left (DSV.ParseError ctx row) -> do
-          putErrLn $ "DSV parse error in " ++ show ctx ++ ": "
-                       ++ "could not parse row " ++ show row
-          die
+    FA.ExpectedSequenceLine [] ->
+        dieWith $ "FASTA parsing error: expected sequence but found EOF"
+
+    FA.ExpectedSequenceLine (l:_) ->
+        dieWith $ "FASTA parsing error: expected sequence but found " ++ show l
+
+
+handleDSVParseErrors ::
+    ( Monad m
+    , Carrier sig (ExceptsT es m)
+    , Member Die sig
+    )
+    => ExceptsT (DSV.ParseError ': es) m a
+    -> ExceptsT es m a
+handleDSVParseErrors = handleErrorCase $ \case
+    DSV.ParseError ctx row -> do
+        dieWith $
+            "DSV parse error in " ++ show ctx ++ ": " ++
+            "could not parse row " ++ show row

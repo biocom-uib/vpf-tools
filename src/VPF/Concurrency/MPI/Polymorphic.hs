@@ -1,5 +1,4 @@
 {-# language DeriveGeneric #-}
-{-# language GeneralizedNewtypeDeriving #-}
 {-# language RecordWildCards #-}
 {-# language StaticPointers #-}
 {-# language StrictData #-}
@@ -45,7 +44,6 @@ data MPIHandle = MPIHandle
 
 
 newtype MpiT m a = MpiT (MT.ReaderT MPIHandle m a)
-    deriving (Functor, Applicative, Monad)
 
 deriveMonadTrans ''MpiT
 
