@@ -141,7 +141,6 @@ produceEitherRows fp opts =
         in  ParseCtx (untag fp) sep colNames
 
 
-
 throwLeftsM :: (Exception e, MonadThrow m) => Pipe (Either e a) a m ()
 throwLeftsM = P.mapM (either throwM return)
 
@@ -170,7 +169,6 @@ readFrame ::
     -> m (FrameRec cols)
 readFrame fp opts =
     inCoreAoSExc (produceEitherRows fp opts >-> throwLeftsM)
-
 
 
 data WriterOptions = WriterOptions
