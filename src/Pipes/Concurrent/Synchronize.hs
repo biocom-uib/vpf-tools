@@ -38,8 +38,8 @@ bufferedChunks chunkSize =
 
 runAsyncSafeT ::
     MonadIO n
-    => PA.AsyncPipe a b mp mc rp rc (PS.SafeT IO) s
-    -> PA.AsyncPipe a b mp mc rp rc n             s
+    => PA.AsyncProxy p c (PS.SafeT IO) s
+    -> PA.AsyncProxy p c n             s
 runAsyncSafeT = hoist (liftIO . PS.runSafeT)
 
 
@@ -65,15 +65,6 @@ stealingAsyncProducer queueSize producer = do
     producer' <- stealingBufferedProducer queueSize producer
 
     return $ PA.duplicatingAsyncProducer producer'
-
-
-stealingAsyncProducer_ ::
-    (PA.MonadAsync m, PS.MonadSafe m, Monoid r)
-    => Natural
-    -> Producer a m r
-    -> IO (PA.AsyncProducer a m () m r)
-stealingAsyncProducer_ queueSize =
-    fmap (PA.cmapOutput (mempty <$)) . stealingAsyncProducer queueSize
 
 
 stealingBufferedProducer ::

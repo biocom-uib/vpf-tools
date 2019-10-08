@@ -130,6 +130,7 @@ instance Store (Closure m a) where
 
           2 -> Apply <$> peek <*> peek
           3 -> Bind  <$> peek <*> peek
+          _ -> fail $ "invalid closure tag: " ++ show tag
 
 
 data DynClosure m = forall a.
@@ -154,6 +155,7 @@ instance Store (DynClosure m) where
             | Just HRefl <- eqTypeRep (typeRepKind rep) (typeRep @Type) ->
                 DynClosure @m @a sTyRepClo <$> unsafePeekStaticPtr <*> peek
 
+            | otherwise -> fail $ "invalid typeRep: " ++ show rep
 
 
 buildSomeTypeRepClo :: forall a m. Serializer a -> Closure m SomeTypeRep

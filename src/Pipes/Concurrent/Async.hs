@@ -4,7 +4,7 @@
 module Pipes.Concurrent.Async
   ( replicate1
   , MonadAsync
-  , AsyncPipe(..)
+  , AsyncProxy(..)
   , AsyncProducer
   , AsyncProducer'
   , AsyncConsumer
@@ -47,7 +47,7 @@ import Control.Monad.Morph (MFunctor(..))
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Trans.Control (MonadBaseControl(..))
 
-import Pipes (Producer, Pipe, Consumer, (>->))
+import Pipes (Consumer, Effect, Producer, Pipe, (>->))
 import qualified Pipes            as P
 import qualified Pipes.Core       as P
 import qualified Pipes.Concurrent as PC
@@ -62,78 +62,88 @@ replicate1 0 _ = error "replicate1: 0"
 replicate1 n a = a NE.:| replicate (fromIntegral n - 1) a
 
 
-newtype AsyncPipe a b mp mc rp rc n s =
-    AsyncPipe { pipeThrough :: Producer a mp rp -> Consumer b mc rc -> n s }
+newtype AsyncProxy p c n s =
+    AsyncProxy { runAsyncProxy :: p -> c -> n s }
     deriving Functor
 
-type AsyncProducer a m r n s = AsyncPipe P.X a m m () r n s
+type AsyncProducer a m r n s = AsyncProxy (Effect m ()) (Consumer a m r) n s
 
 type AsyncProducer' a m r = AsyncProducer a m r m r
 
 
-type AsyncConsumer a m r n s = AsyncPipe a P.X m m r () n s
+type AsyncConsumer a m r n s = AsyncProxy (Producer a m r) (Effect m ()) n s
 
 type AsyncConsumer' a m r = AsyncConsumer a m r m r
 
 
-instance MonadAsync n => Apply (AsyncPipe a b mp mc rp rc n) where
-    AsyncPipe pfs <.> AsyncPipe ps = AsyncPipe $ \p c -> do
+instance MonadAsync n => Apply (AsyncProxy p c n) where
+    AsyncProxy pfs <.> AsyncProxy ps = AsyncProxy $ \p c -> do
         (!fs, !s) <- Async.concurrently (pfs p c) (ps p c)
         return $! fs s
 
-instance (mc ~ n, a ~ b, mp ~ mc, rp ~ rc, MonadAsync n) => Applicative (AsyncPipe a b mp mc rp rc n) where
-    pure a = AsyncPipe (\p c -> a <$ P.runEffect (p >-> c))
-    (<*>) = (<.>)
+-- instance (mc ~ n, a ~ b, mp ~ mc, rp ~ rc, MonadAsync n) => Applicative (AsyncProxy a b mp mc rp rc n) where
+--     pure a = AsyncPipe (\p c -> a <$ P.runEffect (p >-> c))
+--     (<*>) = (<.>)
 
-instance (MonadAsync n, Semigroup s) => Semigroup (AsyncPipe a b mp mc rp rc n s) where
+instance (MonadAsync n, Semigroup s) => Semigroup (AsyncProxy p c n s) where
     p1 <> p2 = liftF2 (<>) p1 p2
 
-instance (mc ~ n, a ~ b, mp ~ mc, rp ~ rc, MonadAsync n, Monoid s) => Monoid (AsyncPipe a b mp mc rp rc n s) where
-    mempty = pure mempty
+-- instance (mc ~ n, a ~ b, mp ~ mc, rp ~ rc, MonadAsync n, Monoid s) => Monoid (AsyncPipe a b mp mc rp rc n s) where
+--     mempty = pure mempty
 
-instance MFunctor (AsyncPipe a b mp mc rp rc) where
-    hoist g (AsyncPipe f) = AsyncPipe (\p c -> g (f p c))
+instance MFunctor (AsyncProxy p c) where
+    hoist g (AsyncProxy f) = AsyncProxy (\p c -> g (f p c))
 
 
 cmapOutput ::
-    (Consumer b' mc' rc' -> Consumer b mc rc)
-    -> AsyncPipe a b  mp mc  rp rc n s
-    -> AsyncPipe a b' mp mc' rp rc' n s
-cmapOutput g (AsyncPipe f) = AsyncPipe (\p c -> f p (g c))
+    (Consumer a' m' r' -> Consumer a m r)
+    -> AsyncProxy p (Consumer a  m  r)  n s
+    -> AsyncProxy p (Consumer a' m' r') n s
+cmapOutput g (AsyncProxy f) = AsyncProxy (\p c -> f p (g c))
 
 
-(>|->) :: Functor mc => AsyncPipe a b mp mc rp rc n s -> Pipe b c mc rc -> AsyncPipe a c mp mc rp rc n s
+(>|->) :: Functor m => AsyncProxy p (Consumer a m r) n s -> Pipe a b m r -> AsyncProxy p (Consumer b m r) n s
 ap >|-> pipe = cmapOutput (pipe >->) ap
 
-(<-|<) :: Functor mc => Pipe b c mc rc -> AsyncPipe a b mp mc rp rc n s -> AsyncPipe a c mp mc rp rc n s
+(<-|<) :: Functor m => Pipe a b m r -> AsyncProxy p (Consumer a m r) n s -> AsyncProxy p (Consumer b m r) n s
 (<-|<) = flip (>|->)
 
 
 cmapInput ::
-    (Producer a' mp' rp' -> Producer a mp rp)
-    -> AsyncPipe a  b mp  mc rp  rc n s
-    -> AsyncPipe a' b mp' mc rp' rc n s
-cmapInput g (AsyncPipe f) = AsyncPipe (\p c -> f (g p) c)
+    (p' -> p) -- (P.Proxy req a' m' r' -> Producer a mp rp)
+    -> AsyncProxy p  c n s
+    -> AsyncProxy p' c n s
+cmapInput g (AsyncProxy f) = AsyncProxy (\p c -> f (g p) c)
 
-(>-|>) :: Functor mp => Pipe a b mp rp -> AsyncPipe b c mp mc rp rc n s -> AsyncPipe a c mp mc rp rc n s
+(>-|>) :: Functor m
+       => Pipe a b m r
+       -> AsyncProxy (Producer b m r) c n s
+       -> AsyncProxy (Producer a m r) c n s
 pipe >-|> ac = cmapInput (>-> pipe) ac
 
-(<|-<) :: Functor mp => AsyncPipe b c mp mc rp rc n s -> Pipe a b mp rp -> AsyncPipe a c mp mc rp rc n s
+(<|-<) :: Functor m => AsyncProxy (Producer b m r) c n s -> Pipe a b m r -> AsyncProxy (Producer a m r) c n s
 (<|-<) = flip (>-|>)
 
 
-hoistPipe :: Monad m' => (forall x. m' x -> m x) -> AsyncPipe a b m m rp rc n s -> AsyncPipe a b m' m' rp rc n s
-hoistPipe g (AsyncPipe f) = AsyncPipe (\p c -> f (hoist g p) (hoist g c))
+infixr 6 >-|>, <-|<
+infixl 6 <|-<, >|->
 
 
-mapPipeM :: Monad n => (s -> n t) -> AsyncPipe a b mp mc rp rc n s -> AsyncPipe a b mp mc rp rc n t
-mapPipeM g (AsyncPipe f) = AsyncPipe (\p c -> g =<< f p c)
+hoistPipe ::
+    (MFunctor t, MFunctor t', Monad m')
+    => (forall x. m' x -> m x)
+    -> AsyncProxy (t m r) (t' m r') n s
+    -> AsyncProxy (t m' r) (t' m' r') n s
+hoistPipe g (AsyncProxy f) = AsyncProxy (\p c -> f (hoist g p) (hoist g c))
 
+
+mapPipeM :: Monad n => (s -> n t) -> AsyncProxy p c n s -> AsyncProxy p c n t
+mapPipeM g (AsyncProxy f) = AsyncProxy (\p c -> g =<< f p c)
 
 
 -- The producer is executed from start in every thread
 duplicatingAsyncProducer :: Monad m => Producer a m r -> AsyncProducer' a m r
-duplicatingAsyncProducer producer = AsyncPipe $ \p c ->
+duplicatingAsyncProducer producer = AsyncProxy $ \p c ->
     P.runEffect $ do { () <- P.lift (P.runEffect p); producer } >-> c
 
 
@@ -142,21 +152,19 @@ asyncProducer ::
     Monad m
     => (forall m' r'. Monad m' => Consumer a m' r' -> m' (s, r'))
     -> AsyncProducer a m r m (s, r)
-asyncProducer f = AsyncPipe $ \p c -> do
+asyncProducer f = AsyncProxy $ \p c -> do
     () <- P.runEffect p
     f c
-
 
 -- Ensure that the Producer is actually run
 asyncConsumer ::
     Monad m
     => (forall m' r'. Monad m' => Producer a m' r' -> m' (s, r'))
     -> AsyncConsumer a m r m (s, r)
-asyncConsumer f = AsyncPipe $ \p c -> do
+asyncConsumer f = AsyncProxy $ \p c -> do
     sr <- f p
-    () <- P.runEffect (return () >-> c)
+    () <- P.runEffect c
     return sr
-
 
 toListM :: Monad m => AsyncConsumer a m r m [a]
 toListM = fmap fst toListM'
@@ -167,41 +175,36 @@ toListM' = asyncConsumer P.toListM'
 
 
 asyncFold :: Monad m => L.Fold a b -> AsyncConsumer a m r m b
-asyncFold fold = AsyncPipe $ \p c -> do
+asyncFold fold = AsyncProxy $ \p c -> do
     b <- L.purely P.fold fold (void p)
-    () <- P.runEffect (return () >-> c)
+    () <- P.runEffect c
     return b
 
 
 asyncFoldM :: Monad m => L.FoldM m a b -> AsyncConsumer a m r m b
-asyncFoldM fold = AsyncPipe $ \p c -> do
+asyncFoldM fold = AsyncProxy $ \p c -> do
     b <- L.impurely P.foldM fold (void p)
-    () <- P.runEffect (return () >-> c)
+    () <- P.runEffect c
     return b
 
 
 asyncFoldM' :: Monad m => L.FoldM m a b -> AsyncConsumer a m r m (b, r)
-asyncFoldM' fold = AsyncPipe $ \p c -> do
+asyncFoldM' fold = AsyncProxy $ \p c -> do
     b <- L.impurely P.foldM' fold p
-    () <- P.runEffect (return () >-> c)
+    () <- P.runEffect c
     return b
 
 
-
-infixr 7 >||>, >|->, >-|>
-infixl 7 <||<, <-|<, <|-<
-
-
 (>||>) ::
-    (?bufSize :: Natural, MonadIO m, MonadIO m', MonadAsync n)
-    => AsyncPipe a b mp m  rp () n r
-    -> AsyncPipe b c m' mc () rc n s
-    -> AsyncPipe a c mp mc rp rc n (r, s)
-ap1 >||> ap2 = AsyncPipe $ \p c -> do
+    (?bufSize :: Natural, MonadIO m1, MonadIO m2, MonadAsync n)
+    => AsyncProxy p                  (Consumer b m1 ()) n r
+    -> AsyncProxy (Producer b m2 ()) c                  n s
+    -> AsyncProxy p                  c                  n (r, s)
+ap1 >||> ap2 = AsyncProxy $ \p c -> do
     (str, sts) <- liftBaseWith $ \runInBase ->
         PC.withBuffer (PC.bounded (fromIntegral ?bufSize))
-            (\output -> runInBase $ pipeThrough ap1 p (PC.toOutput output))
-            (\input  -> runInBase $ pipeThrough ap2 (PC.fromInput input) c)
+            (\output -> runInBase $ runAsyncProxy ap1 p (PC.toOutput output))
+            (\input  -> runInBase $ runAsyncProxy ap2 (PC.fromInput input) c)
 
     r <- restoreM str
     s <- restoreM sts
@@ -209,61 +212,65 @@ ap1 >||> ap2 = AsyncPipe $ \p c -> do
 
 
 (<||<) ::
-    (?bufSize :: Natural, MonadIO m2, MonadIO m3, MonadAsync n)
-    => AsyncPipe b c m3 m4 () rc n s
-    -> AsyncPipe a b m1 m2 rp () n r
-    -> AsyncPipe a c m1 m4 rp rc n (r, s)
+    (?bufSize :: Natural, MonadIO m1, MonadIO m2, MonadAsync n)
+    => AsyncProxy (Producer b m1 ()) c                  n s
+    -> AsyncProxy p                  (Consumer b m2 ()) n r
+    -> AsyncProxy p                  c                  n (r, s)
 (<||<) = flip (>||>)
 
 
+infixr 5 <||<
+infixl 5 >||>
+
+
 runAsyncEffect_ ::
-    (Functor mp, Functor mc)
-    => AsyncPipe P.X P.X mp mc () r n a
+    (Functor m, Functor m')
+    => AsyncProxy (Effect m ()) (Consumer P.X m' r) n a
     -> n a
-runAsyncEffect_ e = pipeThrough e (pure ()) (P.map P.closed)
+runAsyncEffect_ e = runAsyncProxy e (return ()) (P.map P.closed)
 
 
 runAsyncEffect ::
-    (Functor mp, Functor mc)
+    (Functor m, Functor m')
     => Natural
-    -> ((?bufSize :: Natural) => AsyncPipe P.X P.X mp mc () r n a)
+    -> ((?bufSize :: Natural) => AsyncProxy (Effect m ()) (Effect m' ()) n a)
     -> n a
 runAsyncEffect bufSize e =
     let ?bufSize = bufSize
-    in  runAsyncEffect_ e
+    in  runAsyncProxy e (return ()) (return ())
 
 
 asyncMapOutputM ::
-    (Traversable1 t, MonadAsync n, Monad mc)
-    => t (b -> mc c)
-    -> AsyncPipe a b mp mc rp rc n s
-    -> AsyncPipe a c mp mc rp rc n (t s)
+    (Traversable1 t, MonadAsync n, Monad m)
+    => t (a -> m b)
+    -> AsyncProxy p (Consumer a m r) n s
+    -> AsyncProxy p (Consumer b m r) n (t s)
 asyncMapOutputM fs ap =
     traverse1 (\f -> ap >|-> P.mapM f) fs
 
 
 asyncMapInputM ::
-    (Traversable1 t, MonadAsync n, Monad mp)
-    => t (a -> mp b)
-    -> AsyncPipe b c mp mc rp rc n s
-    -> AsyncPipe a c mp mc rp rc n (t s)
+    (Traversable1 t, MonadAsync n, Monad m)
+    => t (b -> m a)
+    -> AsyncProxy (Producer a m r) c n s
+    -> AsyncProxy (Producer b m r) c n (t s)
 asyncMapInputM fs ap =
     traverse1 (\f -> P.mapM f >-|> ap) fs
 
 
 asyncFoldMapOutputM ::
-    (Foldable1 t, Monad mc, MonadAsync n, Semigroup s)
-    => t (b -> mc c)
-    -> AsyncPipe a b mp mc rp rc n s
-    -> AsyncPipe a c mp mc rp rc n s
+    (Foldable1 t, MonadAsync n, Monad m, Semigroup s)
+    => t (a -> m b)
+    -> AsyncProxy p (Consumer a m r) n s
+    -> AsyncProxy p (Consumer b m r) n s
 asyncFoldMapOutputM fs ap =
     foldMap1 (\f -> ap >|-> P.mapM f) fs
 
 
 asyncFoldMapInputM ::
-    (Foldable1 t, Monad mp, MonadAsync n, Semigroup s)
-    => t (a -> mp b)
-    -> AsyncPipe b c mp mc rp rc n s
-    -> AsyncPipe a c mp mc rp rc n s
+    (Foldable1 t, MonadAsync n, Monad m, Semigroup s)
+    => t (b -> m a)
+    -> AsyncProxy (Producer a m r) p n s
+    -> AsyncProxy (Producer b m r) p n s
 asyncFoldMapInputM fs ap =
     foldMap1 (\f -> P.mapM f >-|> ap) fs

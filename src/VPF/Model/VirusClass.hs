@@ -328,7 +328,8 @@ predictMembership classParams = F.groups %~ do
             F.innerJoin (Cls.modelClasses classParams)
 
       |. F.summarizing @"class_name" %~ do
-            let products = F.give $ F.val @"protein_hit_score" * F.val @"class_percent"/100 * F.val @"protein_hit_score"
+            let products = F.give $
+                  F.val @"protein_hit_score" * F.val @"class_percent"/100 * F.val @"protein_hit_score"
 
             F.singleField @"protein_hit_score" . sum . F.rowwise products
 
@@ -385,6 +386,7 @@ data SearchHitsConcurrencyOpts m = SearchHitsConcurrencyOpts
     , searchingWorkers :: NE.NonEmpty (SearchHitsPipeline m)
     }
 
+
 asyncSearchHits :: forall sig m.
     ( MonadBaseControl IO m
     , MonadIO m
@@ -407,7 +409,10 @@ asyncSearchHits genomes concOpts = do
             PA.mapPipeM (either throwError return) $
                 PA.runAsyncSafeT asyncChunkProducer
 
-    pipeAsyncWorkers asyncEffProducer (searchingWorkers concOpts) (concatList >-|> PA.toListM)
+    pipeAsyncWorkers
+        asyncEffProducer
+        (searchingWorkers concOpts)
+        (concatList >-|> PA.toListM)
   where
     concatList :: Monad m => Pipe [b] b m s
     concatList = P.concat
@@ -432,7 +437,9 @@ asyncProcessHits :: (MonadIO m, MonadBaseControl IO m)
 asyncProcessHits hitsFiles concOpts = do
     let nworkers = fromIntegral $ length (processingHitsWorkers concOpts)
 
-    asyncHitFileProducer <- liftIO $ PA.stealingAsyncProducer_ (nworkers+1) (P.each hitsFiles)
+    asyncHitFileProducer <- liftIO $
+        fmap (PA.cmapOutput (mempty <$)) $
+            PA.stealingAsyncProducer (nworkers+1) (P.each hitsFiles)
 
     pipeAsyncWorkers (PA.runAsyncSafeT asyncHitFileProducer)
                      (processingHitsWorkers concOpts)
@@ -479,7 +486,7 @@ asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
         >-|>
         P.mapM (\(classKey, prediction) -> writeOutput classKey prediction)
         >-|>
-        stimes (nworkers @Natural) PA.toListM
+        PA.toListM
 
     return paths
   where
