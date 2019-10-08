@@ -41,13 +41,13 @@ import qualified Pipes         as P
 import qualified Pipes.Prelude as P
 import Pipes.Safe (SafeT, runSafeT)
 
+import Pipes.Concurrent.Async ((>||>), (>|->), (>-|>))
+import qualified Pipes.Concurrent.Async       as PA
+import qualified Pipes.Concurrent.Synchronize as PA
+
 import System.Directory as D
 import System.FilePath ((</>), takeFileName)
 import System.IO as IO
-
-import VPF.Concurrency.Async ((>||>), (>|->), (>-|>))
-import qualified VPF.Concurrency.Async as Conc
-import qualified VPF.Concurrency.Pipes as Conc
 
 import VPF.Ext.Prodigal (Prodigal, prodigal)
 import VPF.Ext.HMMER.Search (HMMSearch, ProtSearchHitCols, hmmsearch)
@@ -359,17 +359,17 @@ predictMembership classParams = F.groups %~ do
 
 pipeAsyncWorkers :: forall n m a b c.
     (MonadIO n, MonadIO m, MonadBaseControl IO m)
-    => Conc.AsyncProducer a n () m ()
+    => PA.AsyncProducer a n () m ()
     -> NE.NonEmpty (Pipe a (StM m b) n ())
-    -> Conc.AsyncConsumer b m () m c
+    -> PA.AsyncConsumer b m () m c
     -> m c
 pipeAsyncWorkers asyncProducer workers asyncConsumer = do
     let nworkers = fromIntegral $ length workers
 
-    ((), rs) <- Conc.runAsyncEffect (nworkers+1) $
+    ((), rs) <- PA.runAsyncEffect (nworkers+1) $
         foldMap1 (asyncProducer >|->) workers
         >||>
-        Conc.restoreProducer >-|> asyncConsumer
+        PA.restoreProducer >-|> asyncConsumer
 
     return rs
 
@@ -397,17 +397,17 @@ asyncSearchHits :: forall sig m.
 asyncSearchHits genomes concOpts = do
     let nworkers = fromIntegral $ length (searchingWorkers concOpts)
 
-    asyncChunkProducer <- liftIO $ Conc.stealingAsyncProducerA (nworkers+1) $
-        Conc.bufferedChunks (fastaChunkSize concOpts) genomes
+    asyncChunkProducer <- liftIO $
+        fmap (PA.cmapOutput (Right () <$)) $
+            PA.stealingAsyncProducer (nworkers+1) $
+                PA.bufferedChunks (fastaChunkSize concOpts) genomes
 
-    let asyncEffProducer :: Conc.AsyncProducer [FA.FastaEntry Nucleotide] (SafeT IO) () m ()
+    let asyncEffProducer :: PA.AsyncProducer [FA.FastaEntry Nucleotide] (SafeT IO) () m ()
         asyncEffProducer =
-            Conc.mapProducerM (either throwError return) $
-                Conc.runAsyncSafeT asyncChunkProducer
+            PA.mapPipeM (either throwError return) $
+                PA.runAsyncSafeT asyncChunkProducer
 
-    pipeAsyncWorkers asyncEffProducer
-                     (searchingWorkers concOpts)
-                     (concatList >-|> Conc.toListM)
+    pipeAsyncWorkers asyncEffProducer (searchingWorkers concOpts) (concatList >-|> PA.toListM)
   where
     concatList :: Monad m => Pipe [b] b m s
     concatList = P.concat
@@ -432,11 +432,11 @@ asyncProcessHits :: (MonadIO m, MonadBaseControl IO m)
 asyncProcessHits hitsFiles concOpts = do
     let nworkers = fromIntegral $ length (processingHitsWorkers concOpts)
 
-    asyncHitFileProducer <- liftIO $ Conc.stealingAsyncProducer_ (nworkers+1) (P.each hitsFiles)
+    asyncHitFileProducer <- liftIO $ PA.stealingAsyncProducer_ (nworkers+1) (P.each hitsFiles)
 
-    pipeAsyncWorkers (Conc.runAsyncSafeT asyncHitFileProducer)
+    pipeAsyncWorkers (PA.runAsyncSafeT asyncHitFileProducer)
                      (processingHitsWorkers concOpts)
-                     Conc.toListM
+                     PA.toListM
 
 
 newtype PredictMembershipConcurrencyOpts m = PredictMembershipConcurrencyOpts
@@ -461,17 +461,17 @@ asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
 
     liftIO $ D.createDirectoryIfMissing True (untag outputDir)
 
-    ((), aggHitss) <- Conc.runAsyncEffect (nworkers+1) $
-        Conc.duplicatingAsyncProducer (P.each aggHitsFiles)
+    ((), aggHitss) <- PA.runAsyncEffect (nworkers+1) $
+        PA.duplicatingAsyncProducer (P.each aggHitsFiles)
         >||>
         P.mapM (\aggHitFile -> DSV.readFrame aggHitFile (DSV.defParserOptions '\t'))
         >-|>
         P.map (F.setIndex @"virus_name")
         >-|>
-        stimes (nworkers @Natural) Conc.toListM
+        stimes (nworkers @Natural) PA.toListM
 
-    ((), paths) <- Conc.runAsyncEffect (nworkers+1) $
-        Conc.duplicatingAsyncProducer (P.each (Map.toAscList classFiles))
+    ((), paths) <- PA.runAsyncEffect (nworkers+1) $
+        PA.duplicatingAsyncProducer (P.each (Map.toAscList classFiles))
         >||>
         P.mapM (L._2 %%~ Cls.loadClassificationParams)
         >-|>
@@ -479,7 +479,7 @@ asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
         >-|>
         P.mapM (\(classKey, prediction) -> writeOutput classKey prediction)
         >-|>
-        stimes (nworkers @Natural) Conc.toListM
+        stimes (nworkers @Natural) PA.toListM
 
     return paths
   where

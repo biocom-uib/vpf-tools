@@ -1,7 +1,6 @@
 {-# language DataKinds #-}
 module Main where
 
-import Data.Monoid (Alt(..))
 import Data.Text (Text)
 import Data.Semigroup.Foldable (foldMap1)
 import qualified Data.Text.IO as T
@@ -14,16 +13,15 @@ import qualified Control.Distributed.MPI.Store as MPI
 
 import qualified Data.List.NonEmpty as NE
 
-import qualified Pipes         as P
-import qualified Pipes.Safe    as PS
+import qualified Pipes      as P
+import qualified Pipes.Safe as PS
 
 import System.Exit (exitWith, ExitCode(..))
 
-import VPF.Concurrency.Async ((>||>), (>-|>))
-import qualified VPF.Concurrency.Async as Conc
-import qualified VPF.Concurrency.MPI   as Conc
-import qualified VPF.Concurrency.MPI.Polymorphic as Conc
-import qualified VPF.Concurrency.Pipes as Conc
+import Pipes.Concurrent.Async ((>||>), (>-|>))
+import qualified Pipes.Concurrent.Async       as PA
+import qualified Pipes.Concurrent.Synchronize as PA
+import qualified VPF.Concurrency.MPI          as Conc
 
 import VPF.Formats
 import qualified VPF.Util.Fasta as FA
@@ -64,22 +62,24 @@ rootMain slaves comm = do
         let workers :: NE.NonEmpty (Conc.Worker [FA.FastaEntry Nucleotide] [Text])
             workers = Conc.mpiWorkers slaves jobTags comm
 
-            asyncPrinter :: Conc.AsyncConsumer' [Text] (PS.SafeT IO) ()
-            asyncPrinter = Conc.asyncFoldM (L.handlesM folded $ L.mapM_ (liftIO . T.putStrLn))
+            asyncPrinter :: PA.AsyncConsumer' [Text] (PS.SafeT IO) ()
+            asyncPrinter = PA.asyncFoldM (L.handlesM folded $ L.mapM_ (liftIO . T.putStrLn))
 
-        fmap (getAlt . fst) $
-          Conc.runAsyncEffect (nslaves+1) $
-              Conc.duplicatingAsyncProducer (fmap Alt fastaProducer)
-              >||>
-              foldMap1 (\worker -> Conc.workerToPipe worker >-|> asyncPrinter)
-                       workers
+        (res, ()) <-
+            PA.runAsyncEffect (nslaves+1) $
+                PA.cmapOutput (Nothing <$) (PA.duplicatingAsyncProducer fastaProducer)
+                >||>
+                foldMap1 (\worker -> Conc.workerToPipe worker >-|> asyncPrinter)
+                         workers
+
+        return res
   where
     nslaves :: Num a => a
     nslaves = fromIntegral (length slaves)
 
     fastaProducer :: P.Producer [FA.FastaEntry Nucleotide] (PS.SafeT IO) (Maybe FA.ParseError)
     fastaProducer =
-        fmap (either Just (\() -> Nothing)) $ Conc.bufferedChunks 10 fastaEntries
+        fmap (either Just (\() -> Nothing)) $ PA.bufferedChunks 10 fastaEntries
 
     fastaEntries :: P.Producer (FA.FastaEntry Nucleotide) (PS.SafeT IO) (Either FA.ParseError ())
     fastaEntries = FA.fastaFileReader (Tagged "../vpf-data/All_Viral_Contigs_4filters_final.fasta")

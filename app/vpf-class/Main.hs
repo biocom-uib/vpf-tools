@@ -34,8 +34,7 @@ import System.Exit (exitWith, ExitCode(..))
 
 import qualified Pipes         as P
 import qualified Pipes.Prelude as P
-
-import qualified VPF.Concurrency.Async as Conc
+import qualified Pipes.Concurrent.Async as PA
 
 import qualified VPF.Ext.HMMER        as HMM
 import qualified VPF.Ext.HMMER.Search as HMM
@@ -327,7 +326,7 @@ newSearchHitsConcOpts cfg slaves workDir vpfsFile =
                   hitsFiles <- VC.searchGenomeHits workDir vpfsFile (P.each chunk)
                   return [hitsFiles]
             in
-              Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
+              PA.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
 
 
 newProcessHitsConcOpts ::
@@ -344,7 +343,7 @@ newProcessHitsConcOpts _ workDir = do
 
 
         return $ VC.ProcessHitsConcurrencyOpts {
-            VC.processingHitsWorkers = Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
+            VC.processingHitsWorkers = PA.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
         }
 
 
