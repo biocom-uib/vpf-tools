@@ -11,6 +11,7 @@ module Control.Effect.MTL
   ) where
 
 import Data.Coerce
+import Data.Kind (Constraint, Type)
 import Data.Reflection (give, Given(given))
 import Data.Tuple (swap)
 
@@ -21,6 +22,8 @@ import Control.Effect.Reader
 import Control.Effect.State
 
 import Data.Functor.Yoneda
+
+import qualified Control.Monad.IO.Class as MT
 
 import Control.Monad (join)
 import qualified Control.Monad.Trans.Control  as MTC
@@ -42,6 +45,37 @@ relayCarrierIso :: forall t' t sig alg' m a.
     -> sig (t m) a
     -> t m a
 relayCarrierIso tt' t't = t't . eff . R . hmap tt'
+
+
+type SigK = (Type -> Type) -> Type -> Type
+
+
+type family DesaturateSig k l (sig :: l) :: Maybe k where
+    DesaturateSig k k sig                   = 'Just sig
+    DesaturateSig k l ((sig1 :: l' -> l) _) = DesaturateSig k (l' -> l) sig1
+    DesaturateSig k l _                     = 'Nothing
+
+
+type family EQU (a :: k) (b :: k) :: Bool where
+    EQU a a      = 'True
+    EQU a b      = 'False
+
+
+type family If (c :: Bool) (a :: k) (b :: k) :: k where
+    If 'True  a _ = a
+    If 'False _ b = b
+
+
+type family Stuck :: k where
+
+
+type family FindMember' (sigF :: k) (sigs :: SigK) :: SigK where
+    FindMember' (sigF :: k) (sig :+: sigs) = If (EQU ('Just sigF) (DesaturateSig k SigK sig)) sig (FindMember' sigF sigs)
+    FindMember' (sigF :: k) sig            = If (EQU ('Just sigF) (DesaturateSig k SigK sig)) sig Stuck
+
+
+class (Member sig sigs, FindMember' sigF sigs ~ sig) => FindMember (sigF :: k) (sig :: SigK) (sigs :: SigK) | sigF sigs -> sig
+instance (Member sig sigs, FindMember' sigF sigs ~ sig) => FindMember (sigF :: k) (sig :: SigK) (sigs :: SigK)
 
 
 class SubEffects sub sup where injR :: sub m a -> sup m a
