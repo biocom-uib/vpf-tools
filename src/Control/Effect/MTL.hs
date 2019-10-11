@@ -1,6 +1,6 @@
-{-# language UndecidableInstances #-}
-{-# language QuantifiedConstraints #-}
 {-# language DerivingVia #-}
+{-# language QuantifiedConstraints #-}
+{-# language UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Control.Effect.MTL
   ( relayCarrierIso
@@ -11,19 +11,22 @@ module Control.Effect.MTL
   ) where
 
 import Data.Coerce
-import Data.Kind (Constraint, Type)
+import Data.Kind (Type)
 import Data.Reflection (give, Given(given))
 import Data.Tuple (swap)
 
-import Control.Effect.Carrier
+import Control.Carrier
+import Control.Carrier.Error.Either (ErrorC(..))
+import Control.Carrier.Reader (ReaderC(..))
+import Control.Carrier.State.Strict (StateC(..))
+
 import Control.Effect.Error
 import Control.Effect.Lift
 import Control.Effect.Reader
 import Control.Effect.State
+import Control.Effect.Sum
 
 import Data.Functor.Yoneda
-
-import qualified Control.Monad.IO.Class as MT
 
 import Control.Monad (join)
 import qualified Control.Monad.Trans.Control  as MTC
@@ -36,9 +39,9 @@ import qualified Control.Monad.Trans.State    as MT
 -- relay the effect to an equivalent carrier
 
 relayCarrierIso :: forall t' t sig alg' m a.
-    ( Effect sig
-    , Carrier (alg' :+: sig)  (t' m)
+    ( Carrier (alg' :+: sig)  (t' m)
     , Functor (t m)
+    , HFunctor sig
     )
     => (forall x. t m x -> t' m x)
     -> (forall x. t' m x -> t m x)
@@ -93,9 +96,9 @@ instance {-# overlappable #-} SubEffects sub sup => SubEffects sub (sub' :+: sup
 relayCarrierUnwrap :: forall m' sig' m sig a.
     ( Coercible m m'
     , Coercible (m' a) (m a)
-    , Effect sig
     , Carrier sig' m'
     , SubEffects sig sig'
+    , HFunctor sig
     , Functor m
     )
     => (forall x. m' x -> m x)
@@ -119,7 +122,7 @@ instance Given (StFunctor t) => Functor (StT t) where
 relayCarrierControl :: forall sig t m a.
     ( MTC.MonadTransControl t
     , Carrier sig m
-    , Effect sig
+    , forall f. Functor f => Effect f sig
     , Monad m
     , Monad (t m)
     )
@@ -160,7 +163,7 @@ newtype YoStT t a = YoStT { unYoStT :: Yoneda (StT t) a }
 relayCarrierControlYo :: forall sig t m a.
     ( MTC.MonadTransControl t
     , Carrier sig m
-    , Effect sig
+    , Effect (YoStT t) sig
     , Monad m
     , Monad (t m)
     )
@@ -197,23 +200,23 @@ relayCarrierControlYo fmap' sig = do
     lowerYo' = unStT . lowerYoneda . unYoStT
 
 
-instance (Monad m, Carrier sig m, Effect sig) => Carrier (Error e :+: sig) (MT.ExceptT e m) where
+instance (Monad m, Carrier sig m, Effect (Either e) sig) => Carrier (Error e :+: sig) (MT.ExceptT e m) where
     eff (L (Throw e))     = MT.throwE e
     eff (L (Catch m h k)) = MT.catchE m h >>= k
-    eff (R other)         = relayCarrierIso (ErrorC . MT.runExceptT) (MT.ExceptT . runErrorC) other
+    eff (R other)         = relayCarrierUnwrap runErrorC other
 
 
 instance Monad m => Carrier (Lift m) (MT.IdentityT m) where
     eff (Lift m) = MT.IdentityT (m >>= MT.runIdentityT)
 
 
-instance (Monad m, Carrier sig m, Effect sig) => Carrier (Reader r :+: sig) (MT.ReaderT r m) where
+instance (Monad m, Carrier sig m) => Carrier (Reader r :+: sig) (MT.ReaderT r m) where
     eff (L (Ask k))       = MT.ask >>= k
     eff (L (Local g m k)) = MT.local g m >>= k
     eff (R other)         = relayCarrierIso (ReaderC . MT.runReaderT) (MT.ReaderT . runReaderC) other
 
 
-instance (Monad m, Carrier sig m, Effect sig) => Carrier (State s :+: sig) (MT.StateT s m) where
+instance (Monad m, Carrier sig m, Effect ((,) s) sig) => Carrier (State s :+: sig) (MT.StateT s m) where
     eff (L (Get k))   = MT.get >>= k
     eff (L (Put s k)) = MT.put s >> k
     eff (R other)     = relayCarrierIso (StateC . (fmap swap .) . MT.runStateT) (MT.StateT . (fmap swap .) . runStateC) other

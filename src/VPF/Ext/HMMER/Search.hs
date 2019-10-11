@@ -26,8 +26,7 @@ import Data.Store (Store)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
-import Control.Effect
-import Control.Effect.Carrier
+import Control.Carrier
 import Control.Effect.MTL.TH
 
 import qualified Control.Monad.IO.Class      as MT

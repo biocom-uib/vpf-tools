@@ -1,3 +1,4 @@
+{-# options_ghc -ddump-splices #-}
 {-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
 {-# language StrictData #-}
@@ -23,8 +24,8 @@ import Data.Store (Store)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
-import Control.Effect
-import Control.Effect.Carrier
+import Control.Carrier
+import Control.Effect.MTL
 import Control.Effect.MTL.TH
 
 import qualified Control.Monad.IO.Class      as MT
@@ -54,10 +55,10 @@ data Prodigal m k where
     deriving (Generic1)
 
 instance HFunctor Prodigal
-instance Effect Prodigal
+instance Functor f => Effect f Prodigal
 
 
-prodigal :: (Carrier sig m, Member Prodigal sig)
+prodigal :: Has Prodigal sig m
          => Path (FASTA Nucleotide)
          -> Path (FASTA Aminoacid)
          -> Maybe (Path GenBank)
@@ -142,4 +143,17 @@ interpretProdigalT (Prodigal args@ProdigalArgs{..} k) = do
           ProdigalT . MT.throwE $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
 
 
-deriveCarrier 'interpretProdigalT
+-- deriveCarrier 'interpretProdigalT
+
+instance
+    ( Carrier sig m
+    , Carrier innerSig (MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m))
+    , SubEffects sig innerSig
+    , HFunctor sig
+    , MT.MonadIO m
+    )
+    => Carrier (Prodigal :+: sig) (ProdigalT m) where
+
+    eff (L e)     = interpretProdigalT e
+    eff (R other) = relayCarrierUnwrap @(MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m)) @innerSig @(ProdigalT m) @sig ProdigalT other
+    {-# inline eff #-}

@@ -47,6 +47,8 @@ newtype MpiMasterT n m a = MpiMasterT { runMpiMasterT :: MT.ReaderT MPIHandle m 
 deriveMonadTrans ''MpiMasterT
 
 
+data Worker n = Worker MPI.Rank MPI.Tag
+
 data Request m a = Request (Dict (Serializable a)) (m a)
 
 type Response = Identity
@@ -56,27 +58,14 @@ getResponse = runIdentity
 
 
 interpretMpiMasterT ::
-    (MonadIO m, MonadIO n, Typeable n)
-    => Distributed n (MpiMasterT n m) a
-    -> MpiMasterT n m a
-interpretMpiMasterT (Distribute (clo :: Closure (m a)) k)
-  | sinst <- staticInstance @(Serializable a) = withInstance sinst $ do
-
-      let cloF = liftC2 (static Request) sinst clo
-
-          dynCloF = reflectInstance (weakenInstance @(Typeable a) (static Impl) sinst) $
-              makeDynClosure @a cloF
-
+    (MonadIO m, MonadBaseControl IO m, MonadIO n, Typeable n)
+    => Distributed n Worker (MpiMasterT n m) k
+    -> MpiMasterT n m k
+interpretMpiMasterT (WithWorkers (block :: forall (s :: *). Scoped s (Worker n) -> ScopeT s (MpiMasterT n m) a) k) = do
       h <- MpiMasterT MT.ask
 
-      let worker :: MPI.Rank -> MPI.Tag -> IO a
-          worker rank tag = do
-              maybeClo <- fmap fromDynClosure $
-                  PM.sendrecvYielding_ (PM.StreamItem dynCloF) rank tag rank tag (mpiComm h)
-
-              case maybeClo of
-                Just clo' -> getResponse $ evalClosure clo'
-                Nothing   -> error "bad response closure"
+      let worker :: MPI.Rank -> MPI.Tag -> MpiMasterT n m a
+          worker rank tag = runScopeT (block (scope (Worker rank tag)))
 
       let ranks = slaveRanks h
 
@@ -84,11 +73,24 @@ interpretMpiMasterT (Distribute (clo :: Closure (m a)) k)
           let postIncr tag = (succ tag, tag)
           in  liftIO $ mapM (\tagRef -> atomicModifyIORef' tagRef postIncr) (rankTags h)
 
-      results <- liftIO $ Async.mapConcurrently id (NE.zipWith worker ranks tags)
+      results <- Async.mapConcurrently id (NE.zipWith worker ranks tags)
       k results
-  where
-    sinst :: forall x. HasInstance (Serializable x) => Instance (Serializable x)
-    sinst = staticInstance @(Serializable x)
+
+interpretMpiMasterT (RunInWorker (Worker rank tag) (clo :: Closure (n a)) k)
+  | sinst <- staticInstance @(Serializable a) = withInstance sinst $ do
+      h <- MpiMasterT MT.ask
+
+      let cloF = liftC2 (static Request) sinst clo
+
+          dynCloF = reflectInstance (weakenInstance @(Typeable a) (static Impl) sinst) $
+              makeDynClosure @a cloF
+
+      maybeClo <- liftIO $ fmap fromDynClosure $
+          PM.sendrecvYielding_ (PM.StreamItem dynCloF) rank tag rank tag (mpiComm h)
+
+      case maybeClo of
+        Just clo' -> k $ getResponse $ evalClosure clo'
+        Nothing   -> error "bad response closure"
 
 
 deriveCarrier 'interpretMpiMasterT
@@ -97,7 +99,7 @@ deriveCarrier 'interpretMpiMasterT
 data DidInit = DidInit | DidNotInit
 
 
-runMpi :: forall m n b.
+runMpi :: forall m.
     ( MonadIO m
     , MC.MonadMask m
     )

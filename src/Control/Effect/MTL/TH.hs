@@ -13,8 +13,10 @@ import qualified Data.Map as Map
 import Data.Maybe (fromMaybe)
 import Data.Monoid (Ap(..))
 
-import Control.Effect.Carrier
+import Control.Carrier.Class
 import Control.Effect.MTL
+import Control.Effect.Sum
+import Control.Effect.Class
 
 import qualified Control.Monad.Catch         as MT
 import qualified Control.Monad.IO.Class      as MT
@@ -398,15 +400,15 @@ deriveCarrier interpName = do
 
     [d|
         instance
-            ( Effect $sigQ
-            , Carrier $sigQ $mQ
+            ( Carrier $sigQ $mQ
             , Carrier $innerSigQ $innerMQ
             , SubEffects $sigQ $innerSigQ
+            , HFunctor $sigQ
             , $cxtQ
             )
             => Carrier ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
 
             eff (L $effPQ) = $interpQ $effEQ
-            eff (R other)  = relayCarrierUnwrap $carrierConQ other
+            eff (R other)  = relayCarrierUnwrap @($innerMQ) @($innerSigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
             {-# inline eff #-}
       |]

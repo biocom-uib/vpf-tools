@@ -4,16 +4,12 @@
 module Control.Effect.Distributed where
 
 import Control.Distributed.StoreClosure
-import Control.Effect.Carrier
+import Control.Carrier
 import Control.Effect.MTL.TH
-import Control.Monad.Morph (hoist)
-import Control.Monad.Trans.Control (MonadBaseControl(..))
 
-import Data.Constraint
+import Data.Functor.Apply (Apply)
+import Data.Semigroup.Traversable (sequence1)
 import Data.List.NonEmpty (NonEmpty)
-
-import Type.Reflection (Typeable)
-
 
 
 newtype ScopeT s m a = ScopeT { unScopeT :: m a }
@@ -35,13 +31,26 @@ instance Carrier sig m => Carrier sig (ScopeT s m) where
 newtype Scoped s a = Scoped a
 
 
+scope :: a -> Scoped s a
+scope = Scoped
+
+
 getScoped :: Monad m => Scoped s a -> ScopeT s m a
 getScoped (Scoped a) = return a
 
 
+data ReplicateM m k = forall a. ReplicateM (m a) (NonEmpty a -> m k)
+
+instance HFunctor ReplicateM where
+    hmap f (ReplicateM m k) = ReplicateM (f m) (f . k)
+
+instance Apply f => Effect f ReplicateM where
+    handle state handler (ReplicateM m k) = ReplicateM (handler (m <$ state)) (handler . fmap k . sequence1)
+
+
 data Distributed n w m k
-    = forall a. Semigroup a => WithWorkers (forall (s :: *). Scoped s (w n) -> ScopeT s m a) (a -> m k)
-    | forall a. RunInWorker (w n) (Closure (n a)) (a -> m k)
+    = forall a. WithWorkers (forall (s :: *). Scoped s (w n) -> ScopeT s m a) (NonEmpty a -> m k)
+    | forall a. HasInstance (Serializable a) => RunInWorker (w n) (Closure (n a)) (a -> m k)
 
 
 instance Functor m => Functor (Distributed n w m) where
@@ -54,9 +63,9 @@ instance HFunctor (Distributed n w) where
     hmap f (RunInWorker w clo k) = RunInWorker w clo (f . k)
 
 
-instance Effect (Distributed n w) where
+instance Apply f => Effect f (Distributed n w) where
     handle state handler (WithWorkers block k) =
-        WithWorkers (ScopeT . handler . (<$ state) . unScopeT . block)  (handler . fmap k)
+        WithWorkers (ScopeT . handler . (<$ state) . unScopeT . block)  (handler . fmap k . sequence1)
 
     handle state handler (RunInWorker w clo k) =
         RunInWorker w clo (handler . (<$ state) . k)
@@ -64,18 +73,17 @@ instance Effect (Distributed n w) where
 
 withWorkers ::
     ( Carrier sig m
-    , Member (Distributed n w) sig
+    , Has (Distributed n w) sig m
     , HasInstance (Serializable a)
-    , Semigroup a
     )
     => (forall (s :: *). Scoped s (w n) -> ScopeT s m a)
-    -> m a
+    -> m (NonEmpty a)
 withWorkers block = send (WithWorkers block return)
 
 
 runInWorker ::
     ( Carrier sig m
-    , Member (Distributed n w) sig
+    , Has (Distributed n w) sig m
     , HasInstance (Serializable a)
     )
     => w n

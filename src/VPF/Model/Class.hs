@@ -12,7 +12,7 @@ module VPF.Model.Class
 
 import GHC.Generics (Generic)
 
-import Control.Effect (Carrier, Member)
+import Control.Carrier (Has)
 import Control.Effect.Error (Error)
 import Control.Monad.IO.Class (MonadIO)
 import qualified Control.Lens as L
@@ -43,8 +43,7 @@ classObjs = L.iso (F.groups %~ F.cat
 
 loadClassification ::
     ( MonadIO m
-    , Carrier sig m
-    , Member (Error DSV.ParseError) sig
+    , Has (Error DSV.ParseError) sig m
     )
     => Path (DSV "\t" ClassificationCols)
     -> m (GroupedFrameRec (Field ModelName) ModelClassCols)
@@ -55,8 +54,7 @@ loadClassification fp = F.setIndex @"model_name" <$> DSV.readFrame fp opts
 
 loadClassObjs ::
     ( MonadIO m
-    , Carrier sig m
-    , Member (Error DSV.ParseError) sig
+    , Has (Error DSV.ParseError) sig m
     )
     => Path (DSV "\t" ClassificationCols)
     -> m (GroupedFrameRec (Field ModelName) '[ClassObj])
@@ -65,8 +63,7 @@ loadClassObjs = fmap (L.view classObjs) . loadClassification
 
 loadScoreSamples ::
     ( MonadIO m
-    , Carrier sig m
-    , Member (Error DSV.ParseError) sig
+    , Has (Error DSV.ParseError) sig m
     )
     => Path (DSV "\t" '[M.VirusHitScore])
     -> m (Vector (Field M.VirusHitScore))
@@ -99,8 +96,7 @@ data ClassificationParams = ClassificationParams
 
 loadClassificationParams ::
     ( MonadIO m
-    , Carrier sig m
-    , Member (Error DSV.ParseError) sig
+    , Has (Error DSV.ParseError) sig m
     )
     => ClassificationFiles
     -> m ClassificationParams

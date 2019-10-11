@@ -21,7 +21,7 @@ import GHC.Generics (Generic)
 import Data.Kind (Type)
 import Data.Store (Store)
 
-import Control.Effect.Carrier
+import Control.Carrier
 import Control.Effect.Error
 import Control.Effect.MTL (relayCarrierUnwrap)
 import Control.Effect.MTL.TH (deriveMonadTrans)
@@ -115,14 +115,13 @@ interpretExceptsT (Catch mb emb bmk) =
           Nothing -> MT.throwE es
 
 
-instance (KnownList es, Effect sig, Effect sig', Carrier sig m, sig' ~ ExceptsSig es sig)
+instance (KnownList es, HFunctor sig', Effect (Either (Errors es)) sig, Carrier sig m, sig' ~ ExceptsSig es sig)
     => Carrier sig' (ExceptsT es m) where
 
     eff = go (singList @es)
       where
         go ::
             ( forall e. MemberError e es' => MemberError e es
-            , Effect sig
             , Carrier sig m
             )
             => SList es'

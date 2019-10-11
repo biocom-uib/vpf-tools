@@ -38,6 +38,9 @@ extra-deps:
 - Frames-0.6.1
 - discrimination-0.4
 - extensible-effects-5.0.0.1
+- name: fused-effects
+  github: bielr/fused-effects
+  commit: 65adf6f726e7ee132e4805fa79b7fb48d2506d78
 
 # - acme-missiles-0.3
 # - git: https://github.com/commercialhaskell/stack.git
