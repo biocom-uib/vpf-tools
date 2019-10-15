@@ -5,7 +5,7 @@
 {-# language StrictData #-}
 {-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
-module Control.Effect.Errors
+module Control.Carrier.Error.Excepts
   ( module Control.Effect.Error
   , Errors(..)
   , KnownList
@@ -22,9 +22,10 @@ import Data.Kind (Type)
 import Data.Store (Store)
 
 import Control.Carrier
+import Control.Carrier.MTL (relayCarrierUnwrap)
+import Control.Carrier.MTL.TH (deriveMonadTrans)
+
 import Control.Effect.Error
-import Control.Effect.MTL (relayCarrierUnwrap)
-import Control.Effect.MTL.TH (deriveMonadTrans)
 
 import Control.Monad.Trans.Except as MT
 
@@ -105,8 +106,8 @@ handleErrorCase h m = ExceptsT (MT.catchE (unExceptsT m) (\es -> handleE es h))
 
 
 interpretExceptsT :: (Monad m, MemberError e es) => Error e (ExceptsT es m) a -> ExceptsT es m a
-interpretExceptsT (Throw e)          = ExceptsT (MT.throwE (injE e))
-interpretExceptsT (Catch mb emb bmk) =
+interpretExceptsT (L (Throw e))          = ExceptsT (MT.throwE (injE e))
+interpretExceptsT (R (Catch mb emb bmk)) =
     ExceptsT $ MT.catchE (unExceptsT mb) (\es -> handleE es emb) >>= unExceptsT . bmk
   where
     handleE es h =
@@ -115,7 +116,7 @@ interpretExceptsT (Catch mb emb bmk) =
           Nothing -> MT.throwE es
 
 
-instance (KnownList es, HFunctor sig', Effect (Either (Errors es)) sig, Carrier sig m, sig' ~ ExceptsSig es sig)
+instance (KnownList es, HFunctor sig', Handles (Either (Errors es)) sig, Carrier sig m, sig' ~ ExceptsSig es sig)
     => Carrier sig' (ExceptsT es m) where
 
     eff = go (singList @es)

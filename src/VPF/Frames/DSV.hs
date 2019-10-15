@@ -27,8 +27,8 @@ module VPF.Frames.DSV
 import GHC.Generics (Generic)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 
-import Control.Carrier (Carrier, Has)
-import Control.Effect.Error (Error, throwError)
+import Control.Carrier (Has)
+import Control.Effect.Throw (Throw, throwError)
 import Control.Monad (when, (>=>))
 import Control.Exception (try)
 import Control.Monad.Catch (Exception, MonadThrow(throwM))
@@ -148,7 +148,7 @@ throwLeftsM = P.mapM (either throwM return)
 inCoreAoSExc ::
     ( RecVec cols
     , MonadIO m
-    , Has (Error ParseError) sig m
+    , Has (Throw ParseError) sig m
     )
     => Producer (Record cols) (SafeT IO) ()
     -> m (FrameRec cols)
@@ -160,7 +160,7 @@ readFrame ::
     ( KnownSymbol sep, ColumnHeaders cols
     , CSV.ReadRec cols, RecVec cols
     , MonadIO m
-    , Has (Error ParseError) sig m
+    , Has (Throw ParseError) sig m
     )
     => Path (DSV sep cols)
     -> ParserOptions

@@ -1,143 +1,63 @@
-{-# language StaticPointers #-}
-{-# language TemplateHaskell #-}
-{-# language UndecidableInstances #-}
-module Control.Effect.Distributed where
+{-# language AllowAmbiguousTypes #-}
+module Control.Effect.Distributed
+  ( Distributed(..)
+  , getNumWorkers
+  , withWorkers
+  , runInWorker
+  ) where
 
-import Control.Distributed.StoreClosure
+import Control.Distributed.SClosure
+
 import Control.Carrier
-import Control.Effect.MTL.TH
+
+import Numeric.Natural (Natural)
 
 import Data.Functor.Apply (Apply)
 import Data.Semigroup.Traversable (sequence1)
 import Data.List.NonEmpty (NonEmpty)
 
 
-newtype ScopeT s m a = ScopeT { unScopeT :: m a }
-
-
-runScopeT :: (forall (s :: *). ScopeT s m a) -> m a
-runScopeT sm =
-    case sm @() of
-      ScopeT m -> m
-
-
-deriveMonadTrans ''ScopeT
-
-
-instance Carrier sig m => Carrier sig (ScopeT s m) where
-    eff = eff . handleCoercible
-
-
-newtype Scoped s a = Scoped a
-
-
-scope :: a -> Scoped s a
-scope = Scoped
-
-
-getScoped :: Monad m => Scoped s a -> ScopeT s m a
-getScoped (Scoped a) = return a
-
-
-data ReplicateM m k = forall a. ReplicateM (m a) (NonEmpty a -> m k)
-
-instance HFunctor ReplicateM where
-    hmap f (ReplicateM m k) = ReplicateM (f m) (f . k)
-
-instance Apply f => Effect f ReplicateM where
-    handle state handler (ReplicateM m k) = ReplicateM (handler (m <$ state)) (handler . fmap k . sequence1)
-
-
 data Distributed n w m k
-    = forall a. WithWorkers (forall (s :: *). Scoped s (w n) -> ScopeT s m a) (NonEmpty a -> m k)
-    | forall a. HasInstance (Serializable a) => RunInWorker (w n) (Closure (n a)) (a -> m k)
+    = GetNumWorkers (Natural -> m k)
+    | forall a. WithWorkers (w n -> m a) (NonEmpty a -> m k)
+    | forall a. RunInWorker (w n) (SDict (Serializable a)) (SClosure (n a)) (a -> m k)
 
 
 instance Functor m => Functor (Distributed n w m) where
-    fmap f (WithWorkers block k) = WithWorkers block (fmap f . k)
-    fmap f (RunInWorker w clo k) = RunInWorker w clo (fmap f . k)
+    fmap f (GetNumWorkers k)           = GetNumWorkers (fmap f . k)
+    fmap f (WithWorkers block k)       = WithWorkers block (fmap f . k)
+    fmap f (RunInWorker w sdict clo k) = RunInWorker w sdict clo (fmap f . k)
 
 
 instance HFunctor (Distributed n w) where
-    hmap f (WithWorkers block k) = WithWorkers (ScopeT . f . unScopeT . block) (f . k)
-    hmap f (RunInWorker w clo k) = RunInWorker w clo (f . k)
+    hmap f (GetNumWorkers k)           = GetNumWorkers (f . k)
+    hmap f (WithWorkers block k)       = WithWorkers (f . block) (f . k)
+    hmap f (RunInWorker w sdict clo k) = RunInWorker w sdict clo (f . k)
 
 
-instance Apply f => Effect f (Distributed n w) where
+instance Apply f => Handles f (Distributed n w) where
+    handle state handler (GetNumWorkers k) =
+        GetNumWorkers (handler . (<$ state) . k)
+
     handle state handler (WithWorkers block k) =
-        WithWorkers (ScopeT . handler . (<$ state) . unScopeT . block)  (handler . fmap k . sequence1)
+        WithWorkers (handler . (<$ state) . block)  (handler . fmap k . sequence1)
 
-    handle state handler (RunInWorker w clo k) =
-        RunInWorker w clo (handler . (<$ state) . k)
+    handle state handler (RunInWorker w sdict clo k) =
+        RunInWorker w sdict clo (handler . (<$ state) . k)
 
 
-withWorkers ::
-    ( Carrier sig m
-    , Has (Distributed n w) sig m
-    , HasInstance (Serializable a)
-    )
-    => (forall (s :: *). Scoped s (w n) -> ScopeT s m a)
-    -> m (NonEmpty a)
+getNumWorkers :: forall n w sig m. Has (Distributed n w) sig m => m Natural
+getNumWorkers = send (GetNumWorkers @n @w return)
+
+
+withWorkers :: Has (Distributed n w) sig m => (w n -> m a) -> m (NonEmpty a)
 withWorkers block = send (WithWorkers block return)
 
 
 runInWorker ::
-    ( Carrier sig m
-    , Has (Distributed n w) sig m
-    , HasInstance (Serializable a)
-    )
+    Has (Distributed n w) sig m
     => w n
-    -> Closure (n a)
+    -> SDict (Serializable a)
+    -> SClosure (n a)
     -> m a
-runInWorker w clo = send (RunInWorker w clo return)
-
-
--- distribute ::
---     ( Carrier sig m
---     , Member (Distributed n) sig
---     , HasInstance (Serializable a)
---     )
---     => Closure (n a)
---     -> m (NonEmpty a)
--- distribute clo = send (Distribute clo return)
---
---
--- distributeBase :: forall sig m base a.
---     ( Carrier sig m
---     , Member (Distributed m) sig
---     , MonadBaseControl base m
---     , Typeable a
---     , Typeable base
---     , Typeable m
---     , Typeable (StM m a)
---     , HasInstance (Serializable (StM m a))
---     , HasInstance (MonadBaseControl base m)
---     )
---     => Closure (m a)
---     -> m (NonEmpty a)
--- distributeBase clo = do
---     stas <- distribute baseClo
---     mapM restoreM stas
---   where
---     baseClo :: Closure (m (StM m a))
---     baseClo =
---         liftC2 (static (\Dict m -> liftBaseWith ($ m)))
---             (staticInstance @(MonadBaseControl base m))
---             clo
-
-
-newtype SingleProcessT n m a = SingleProcessT { runSingleProcessT :: m a }
-
-
-deriveMonadTrans ''SingleProcessT
-
-
-data LocalWorker n = LocalWorker
-
-
-interpretSingleProcessT :: (Monad m, n ~ m) => Distributed n LocalWorker (SingleProcessT n m) a -> SingleProcessT n m a
-interpretSingleProcessT (WithWorkers block k)           = k . pure =<< runScopeT (block (Scoped LocalWorker))
-interpretSingleProcessT (RunInWorker LocalWorker clo k) = k =<< SingleProcessT (evalClosure clo)
-
-
-deriveCarrier 'interpretSingleProcessT
+runInWorker w sdict clo = send (RunInWorker w sdict clo return)

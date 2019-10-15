@@ -1,3 +1,4 @@
+{-# language AllowAmbiguousTypes #-}
 {-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
 {-# language StandaloneDeriving #-}
@@ -27,7 +28,7 @@ import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
 import Control.Carrier
-import Control.Effect.MTL.TH
+import Control.Carrier.MTL.TH (deriveMonadTrans, deriveCarrier)
 
 import qualified Control.Monad.IO.Class      as MT
 import qualified Control.Monad.Morph         as MT
@@ -57,11 +58,11 @@ data HMMSearch m k where
     deriving (Generic1)
 
 instance HFunctor HMMSearch
-instance Effect HMMSearch
+instance Functor f => Handles f HMMSearch
 
 
 hmmsearch ::
-    (Carrier sig m, Member HMMSearch sig)
+    Has HMMSearch sig m
     => Path HMMERModel
     -> Path (FASTA Aminoacid)
     -> Path (HMMERTable ProtSearchHitCols)

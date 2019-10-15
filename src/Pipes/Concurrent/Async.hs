@@ -11,7 +11,8 @@ module Pipes.Concurrent.Async
   , AsyncConsumer'
   , cmapOutput
   , cmapInput
-  , hoistPipe
+  -- , hoistPipe
+  , hoist
   , mapPipeM
   , duplicatingAsyncProducer
   , asyncProducer
@@ -81,15 +82,15 @@ instance MonadAsync n => Apply (AsyncProxy p c n) where
         (!fs, !s) <- Async.concurrently (pfs p c) (ps p c)
         return $! fs s
 
--- instance (mc ~ n, a ~ b, mp ~ mc, rp ~ rc, MonadAsync n) => Applicative (AsyncProxy a b mp mc rp rc n) where
---     pure a = AsyncPipe (\p c -> a <$ P.runEffect (p >-> c))
---     (<*>) = (<.>)
+instance (p ~ Producer a n r, c ~ Consumer a n r, MonadAsync n) => Applicative (AsyncProxy p c n) where
+    pure a = AsyncProxy (\p c -> a <$ P.runEffect (p >-> c))
+    (<*>) = (<.>)
 
 instance (MonadAsync n, Semigroup s) => Semigroup (AsyncProxy p c n s) where
     p1 <> p2 = liftF2 (<>) p1 p2
 
--- instance (mc ~ n, a ~ b, mp ~ mc, rp ~ rc, MonadAsync n, Monoid s) => Monoid (AsyncPipe a b mp mc rp rc n s) where
---     mempty = pure mempty
+instance (p ~ Producer a n r, c ~ Consumer a n r, MonadAsync n, Monoid s) => Monoid (AsyncProxy p c n s) where
+    mempty = pure mempty
 
 instance MFunctor (AsyncProxy p c) where
     hoist g (AsyncProxy f) = AsyncProxy (\p c -> g (f p c))
@@ -127,14 +128,6 @@ pipe >-|> ac = cmapInput (>-> pipe) ac
 
 infixr 6 >-|>, <-|<
 infixl 6 <|-<, >|->
-
-
-hoistPipe ::
-    (MFunctor t, MFunctor t', Monad m')
-    => (forall x. m' x -> m x)
-    -> AsyncProxy (t m r) (t' m r') n s
-    -> AsyncProxy (t m' r) (t' m' r') n s
-hoistPipe g (AsyncProxy f) = AsyncProxy (\p c -> f (hoist g p) (hoist g c))
 
 
 mapPipeM :: Monad n => (s -> n t) -> AsyncProxy p c n s -> AsyncProxy p c n t

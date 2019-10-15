@@ -1,31 +1,35 @@
+{-# options_ghc -Wno-partial-type-signatures #-}
 {-# language ApplicativeDo #-}
 {-# language BlockArguments #-}
 {-# language DeriveGeneric #-}
 {-# language DerivingVia #-}
+{-# language PartialTypeSignatures #-}
 {-# language OverloadedLabels #-}
-{-# language OverloadedStrings #-}
+{-# language StaticPointers #-}
 {-# language StrictData #-}
 module VPF.Model.VirusClass where
 
 import GHC.Generics (Generic)
 
-import Control.Effect
-import Control.Effect.Reader (Reader, asks)
-import Control.Effect.Error (Error, throwError)
+import Control.Carrier (Has)
+import Control.Carrier.MTL (AnyMember)
+import Control.Distributed.SClosure
+import Control.Effect.Reader
+import Control.Effect.Distributed
+import Control.Effect.Throw
+import qualified Control.Foldl as Fold
 import qualified Control.Lens as L
 import Control.Monad.IO.Class (MonadIO(..))
-import Control.Monad.Trans.Control (MonadBaseControl, StM)
-import qualified Control.Foldl as Fold
+import Control.Monad.Trans.Control (MonadBaseControl)
+import Control.Monad.Trans.Reader (runReaderT)
 
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as BC
 import Data.List (isPrefixOf, isSuffixOf)
-import qualified Data.List.NonEmpty as NE
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Semigroup (stimes)
-import Data.Semigroup.Foldable (foldMap1)
 import Data.Store (Store)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -34,14 +38,12 @@ import qualified Data.Vector as Vec
 
 import qualified Data.Vinyl as V
 
-import Numeric.Natural (Natural)
-
-import Pipes (Pipe, Producer, (>->))
+import Pipes (Producer, (>->))
 import qualified Pipes         as P
 import qualified Pipes.Prelude as P
 import Pipes.Safe (SafeT, runSafeT)
 
-import Pipes.Concurrent.Async ((>||>), (>|->), (>-|>))
+import Pipes.Concurrent.Async ((>||>), (>-|>))
 import qualified Pipes.Concurrent.Async       as PA
 import qualified Pipes.Concurrent.Synchronize as PA
 
@@ -76,6 +78,9 @@ newtype GenomeChunkKey = GenomeChunkKey { getGenomeChunkHash :: String }
     deriving Aeson.ToJSON via String
 
 
+newtype WorkDir = WorkDir (Path Directory)
+    deriving Store via (Path Directory)
+
 
 type AggregatedHitsCols = '[M.VirusName, M.ModelName, M.ProteinHitScore]
 
@@ -88,31 +93,35 @@ data ModelConfig = ModelConfig
 type PredictedCols = '[M.VirusName, Cls.ClassName, M.MembershipRatio, M.VirusHitScore, M.ConfidenceScore]
 
 
-createGenomesSubdir :: Path Directory -> IO (Path Directory)
-createGenomesSubdir wd = do
+createGenomesSubdir :: (MonadIO m, Has (Reader WorkDir) sig m) => m (Path Directory)
+createGenomesSubdir = do
+    WorkDir wd <- ask
     let fp = untag wd </> "genomes"
-    D.createDirectoryIfMissing True fp
+    liftIO $ D.createDirectoryIfMissing True fp
     return (Tagged fp)
 
 
-createProteinsSubdir :: Path Directory -> IO (Path Directory)
-createProteinsSubdir wd = do
+createProteinsSubdir :: (MonadIO m, Has (Reader WorkDir) sig m) => m (Path Directory)
+createProteinsSubdir = do
+    WorkDir wd <- ask
     let fp = untag wd </> "proteins"
-    D.createDirectoryIfMissing True fp
+    liftIO $ D.createDirectoryIfMissing True fp
     return (Tagged fp)
 
 
-createHitsSubdir :: Path Directory -> IO (Path Directory)
-createHitsSubdir wd = do
+createHitsSubdir :: (MonadIO m, Has (Reader WorkDir) sig m) => m (Path Directory)
+createHitsSubdir = do
+    WorkDir wd <- ask
     let fp = untag wd </> "search"
-    D.createDirectoryIfMissing True fp
+    liftIO $ D.createDirectoryIfMissing True fp
     return (Tagged fp)
 
 
-createProcessedHitsSubdir :: Path Directory -> IO (Path Directory)
-createProcessedHitsSubdir wd = do
+createProcessedHitsSubdir :: (MonadIO m, Has (Reader WorkDir) sig m) => m (Path Directory)
+createProcessedHitsSubdir = do
+    WorkDir wd <- ask
     let fp = untag wd </> "processed"
-    D.createDirectoryIfMissing True fp
+    liftIO $ D.createDirectoryIfMissing True fp
     return (Tagged fp)
 
 
@@ -120,20 +129,6 @@ getGenomeChunkKey :: Path (FASTA Nucleotide) -> IO GenomeChunkKey
 getGenomeChunkKey f =
     fmap (GenomeChunkKey . BC.unpack . Hash.digestToHex)
          (Hash.hashFileSHA512t_256 (untag f))
-
-
-genomesFileFor :: Path Directory -> GenomeChunkKey -> Path (FASTA Nucleotide)
-genomesFileFor dir (GenomeChunkKey hash) =
-    Tagged (untag dir </> name)
-  where
-    name = "split-genomes-" ++ hash ++ ".fna"
-
-
-checkpointFileFor :: Path Directory -> GenomeChunkKey -> Path (JSON Checkpoint)
-checkpointFileFor dir (GenomeChunkKey hash) =
-    Tagged (untag dir </> name)
-  where
-    name = "checkpoint-" ++ hash ++ ".json"
 
 
 parseGenomesFileName :: Path (FASTA Nucleotide) -> Either (Path (FASTA Nucleotide)) GenomeChunkKey
@@ -151,6 +146,32 @@ parseGenomesFileName (Tagged fp) =
 
     prefix = "split-hits-"
     suffix = ".fna"
+
+
+writeGenomesFile ::
+    ( MonadIO m
+    , Has (Reader WorkDir) sig m
+    )
+    => Producer (FA.FastaEntry Nucleotide) (SafeT IO) ()
+    -> m (GenomeChunkKey, Path (FASTA Nucleotide))
+writeGenomesFile genomes = do
+    genomesDir <- createGenomesSubdir
+
+    tmpGenomesFile <- FS.emptyTmpFile genomesDir "split-genomes.fna"
+    liftIO $ runSafeT $ P.runEffect $ genomes >-> FA.fastaFileWriter tmpGenomesFile
+
+    key <- liftIO $ getGenomeChunkKey tmpGenomesFile
+    let genomesFile = genomesFileFor genomesDir key
+    liftIO $ D.renameFile (untag tmpGenomesFile) (untag genomesFile)
+
+    return (key, genomesFile)
+
+
+genomesFileFor :: Path Directory -> GenomeChunkKey -> Path (FASTA Nucleotide)
+genomesFileFor dir (GenomeChunkKey hash) =
+    Tagged (untag dir </> name)
+  where
+    name = "split-genomes-" ++ hash ++ ".fna"
 
 
 proteinFileFor :: Path Directory -> GenomeChunkKey -> Path (FASTA Aminoacid)
@@ -175,33 +196,24 @@ processedHitsFileFor dir (GenomeChunkKey hash) =
 
 
 searchGenomeHits ::
-                 ( MonadBaseControl IO m
-                 , MonadIO m
-                 , Member HMMSearch sig
-                 , Member Prodigal sig
-                 , Carrier sig m
-                 )
-                 => Path Directory
-                 -> Path HMMERModel
-                 -> Producer (FA.FastaEntry Nucleotide) (SafeT IO) ()
-                 -> m (GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))
-searchGenomeHits wd vpfsFile genomes = do
-    genomesDir <- liftIO $ createGenomesSubdir wd
-
-    tmpGenomesFile <- FS.emptyTmpFile genomesDir "split-genomes.fna"
-    liftIO $ runSafeT $ P.runEffect $ genomes >-> FA.fastaFileWriter tmpGenomesFile
-
-    key <- liftIO $ getGenomeChunkKey tmpGenomesFile
-    let genomesFile = genomesFileFor genomesDir key
-    liftIO $ D.renameFile (untag tmpGenomesFile) (untag genomesFile)
-
-    protsDir <- liftIO $ createProteinsSubdir wd
+    ( MonadBaseControl IO m
+    , MonadIO m
+    , Has HMMSearch sig m
+    , Has Prodigal sig m
+    , Has (Reader WorkDir) sig m
+    )
+    => GenomeChunkKey
+    -> Path (FASTA Nucleotide)
+    -> Path HMMERModel
+    -> m (Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))
+searchGenomeHits key genomesFile vpfsFile = do
+    protsDir <- createProteinsSubdir
     let protsFile = proteinFileFor protsDir key
 
     FS.whenNotExists protsFile $ FS.atomicCreateFile protsFile $ \tmpProtsFile ->
         prodigal genomesFile tmpProtsFile Nothing
 
-    hitsDir <- liftIO $ createHitsSubdir wd
+    hitsDir <- createHitsSubdir
     let hitsFile = hitsFileFor hitsDir key
 
     FS.whenNotExists hitsFile $ FS.atomicCreateFile hitsFile $ \tmpHitsFile -> do
@@ -212,7 +224,7 @@ searchGenomeHits wd vpfsFile genomes = do
         else
             hmmsearch vpfsFile protsFile tmpHitsFile
 
-    return (key, protsFile, hitsFile)
+    return (protsFile, hitsFile)
   where
     isEmptyFAA :: Path (FASTA Aminoacid) -> IO Bool
     isEmptyFAA fp = runSafeT $ do
@@ -229,15 +241,14 @@ searchGenomeHits wd vpfsFile genomes = do
 
 
 aggregateHits :: forall sig m.
-              ( Carrier sig m
-              , Member (Reader ModelConfig) sig
-              , Member (Error DSV.ParseError) sig
-              , Member (Error FA.ParseError) sig
-              , MonadIO m
-              )
-              => Path (FASTA Aminoacid)
-              -> Path (HMMERTable ProtSearchHitCols)
-              -> m (FrameRec AggregatedHitsCols)
+    ( Has (Reader ModelConfig) sig m
+    , Has (Throw DSV.ParseError) sig m
+    , Has (Throw FA.ParseError) sig m
+    , MonadIO m
+    )
+    => Path (FASTA Aminoacid)
+    -> Path (HMMERTable ProtSearchHitCols)
+    -> m (FrameRec AggregatedHitsCols)
 aggregateHits aminoacidsFile hitsFile = do
     proteinSizes <- loadProteinSizes
 
@@ -294,20 +305,19 @@ aggregateHits aminoacidsFile hitsFile = do
 
 processHits ::
     ( MonadIO m
-    , Carrier sig m
-    , Member (Reader ModelConfig) sig
-    , Member (Error DSV.ParseError) sig
-    , Member (Error FA.ParseError) sig
+    , Has (Reader ModelConfig) sig m
+    , Has (Reader WorkDir) sig m
+    , Has (Throw DSV.ParseError) sig m
+    , Has (Throw FA.ParseError) sig m
     )
-    => Path Directory
-    -> GenomeChunkKey
+    => GenomeChunkKey
     -> Path (FASTA Aminoacid)
     -> Path (HMMERTable ProtSearchHitCols)
     -> m (Path (DSV "\t" AggregatedHitsCols))
-processHits wd key protsFile hitsFile = do
+processHits key protsFile hitsFile = do
     aggregatedHits <- aggregateHits protsFile hitsFile
 
-    processedHitsDir <- liftIO $ createProcessedHitsSubdir wd
+    processedHitsDir <- createProcessedHitsSubdir
 
     let processedHitsFile = processedHitsFileFor processedHitsDir key
         writerOpts = DSV.defWriterOptions '\t'
@@ -318,10 +328,11 @@ processHits wd key protsFile hitsFile = do
     return processedHitsFile
 
 
-predictMembership :: Cls.ClassificationParams
-                  -> GroupedFrameRec (Field M.VirusName) '[M.ModelName, M.ProteinHitScore]
-                  -> GroupedFrameRec (Field M.VirusName)
-                                     '[Cls.ClassName, M.MembershipRatio, M.VirusHitScore, M.ConfidenceScore]
+predictMembership ::
+    Cls.ClassificationParams
+    -> GroupedFrameRec (Field M.VirusName) '[M.ModelName, M.ProteinHitScore]
+    -> GroupedFrameRec (Field M.VirusName)
+                       '[Cls.ClassName, M.MembershipRatio, M.VirusHitScore, M.ConfidenceScore]
 predictMembership classParams = F.groups %~ do
     F.cat
       |. L.iso (F.setIndex @"model_name") F.dropIndex %~
@@ -358,113 +369,154 @@ predictMembership classParams = F.groups %~ do
 
 -- asynchronous versions
 
-pipeAsyncWorkers :: forall n m a b c.
-    (MonadIO n, MonadIO m, MonadBaseControl IO m)
-    => PA.AsyncProducer a n () m ()
-    -> NE.NonEmpty (Pipe a (StM m b) n ())
-    -> PA.AsyncConsumer b m () m c
-    -> m c
-pipeAsyncWorkers asyncProducer workers asyncConsumer = do
-    let nworkers = fromIntegral $ length workers
-
-    ((), rs) <- PA.runAsyncEffect (nworkers+1) $
-        foldMap1 (asyncProducer >|->) workers
-        >||>
-        PA.restoreProducer >-|> asyncConsumer
-
-    return rs
-
-
-type SearchHitsPipeline m =
-    Pipe [FA.FastaEntry Nucleotide]
-         (StM m [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))])
-         (SafeT IO)
-         ()
-
-data SearchHitsConcurrencyOpts m = SearchHitsConcurrencyOpts
-    { fastaChunkSize   :: Int
-    , searchingWorkers :: NE.NonEmpty (SearchHitsPipeline m)
+data SearchHitsConcurrencyOpts = SearchHitsConcurrencyOpts
+    { fastaChunkSize      :: Int
+    , numSearchingWorkers :: Int
     }
+    deriving Generic
+
+instance Store SearchHitsConcurrencyOpts
 
 
 asyncSearchHits :: forall sig m.
     ( MonadBaseControl IO m
     , MonadIO m
-    , Carrier sig m
-    , Member (Error FA.ParseError) sig
+    , Has HMMSearch sig m
+    , Has Prodigal sig m
+    , Has (Reader WorkDir) sig m
     )
-    => Producer (FA.FastaEntry Nucleotide) (SafeT IO) (Either FA.ParseError ())
-    -> SearchHitsConcurrencyOpts m
+    => SearchHitsConcurrencyOpts
+    -> Path HMMERModel
+    -> [(GenomeChunkKey, Path (FASTA Nucleotide))]
     -> m [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
-asyncSearchHits genomes concOpts = do
-    let nworkers = fromIntegral $ length (searchingWorkers concOpts)
+asyncSearchHits concOpts vpfsFile genomesFiles = do
+    let nworkers = fromIntegral $ numSearchingWorkers concOpts
 
-    asyncChunkProducer <- liftIO $
-        fmap (PA.cmapOutput (Right () <$)) $
-            PA.stealingAsyncProducer (nworkers+1) $
-                PA.bufferedChunks (fastaChunkSize concOpts) genomes
+    ((), r) <- PA.runAsyncEffect (nworkers+1) $
+        PA.hoist liftIO (PA.duplicatingAsyncProducer (P.each genomesFiles))
+        >||>
+        P.mapM (\(key, genomesFile) -> do
+            (protsFile, hitsFile) <- searchGenomeHits key genomesFile vpfsFile
+            return (key, protsFile, hitsFile))
+        >-|>
+        stimes nworkers PA.toListM
 
-    let asyncEffProducer :: PA.AsyncProducer [FA.FastaEntry Nucleotide] (SafeT IO) () m ()
-        asyncEffProducer =
-            PA.mapPipeM (either throwError return) $
-                PA.runAsyncSafeT asyncChunkProducer
-
-    pipeAsyncWorkers
-        asyncEffProducer
-        (searchingWorkers concOpts)
-        (concatList >-|> PA.toListM)
-  where
-    concatList :: Monad m => Pipe [b] b m s
-    concatList = P.concat
+    return r
 
 
-type ProcessHitsPipeline m =
-    Pipe (GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))
-         (StM m (GenomeChunkKey, Path (DSV "\t" AggregatedHitsCols)))
-         (SafeT IO)
-         ()
+distribSearchHits :: forall sigm m sign n w.
+    ( MonadBaseControl IO m
+    , MonadIO m
+    , Has (Reader WorkDir) sigm m
+    , Has (Throw FA.ParseError) sigm m
+    , AnyMember Distributed (Distributed n w) sigm
+    , Typeable sign
+    , Typeable n
+    )
+    => SDict
+        ( MonadBaseControl IO n
+        , MonadIO n
+        , Has HMMSearch sign n
+        , Has Prodigal sign n
+        , Has (Reader WorkDir) sign n
+        )
+    -> SearchHitsConcurrencyOpts
+    -> Path HMMERModel
+    -> Producer (FA.FastaEntry Nucleotide) (SafeT IO) (Either FA.ParseError ())
+    -> m [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
+distribSearchHits sdict concOpts vpfsFile genomes = do
+    nslaves <- getNumWorkers @n @w
+
+    wd <- ask @WorkDir
+
+    let genomesChunkWriter :: P.Pipe [FA.FastaEntry Nucleotide] (_, Path _) (SafeT IO) r
+        genomesChunkWriter = P.mapM $ \chunk ->
+            liftIO $ runReaderT (writeGenomesFile (P.each chunk)) wd
+
+    genomesFilesProducer :: PA.AsyncProducer [(_, _)] (SafeT IO) () m () <-
+        genomes
+        & PA.bufferedChunks (fromIntegral $ fastaChunkSize concOpts)
+        & (>-> genomesChunkWriter)
+        & PA.bufferedChunks nslaves
+        & PA.stealingAsyncProducer (nslaves+1)
+        & fmap (PA.cmapOutput (Right () <$))
+        & fmap (PA.hoist (liftIO . runSafeT))
+        & fmap (PA.mapPipeM (either throwError return))
+        & liftIO
+
+    let asyncSearchHits' =
+          static (\Dict -> asyncSearchHits @sign @n)
+            <:*> sdict
+            <:*> spureWith (static Dict) concOpts
+            <:*> spureWith (static Dict) vpfsFile
+
+    rs <- withWorkers $ \(w :: w n) -> do
+        ((), r) <- PA.runAsyncEffect (nslaves+1) $
+            genomesFilesProducer
+            >||>
+            P.mapM (runInWorker w (static Dict) . smap asyncSearchHits' . spureWith (static Dict))
+            >-|>
+            P.concat
+            >-|>
+            PA.toListM
+
+        return r
+
+    return (concat rs)
 
 
-newtype ProcessHitsConcurrencyOpts m = ProcessHitsConcurrencyOpts
-    { processingHitsWorkers :: NE.NonEmpty (ProcessHitsPipeline m)
+
+newtype ProcessHitsConcurrencyOpts = ProcessHitsConcurrencyOpts
+    { numProcessingHitsWorkers :: Int
     }
 
 
-asyncProcessHits :: (MonadIO m, MonadBaseControl IO m)
-                 => [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
-                 -> ProcessHitsConcurrencyOpts m
-                 -> m [(GenomeChunkKey, Path (DSV "\t" AggregatedHitsCols))]
-asyncProcessHits hitsFiles concOpts = do
-    let nworkers = fromIntegral $ length (processingHitsWorkers concOpts)
+asyncProcessHits :: forall sig m.
+    ( MonadIO m
+    , MonadBaseControl IO m
+    , Has (Reader ModelConfig) sig m
+    , Has (Reader WorkDir) sig m
+    , Has (Throw DSV.ParseError) sig m
+    , Has (Throw FA.ParseError) sig m
+    )
+    => ProcessHitsConcurrencyOpts
+    -> [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
+    -> m [(GenomeChunkKey, Path (DSV "\t" AggregatedHitsCols))]
+asyncProcessHits concOpts hitsFiles = do
+    let nworkers = fromIntegral $ numProcessingHitsWorkers concOpts
 
-    asyncHitFileProducer <- liftIO $
-        fmap (PA.cmapOutput (mempty <$)) $
-            PA.stealingAsyncProducer (nworkers+1) (P.each hitsFiles)
+        hitsFilesProducer :: PA.AsyncProducer (_, _ ,_) IO () m ()
+        hitsFilesProducer = P.each hitsFiles
+          & PA.duplicatingAsyncProducer
+          & PA.hoist liftIO
 
-    pipeAsyncWorkers (PA.runAsyncSafeT asyncHitFileProducer)
-                     (processingHitsWorkers concOpts)
-                     PA.toListM
+    ((), r) <- PA.runAsyncEffect (nworkers+1) $
+        hitsFilesProducer
+        >||>
+        P.mapM (\(key, protsFile, hitsFile) -> (,) key <$> processHits key protsFile hitsFile)
+        >-|>
+        stimes nworkers PA.toListM
+
+    return r
 
 
-newtype PredictMembershipConcurrencyOpts m = PredictMembershipConcurrencyOpts
-    { predictingNumWorkers :: Natural
+newtype PredictMembershipConcurrencyOpts = PredictMembershipConcurrencyOpts
+    { numPredictingWorkers :: Int
     }
 
 
 asyncPredictMemberships :: forall sig m.
     ( MonadBaseControl IO m
     , MonadIO m
-    , Carrier sig m
-    , Member (Error DSV.ParseError) sig
+    , Has (Throw DSV.ParseError) sig m
     )
-    => Map (Field Cls.ClassKey) Cls.ClassificationFiles
+    => PredictMembershipConcurrencyOpts
+    -> Map (Field Cls.ClassKey) Cls.ClassificationFiles
     -> [Path (DSV "\t" AggregatedHitsCols)]
     -> Path Directory
-    -> PredictMembershipConcurrencyOpts m
     -> m [Path (DSV "\t" PredictedCols)]
-asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
-    let nworkers :: Num a => a
-        nworkers = fromIntegral $ predictingNumWorkers concOpts
+asyncPredictMemberships concOpts classFiles aggHitsFiles outputDir = do
+    let nworkers = fromIntegral $ numPredictingWorkers concOpts
 
     liftIO $ D.createDirectoryIfMissing True (untag outputDir)
 
@@ -475,7 +527,7 @@ asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts = do
         >-|>
         P.map (F.setIndex @"virus_name")
         >-|>
-        stimes (nworkers @Natural) PA.toListM
+        stimes nworkers PA.toListM
 
     ((), paths) <- PA.runAsyncEffect (nworkers+1) $
         PA.duplicatingAsyncProducer (P.each (Map.toAscList classFiles))
@@ -536,46 +588,56 @@ newtype CheckpointLoadError = CheckpointJSONLoadError String
 
 data ClassificationStep
     = SearchHitsStep {
-        runSearchHitsStep :: forall sig m.
+        runSearchHitsStep :: forall sigm m sign n w.
             ( MonadBaseControl IO m
             , MonadIO m
-            , Carrier sig m
-            , Member (Error FA.ParseError) sig
+            , Has (Reader WorkDir) sigm m
+            , Has (Throw FA.ParseError) sigm m
+            , AnyMember Distributed (Distributed n w) sigm
+            , Typeable sign
+            , Typeable n
             )
-            => Path (FASTA Nucleotide)
-            -> SearchHitsConcurrencyOpts m
+            => SDict
+                ( MonadBaseControl IO n
+                , MonadIO n
+                , Has HMMSearch sign n
+                , Has Prodigal sign n
+                , Has (Reader WorkDir) sign n
+                )
+            -> SearchHitsConcurrencyOpts
+            -> Path HMMERModel
+            -> Path (FASTA Nucleotide)
             -> m Checkpoint
     }
     | ProcessHitsStep {
         runProcessHitsStep :: forall sig m.
             ( MonadBaseControl IO m
             , MonadIO m
-            , Carrier sig m
-            , Member (Reader ModelConfig) sig
-            , Member (Error DSV.ParseError) sig
-            , Member (Error FA.ParseError) sig
+            , Has (Reader ModelConfig) sig m
+            , Has (Reader WorkDir) sig m
+            , Has (Throw DSV.ParseError) sig m
+            , Has (Throw FA.ParseError) sig m
             )
-            => ProcessHitsConcurrencyOpts m
+            => ProcessHitsConcurrencyOpts
             -> m Checkpoint
     }
     | PredictMembershipStep {
         runPredictMembershipStep :: forall sig m.
             ( MonadBaseControl IO m
             , MonadIO m
-            , Carrier sig m
-            , Member (Error DSV.ParseError) sig
+            , Has (Reader WorkDir) sig m
+            , Has (Throw DSV.ParseError) sig m
             )
-            => Map (Field Cls.ClassKey) Cls.ClassificationFiles
+            => PredictMembershipConcurrencyOpts
+            -> Map (Field Cls.ClassKey) Cls.ClassificationFiles
             -> Path Directory
-            -> PredictMembershipConcurrencyOpts m
             -> m [Path (DSV "\t" PredictedCols)]
     }
 
 
 tryLoadCheckpoint ::
     ( MonadIO m
-    , Carrier sig m
-    , Member (Error CheckpointLoadError) sig
+    , Has (Throw CheckpointLoadError) sig m
     )
     => Path (JSON Checkpoint)
     -> m (Maybe Checkpoint)
@@ -598,49 +660,58 @@ saveCheckpoint checkpointFile checkpoint =
         Aeson.encodeFile (untag tmp) checkpoint
 
 
-checkpointStep :: Path Directory -> Checkpoint -> ClassificationStep
-checkpointStep wd checkpoint =
+checkpointStep :: Checkpoint -> ClassificationStep
+checkpointStep checkpoint =
     case checkpoint of
       ContinueSearchingHits ->
-          SearchHitsStep $ \genomesFile concOpts -> do
-              r <- asyncSearchHits (FA.fastaFileReader genomesFile) concOpts
+          SearchHitsStep $ \sdict concOpts vpfsFile genomesFile -> do
+              r <- distribSearchHits sdict concOpts vpfsFile (FA.fastaFileReader genomesFile)
               return $ ContinueFromHitsFiles (map (L.view L._1) r)
 
       ContinueFromHitsFiles keys ->
           ProcessHitsStep $ \concOpts -> do
-              protsSubdir <- liftIO $ createProteinsSubdir wd
-              hitsSubdir <- liftIO $ createHitsSubdir wd
+              protsSubdir <- createProteinsSubdir
+              hitsSubdir <- createHitsSubdir
 
               let hitsFiles =
                     [ (key, proteinFileFor protsSubdir key, hitsFileFor hitsSubdir key)
                       | key <- keys
                     ]
 
-              r <- asyncProcessHits hitsFiles concOpts
+              r <- asyncProcessHits concOpts hitsFiles
               return (ContinueFromProcessedHits (map fst r))
 
       ContinueFromProcessedHits keys ->
-          PredictMembershipStep $ \classFiles outputDir concOpts -> do
-              aggHitsSubdir <- liftIO $ createProcessedHitsSubdir wd
+          PredictMembershipStep $ \concOpts classFiles outputDir -> do
+              aggHitsSubdir <- createProcessedHitsSubdir
 
               let aggHitsFiles = map (processedHitsFileFor aggHitsSubdir) keys
 
-              asyncPredictMemberships classFiles aggHitsFiles outputDir concOpts
+              asyncPredictMemberships concOpts classFiles aggHitsFiles outputDir
 
 
 -- run the whole process
 
+
+checkpointFileFor :: WorkDir -> GenomeChunkKey -> Path (JSON Checkpoint)
+checkpointFileFor (WorkDir dir) (GenomeChunkKey hash) =
+    Tagged (untag dir </> name)
+  where
+    name = "checkpoint-" ++ hash ++ ".json"
+
+
 runClassification :: forall sig m a.
     ( MonadIO m
-    , Carrier sig m
-    , Member (Error CheckpointLoadError) sig
+    , Has (Reader WorkDir) sig m
+    , Has (Throw CheckpointLoadError) sig m
     )
-    => Path Directory
-    -> Path (FASTA Nucleotide)
+    => Path (FASTA Nucleotide)
     -> ((Checkpoint -> m a) -> ClassificationStep -> m a)
     -> m a
-runClassification wd fullGenomesFile runSteps = do
+runClassification fullGenomesFile runSteps = do
     key <- liftIO $ getGenomeChunkKey fullGenomesFile
+
+    wd <- ask
 
     let checkpointFile = checkpointFileFor wd key
 
@@ -648,9 +719,9 @@ runClassification wd fullGenomesFile runSteps = do
 
     let checkpoint = fromMaybe ContinueSearchingHits maybeCheckpoint
 
-    runSteps (resume checkpointFile) (checkpointStep wd checkpoint)
+    runSteps (resume checkpointFile) (checkpointStep checkpoint)
   where
     resume :: Path (JSON Checkpoint) -> Checkpoint -> m a
     resume checkpointFile checkpoint = do
         liftIO $ saveCheckpoint checkpointFile checkpoint
-        runSteps (resume checkpointFile) (checkpointStep wd checkpoint)
+        runSteps (resume checkpointFile) (checkpointStep checkpoint)

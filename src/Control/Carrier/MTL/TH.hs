@@ -1,5 +1,5 @@
 {-# language TemplateHaskell #-}
-module Control.Effect.MTL.TH
+module Control.Carrier.MTL.TH
   ( deriveMonadTrans
   , deriveMonadTransExcept
   , deriveCarrier
@@ -14,7 +14,7 @@ import Data.Maybe (fromMaybe)
 import Data.Monoid (Ap(..))
 
 import Control.Carrier.Class
-import Control.Effect.MTL
+import Control.Carrier.MTL
 import Control.Effect.Sum
 import Control.Effect.Class
 
@@ -105,8 +105,9 @@ getCarrierInfo mayTyArgs carrierName = do
                     tyVars        = fromMaybe conTyVarNames mayTyArgs
                     conName       = L.view name con
 
-                case doRenaming mayTyArgs satInnerCarrierType of
-                  AppT innerCarrierM (VarT a) ->
+                case doRenaming conTyVarNames satInnerCarrierType of
+                  AppT innerCarrierM (VarT a) -> do
+
                       return (tyVars, conName, innerCarrierM, a, derives)
 
                   t -> fail $ "error: the inner carrier type is not of the form M a: " ++ show t
@@ -375,8 +376,7 @@ deriveCarrier interpName = do
 
     carrierName <- tyConName (interpCarrierT interp)
 
-    carrier <- getCarrierInfo (Just (interpCarrierTyVars interp))
-                            carrierName
+    carrier <- getCarrierInfo (Just (interpCarrierTyVars interp)) carrierName
 
     sigName <- newName "sig"
     innerSigName <- newName "innerSig"

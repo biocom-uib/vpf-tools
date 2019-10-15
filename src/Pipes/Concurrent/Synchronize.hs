@@ -28,9 +28,9 @@ import qualified Pipes.Group      as PG
 import qualified Pipes.Safe       as PS
 
 
-bufferedChunks :: Monad m => Int -> Producer a m r -> Producer [a] m r
+bufferedChunks :: Monad m => Natural -> Producer a m r -> Producer [a] m r
 bufferedChunks chunkSize =
-    PG.chunksOf chunkSize . PG.individually %~ \chunk -> do
+    PG.chunksOf (fromIntegral chunkSize) . PG.individually %~ \chunk -> do
       (items, f) <- P.lift $ P.toListM' chunk
       P.yield items
       return f

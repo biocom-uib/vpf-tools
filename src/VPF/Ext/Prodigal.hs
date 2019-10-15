@@ -1,4 +1,4 @@
-{-# options_ghc -ddump-splices #-}
+{-# language AllowAmbiguousTypes #-}
 {-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
 {-# language StrictData #-}
@@ -25,8 +25,7 @@ import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
 import Control.Carrier
-import Control.Effect.MTL
-import Control.Effect.MTL.TH
+import Control.Carrier.MTL.TH (deriveMonadTrans, deriveCarrier)
 
 import qualified Control.Monad.IO.Class      as MT
 import qualified Control.Monad.Morph         as MT
@@ -55,7 +54,7 @@ data Prodigal m k where
     deriving (Generic1)
 
 instance HFunctor Prodigal
-instance Functor f => Effect f Prodigal
+instance Functor f => Handles f Prodigal
 
 
 prodigal :: Has Prodigal sig m
@@ -143,17 +142,17 @@ interpretProdigalT (Prodigal args@ProdigalArgs{..} k) = do
           ProdigalT . MT.throwE $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
 
 
--- deriveCarrier 'interpretProdigalT
+deriveCarrier 'interpretProdigalT
 
-instance
-    ( Carrier sig m
-    , Carrier innerSig (MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m))
-    , SubEffects sig innerSig
-    , HFunctor sig
-    , MT.MonadIO m
-    )
-    => Carrier (Prodigal :+: sig) (ProdigalT m) where
-
-    eff (L e)     = interpretProdigalT e
-    eff (R other) = relayCarrierUnwrap @(MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m)) @innerSig @(ProdigalT m) @sig ProdigalT other
-    {-# inline eff #-}
+-- instance
+--     ( Carrier sig m
+--     , Carrier innerSig (MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m))
+--     , SubEffects sig innerSig
+--     , HFunctor sig
+--     , MT.MonadIO m
+--     )
+--     => Carrier (Prodigal :+: sig) (ProdigalT m) where
+--
+--     eff (L e)     = interpretProdigalT e
+--     eff (R other) = relayCarrierUnwrap @(MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m)) @innerSig @(ProdigalT m) @sig ProdigalT other
+--     {-# inline eff #-}

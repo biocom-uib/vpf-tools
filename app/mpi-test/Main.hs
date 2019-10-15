@@ -27,17 +27,14 @@ import VPF.Formats
 import qualified VPF.Util.Fasta as FA
 
 
-data MyTag = MyTag
-  deriving (Eq, Ord, Show, Bounded, Enum)
+inputTag :: Conc.JobTagIn [FA.FastaEntry Nucleotide]
+inputTag = Conc.JobTagIn 0
 
-inputTag :: Conc.JobTagIn MyTag [FA.FastaEntry Nucleotide]
-inputTag = Conc.JobTagIn MyTag
+resultTag :: Conc.JobTagOut [Text]
+resultTag = Conc.JobTagOut 0
 
-resultTag :: Conc.JobTagOut MyTag [Text]
-resultTag = Conc.JobTagOut MyTag
-
-jobTags :: Conc.JobTags MyTag MyTag [FA.FastaEntry Nucleotide] [Text]
-jobTags = Conc.JobTags (Conc.JobTagIn MyTag) (Conc.JobTagOut MyTag)
+jobTags :: Conc.JobTags [FA.FastaEntry Nucleotide] [Text]
+jobTags = Conc.JobTags (Conc.JobTagIn 0) (Conc.JobTagOut 0)
 
 
 main :: IO ()
@@ -87,5 +84,5 @@ rootMain slaves comm = do
 
 workerMain :: MPI.Rank -> MPI.Rank -> MPI.Comm -> IO ()
 workerMain master _ comm = do
-    PS.runSafeT $ Conc.makeProcessWorker master jobTags comm $ \chunk -> do
+    PS.runSafeT $ Conc.makeProcessWorker master jobTags comm $ \_ chunk -> do
         return (map FA.entryName chunk)
