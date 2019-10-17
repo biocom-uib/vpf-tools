@@ -65,34 +65,34 @@ type RecK = (FieldK -> Type) -> FieldsK -> Type
 -- type-level polymorphic field indexers
 
 type family ProjField (ki :: Type) (kr :: Type) (rs :: FieldsK) (i :: ki) :: kr where
-  ProjField (Symbol, Type) (Symbol, Type)  rs  '(s, a)   = '(s, a)
-  ProjField Symbol         (Symbol, Type)  rs  s         = '(s, FieldType s rs)
-  ProjField (Symbol, Type) Symbol          rs  '(s, a)   = s
-  ProjField Symbol         Symbol          rs  s         = s
-  ProjField (Symbol, Type) [kr]            rs  '(s, a)   = ProjField [(Symbol, Type)] [kr] rs '[ '(s, a)]
-  ProjField Symbol         [kr]            rs  s         = ProjField [Symbol] [kr] rs '[s]
-  ProjField [k]            [k]             rs  r         = r
-  ProjField [ki]           [kr]            rs  '[]       = '[]
-  ProjField [ki]           [kr]            rs  (i ': is) = ProjField ki kr rs i ': ProjField [ki] [kr] rs is
+    ProjField (Symbol, Type) (Symbol, Type)  rs  '(s, a)   = '(s, a)
+    ProjField Symbol         (Symbol, Type)  rs  s         = '(s, FieldType s rs)
+    ProjField (Symbol, Type) Symbol          rs  '(s, a)   = s
+    ProjField Symbol         Symbol          rs  s         = s
+    ProjField (Symbol, Type) [kr]            rs  '(s, a)   = ProjField [(Symbol, Type)] [kr] rs '[ '(s, a)]
+    ProjField Symbol         [kr]            rs  s         = ProjField [Symbol] [kr] rs '[s]
+    ProjField [k]            [k]             rs  r         = r
+    ProjField [ki]           [kr]            rs  '[]       = '[]
+    ProjField [ki]           [kr]            rs  (i ': is) = ProjField ki kr rs i ': ProjField [ki] [kr] rs is
 
 type FieldSpec rs (i :: ki) (r :: kr) = ProjField ki kr rs i ~ r
 
 
 type family InferFieldKind (ki :: Type) = (kr :: Type) where
-  InferFieldKind [ki] = [InferFieldKind ki]
-  InferFieldKind ki   = FieldK
+    InferFieldKind [ki] = [InferFieldKind ki]
+    InferFieldKind ki   = FieldK
 
 type MonoFieldSpec rs (i :: ki) (r :: kr) = (InferFieldKind ki ~ kr, ProjField ki kr rs i ~ r)
 
 
 type family ProjName (ki :: Type) (kr :: Type) (i :: ki) :: kr where
-  ProjName Symbol          Symbol s         = s
-  ProjName (Symbol, Type)  Symbol '(s, a)   = s
-  ProjName (Symbol, Type) [kr]    i         = ProjName [(Symbol, Type)] [kr] '[i]
-  ProjName Symbol         [kr]    i         = ProjName [Symbol] [kr] '[i]
-  ProjName [k]            [k]     is        = is
-  ProjName [ki]           [kr]    '[]       = '[]
-  ProjName [ki]           [kr]    (i ': is) = ProjName ki kr i ': ProjName [ki] [kr] is
+    ProjName Symbol          Symbol s         = s
+    ProjName (Symbol, Type)  Symbol '(s, a)   = s
+    ProjName (Symbol, Type) [kr]    i         = ProjName [(Symbol, Type)] [kr] '[i]
+    ProjName Symbol         [kr]    i         = ProjName [Symbol] [kr] '[i]
+    ProjName [k]            [k]     is        = is
+    ProjName [ki]           [kr]    '[]       = '[]
+    ProjName [ki]           [kr]    (i ': is) = ProjName ki kr i ': ProjName [ki] [kr] is
 
 type NameSpec (i :: ki) (s :: kr) = ProjName ki kr i ~ s
 

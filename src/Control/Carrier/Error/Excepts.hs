@@ -2,7 +2,7 @@
 {-# language DeriveGeneric #-}
 {-# language EmptyCase #-}
 {-# language QuantifiedConstraints #-}
-{-# language StrictData #-}
+{-# language Strict #-}
 {-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
 module Control.Carrier.Error.Excepts

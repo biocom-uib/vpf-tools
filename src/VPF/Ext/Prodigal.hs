@@ -1,7 +1,7 @@
 {-# language AllowAmbiguousTypes #-}
 {-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
-{-# language StrictData #-}
+{-# language Strict #-}
 {-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
 module VPF.Ext.Prodigal
@@ -139,20 +139,7 @@ interpretProdigalT (Prodigal args@ProdigalArgs{..} k) = do
     case exitCode of
       ExitSuccess    -> k
       ExitFailure ec ->
-          ProdigalT . MT.throwE $! ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
+          ProdigalT $ MT.throwE $ ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
 
 
 deriveCarrier 'interpretProdigalT
-
--- instance
---     ( Carrier sig m
---     , Carrier innerSig (MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m))
---     , SubEffects sig innerSig
---     , HFunctor sig
---     , MT.MonadIO m
---     )
---     => Carrier (Prodigal :+: sig) (ProdigalT m) where
---
---     eff (L e)     = interpretProdigalT e
---     eff (R other) = relayCarrierUnwrap @(MT.ExceptT ProdigalError (MT.ReaderT ProdigalConfig m)) @innerSig @(ProdigalT m) @sig ProdigalT other
---     {-# inline eff #-}

@@ -1,26 +1,32 @@
 {-# language AllowAmbiguousTypes #-}
+{-# language Strict #-}
 module Control.Effect.Distributed
   ( Distributed(..)
   , getNumWorkers
+  , getNumWorkers_
   , withWorkers
+  , withWorkers_
   , runInWorker
+  , runInWorker_
   ) where
 
 import Control.Distributed.SClosure
 
 import Control.Carrier
+import Control.Effect.Sum.Extra
 
 import Numeric.Natural (Natural)
 
 import Data.Functor.Apply (Apply)
+import Data.Semigroup.Foldable (fold1)
 import Data.Semigroup.Traversable (sequence1)
 import Data.List.NonEmpty (NonEmpty)
 
 
 data Distributed n w m k
     = GetNumWorkers (Natural -> m k)
-    | forall a. WithWorkers (w n -> m a) (NonEmpty a -> m k)
-    | forall a. RunInWorker (w n) (SDict (Serializable a)) (SClosure (n a)) (a -> m k)
+    | forall a. WithWorkers (w -> m a) (NonEmpty a -> m k)
+    | forall a. RunInWorker w (SDict (Serializable a)) (SClosure (n a)) (a -> m k)
 
 
 instance Functor m => Functor (Distributed n w m) where
@@ -50,14 +56,36 @@ getNumWorkers :: forall n w sig m. Has (Distributed n w) sig m => m Natural
 getNumWorkers = send (GetNumWorkers @n @w return)
 
 
-withWorkers :: Has (Distributed n w) sig m => (w n -> m a) -> m (NonEmpty a)
-withWorkers block = send (WithWorkers block return)
+getNumWorkers_ :: forall n w sig m. HasAny Distributed (Distributed n w) sig m => m Natural
+getNumWorkers_ = send (GetNumWorkers @n @w return)
+
+
+withWorkers :: forall n w sig m a. (Has (Distributed n w) sig m, Semigroup a) => (w -> m a) -> m a
+withWorkers block = send (WithWorkers block (return . fold1) :: Distributed n w m a)
+
+
+withWorkers_ :: forall n w sig m a.
+    ( HasAny Distributed (Distributed n w) sig m
+    , Semigroup a
+    )
+    => (w -> m a)
+    -> m a
+withWorkers_ block = send (WithWorkers block (return . fold1) :: Distributed n w m a)
 
 
 runInWorker ::
     Has (Distributed n w) sig m
-    => w n
+    => w
     -> SDict (Serializable a)
     -> SClosure (n a)
     -> m a
 runInWorker w sdict clo = send (RunInWorker w sdict clo return)
+
+
+runInWorker_ ::
+    HasAny Distributed (Distributed n w) sig m
+    => w
+    -> SDict (Serializable a)
+    -> SClosure (n a)
+    -> m a
+runInWorker_ w sdict clo = send (RunInWorker w sdict clo return)

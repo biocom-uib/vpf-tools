@@ -1,6 +1,5 @@
 {-# language AllowAmbiguousTypes #-}
-{-# language QuantifiedConstraints #-}
-{-# language TypeInType #-}
+{-# language Strict #-}
 {-# language UndecidableInstances #-}
 module VPF.Frames.Dplyr.Group where
 

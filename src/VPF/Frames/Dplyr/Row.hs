@@ -1,7 +1,6 @@
 {-# language AllowAmbiguousTypes #-}
 {-# language ImplicitParams #-}
-{-# language InstanceSigs #-}
-{-# language UndecidableInstances #-}
+{-# language Strict #-}
 module VPF.Frames.Dplyr.Row
   (
   -- Generic operations on different record representations

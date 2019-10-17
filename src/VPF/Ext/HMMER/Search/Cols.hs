@@ -1,4 +1,5 @@
 {-# language OverloadedStrings #-}
+{-# language Strict #-}
 {-# language TemplateHaskell #-}
 module VPF.Ext.HMMER.Search.Cols where
 

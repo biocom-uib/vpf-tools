@@ -1,6 +1,7 @@
 {-# language BlockArguments #-}
 {-# language OverloadedLabels #-}
 {-# language OverloadedStrings #-}
+{-# language Strict #-}
 {-# language TemplateHaskell #-}
 module VPF.Model.Class.Cols where
 
@@ -33,8 +34,8 @@ declareColumn "class_percent" ''Double
 declareColumn "class_cat"     ''Int
 
 
-data Class = HomogClass !(Field ClassName) !(Field ClassCat)
-           | NonHomogClass !(Map (Field ClassName) (Field ClassPercent, Field ClassCat))
+data Class = HomogClass (Field ClassName) (Field ClassCat)
+           | NonHomogClass (Map (Field ClassName) (Field ClassPercent, Field ClassCat))
   deriving (Eq, Ord, Show)
 
 type instance VectorFor Class = Vector

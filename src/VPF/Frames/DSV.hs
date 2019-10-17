@@ -1,7 +1,7 @@
 {-# language DeriveGeneric #-}
 {-# language ImplicitParams #-}
 {-# language OverloadedStrings #-}
-{-# language StrictData #-}
+{-# language Strict #-}
 module VPF.Frames.DSV
   ( RowTokenizer
   , ParserOptions(..)

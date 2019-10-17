@@ -6,16 +6,16 @@
 {-# language PartialTypeSignatures #-}
 {-# language OverloadedLabels #-}
 {-# language StaticPointers #-}
-{-# language StrictData #-}
+{-# language Strict #-}
 module VPF.Model.VirusClass where
 
 import GHC.Generics (Generic)
 
 import Control.Carrier (Has)
-import Control.Carrier.MTL (AnyMember)
 import Control.Distributed.SClosure
 import Control.Effect.Reader
 import Control.Effect.Distributed
+import Control.Effect.Sum.Extra (HasAny)
 import Control.Effect.Throw
 import qualified Control.Foldl as Fold
 import qualified Control.Lens as L
@@ -278,10 +278,10 @@ aggregateHits aminoacidsFile hitsFile = do
         (colVecs, errs) <- liftIO $ runSafeT $
             Fold.impurely P.foldM' (F.colVecsFoldM 128) $
                 FA.fastaFileReader aminoacidsFile
-                  >-> P.mapM (\entry -> return $! fastaEntryToRow entry)
+                  >-> P.map fastaEntryToRow
 
         either throwError return errs
-        return $! F.setIndex @"protein_name" (F.fromColVecs colVecs)
+        return $ F.setIndex @"protein_name" (F.fromColVecs colVecs)
 
     aggregate :: GroupedFrameRec (Field M.ProteinName) '[M.KBaseSize]
               -> FrameRec '[M.VirusName, HMM.TargetName, HMM.QueryName, HMM.SequenceScore]
@@ -409,7 +409,7 @@ distribSearchHits :: forall sigm m sign n w.
     , MonadIO m
     , Has (Reader WorkDir) sigm m
     , Has (Throw FA.ParseError) sigm m
-    , AnyMember Distributed (Distributed n w) sigm
+    , HasAny Distributed (Distributed n w) sigm m
     , Typeable sign
     , Typeable n
     )
@@ -425,7 +425,7 @@ distribSearchHits :: forall sigm m sign n w.
     -> Producer (FA.FastaEntry Nucleotide) (SafeT IO) (Either FA.ParseError ())
     -> m [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
 distribSearchHits sdict concOpts vpfsFile genomes = do
-    nslaves <- getNumWorkers @n @w
+    nslaves <- getNumWorkers_
 
     wd <- ask @WorkDir
 
@@ -433,16 +433,16 @@ distribSearchHits sdict concOpts vpfsFile genomes = do
         genomesChunkWriter = P.mapM $ \chunk ->
             liftIO $ runReaderT (writeGenomesFile (P.each chunk)) wd
 
-    genomesFilesProducer :: PA.AsyncProducer [(_, _)] (SafeT IO) () m () <-
+    genomesFilesProducer :: PA.AsyncProducer [(_, _)] (SafeT IO) () m () <- liftIO $
         genomes
-        & PA.bufferedChunks (fromIntegral $ fastaChunkSize concOpts)
-        & (>-> genomesChunkWriter)
-        & PA.bufferedChunks nslaves
-        & PA.stealingAsyncProducer (nslaves+1)
-        & fmap (PA.cmapOutput (Right () <$))
-        & fmap (PA.hoist (liftIO . runSafeT))
-        & fmap (PA.mapPipeM (either throwError return))
-        & liftIO
+          & PA.bufferedChunks (fromIntegral $ fastaChunkSize concOpts)
+          & (>-> genomesChunkWriter)
+          & PA.bufferedChunks nslaves
+          & PA.stealingAsyncProducer (nslaves+1)
+          & fmap \ap -> ap
+          & PA.cmapOutput (Right () <$)
+          & PA.hoist (liftIO . runSafeT)
+          & PA.mapPipeM (either throwError return)
 
     let asyncSearchHits' =
           static (\Dict -> asyncSearchHits @sign @n)
@@ -450,19 +450,17 @@ distribSearchHits sdict concOpts vpfsFile genomes = do
             <:*> spureWith (static Dict) concOpts
             <:*> spureWith (static Dict) vpfsFile
 
-    rs <- withWorkers $ \(w :: w n) -> do
+    withWorkers_ $ \w -> do
         ((), r) <- PA.runAsyncEffect (nslaves+1) $
             genomesFilesProducer
             >||>
-            P.mapM (runInWorker w (static Dict) . smap asyncSearchHits' . spureWith (static Dict))
+            P.mapM (runInWorker_ w (static Dict) . smap asyncSearchHits' . spureWith (static Dict))
             >-|>
             P.concat
             >-|>
             PA.toListM
 
         return r
-
-    return (concat rs)
 
 
 
@@ -593,7 +591,7 @@ data ClassificationStep
             , MonadIO m
             , Has (Reader WorkDir) sigm m
             , Has (Throw FA.ParseError) sigm m
-            , AnyMember Distributed (Distributed n w) sigm
+            , HasAny Distributed (Distributed n w) sigm m
             , Typeable sign
             , Typeable n
             )

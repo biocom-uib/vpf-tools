@@ -2,7 +2,7 @@
 {-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
 {-# language StandaloneDeriving #-}
-{-# language StrictData #-}
+{-# language Strict #-}
 {-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
 module VPF.Ext.HMMER.Search
@@ -143,6 +143,6 @@ interpretHMMSearchT (HMMSearch args@HMMSearchArgs{..} k) = do
 
     case exitCode of
       ExitSuccess    -> k
-      ExitFailure ec -> HMMSearchT . MT.throwE $! HMMSearchError args ec (decodeUtf8 (BL.toStrict stderr))
+      ExitFailure ec -> HMMSearchT $ MT.throwE $ HMMSearchError args ec (decodeUtf8 (BL.toStrict stderr))
 
 deriveCarrier 'interpretHMMSearchT

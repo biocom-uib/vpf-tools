@@ -1,4 +1,5 @@
 {-# language DeriveGeneric #-}
+{-# language Strict #-}
 module VPF.Model.Class
   ( classObjs
   , loadClassification
@@ -93,6 +94,7 @@ data ClassificationParams = ClassificationParams
     { modelClasses :: GroupedFrameRec (Field ModelName) '[ClassName, ClassPercent, ClassCat]
     , scoreSamples :: Vector (Field M.VirusHitScore)
     }
+
 
 loadClassificationParams ::
     ( MonadIO m

@@ -105,7 +105,8 @@ library:
   when:
   - condition: flag(mpi)
     exposed-modules:
-    - VPF.Concurrency.MPI
+    - Control.Carrier.Distributed.MPI
+    - Control.Distributed.MPI.Streaming
 
 executables:
   vpf-class:

@@ -1,26 +1,23 @@
 {-# language DerivingVia #-}
 {-# language QuantifiedConstraints #-}
+{-# language Strict #-}
 {-# language UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Control.Carrier.MTL
   ( relayCarrierIso
-  , FindMember
-  , AnyMember
-  , SubEffects
   , relayCarrierUnwrap
   , relayCarrierControl
   , relayCarrierControlYo
   ) where
 
 import Control.Carrier
-import Control.Effect.Sum
+import Control.Effect.Sum.Extra
 
 import Control.Monad (join)
 import qualified Control.Monad.Trans.Control as MTC
 
 import Data.Coerce
 import Data.Functor.Yoneda
-import Data.Kind (Type)
 import Data.Reflection (give, Given(given))
 
 
@@ -38,54 +35,13 @@ relayCarrierIso :: forall t' t sig alg' m a.
 relayCarrierIso tt' t't = t't . eff . R . hmap tt'
 
 
-type SigK = (Type -> Type) -> Type -> Type
-
-
-type family DesaturateSig k l (sig :: l) :: Maybe k where
-    DesaturateSig k k sig                   = 'Just sig
-    DesaturateSig k l ((sig1 :: l' -> l) _) = DesaturateSig k (l' -> l) sig1
-    DesaturateSig k l _                     = 'Nothing
-
-
-type family EQU (a :: k) (b :: k) :: Bool where
-    EQU a a      = 'True
-    EQU a b      = 'False
-
-
-type family If (c :: Bool) (a :: k) (b :: k) :: k where
-    If 'True  a _ = a
-    If 'False _ b = b
-
-
-type family Stuck :: k where
-
-
-type family FindMember (sigF :: k) (sigs :: SigK) :: SigK where
-    FindMember (sigF :: k) (sig :+: sigs) = If (EQU ('Just sigF) (DesaturateSig k SigK sig)) sig (FindMember sigF sigs)
-    FindMember (sigF :: k) sig            = If (EQU ('Just sigF) (DesaturateSig k SigK sig)) sig Stuck
-
-
-class (Member sig sigs, FindMember sigF sigs ~ sig) => AnyMember (sigF :: k) (sig :: SigK) (sigs :: SigK) | sigF sigs -> sig
-instance (Member sig sigs, FindMember sigF sigs ~ sig) => AnyMember (sigF :: k) (sig :: SigK) (sigs :: SigK)
-
-
-class SubEffects sub sup where injR :: sub m a -> sup m a
-
-instance SubEffects sub sub where
-    injR = id
-instance {-# overlappable #-} SubEffects sub (sub' :+: sub)where
-    injR = R
-instance {-# overlappable #-} SubEffects sub sup => SubEffects sub (sub' :+: sup) where
-    injR = R . injR
-
-
 -- relay the effect to the inner type of a newtype
 
 relayCarrierUnwrap :: forall m' sig' m sig a.
     ( Coercible m m'
     , Coercible (m' a) (m a)
     , Carrier sig' m'
-    , SubEffects sig sig'
+    , Subsumes sig sig'
     , HFunctor sig
     , Functor m
     )

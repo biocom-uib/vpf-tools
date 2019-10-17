@@ -1,5 +1,6 @@
 {-# language DeriveGeneric #-}
 {-# language GeneralizedNewtypeDeriving #-}
+{-# language Strict #-}
 {-# language UndecidableInstances #-}
 module VPF.Frames.InCore
   (
@@ -130,7 +131,7 @@ copyAoS = fromRowsVec . toRowsVec
 -- AoS serialization
 
 newtype FrameRowStore row = FrameRowStore (Vec.Vector row)
-  deriving (Store)
+    deriving (Store)
 
 type FrameRowStoreRec rs = FrameRowStore (VinylStore V.Rec ElFieldStore rs)
 
@@ -157,8 +158,8 @@ frameRowStoreRec = iso toFrameRowStoreRec fromFrameRowStoreRec
 
 -- SoA
 
-data ColVecsM m cols = ColVecsM !Int !Int !(Record (IC.VectorMs m cols))
-data ColVecs cols = ColVecs !Int !(Record (IC.Vectors cols))
+data ColVecsM m cols = ColVecsM Int Int (Record (IC.VectorMs m cols))
+data ColVecs cols = ColVecs Int (Record (IC.Vectors cols))
 
 instance Semigroup (Record (IC.Vectors cols)) => Semigroup (ColVecs cols) where
     ColVecs n cols <> ColVecs n' cols' = ColVecs (n+n') (cols <> cols')
@@ -227,7 +228,7 @@ copySoA = fromColVecs . toColVecs
 -- SoA serialization
 
 data FrameColStoreRec rs = FrameColStore !Int !(VinylStore V.Rec ElFieldStore (IC.Vectors rs))
-  deriving (Generic)
+    deriving (Generic)
 
 instance (IC.RecVec rs, Store (VinylStore V.Rec ElFieldStore (IC.Vectors rs)))
     => Store (FrameColStoreRec rs)

@@ -1,5 +1,6 @@
 {-# language DeriveFunctor #-}
 {-# language ImplicitParams #-}
+{-# language Strict #-}
 {-# language UndecidableInstances #-}
 module Pipes.Concurrent.Async
   ( replicate1
@@ -79,8 +80,8 @@ type AsyncConsumer' a m r = AsyncConsumer a m r m r
 
 instance MonadAsync n => Apply (AsyncProxy p c n) where
     AsyncProxy pfs <.> AsyncProxy ps = AsyncProxy $ \p c -> do
-        (!fs, !s) <- Async.concurrently (pfs p c) (ps p c)
-        return $! fs s
+        (fs, s) <- Async.concurrently (pfs p c) (ps p c)
+        return (fs s)
 
 instance (p ~ Producer a n r, c ~ Consumer a n r, MonadAsync n) => Applicative (AsyncProxy p c n) where
     pure a = AsyncProxy (\p c -> a <$ P.runEffect (p >-> c))
@@ -195,13 +196,17 @@ asyncFoldM' fold = AsyncProxy $ \p c -> do
     -> AsyncProxy p                  c                  n (r, s)
 ap1 >||> ap2 = AsyncProxy $ \p c -> do
     (str, sts) <- liftBaseWith $ \runInBase ->
-        PC.withBuffer (PC.bounded (fromIntegral ?bufSize))
+        PC.withBuffer buf
             (\output -> runInBase $ runAsyncProxy ap1 p (PC.toOutput output))
             (\input  -> runInBase $ runAsyncProxy ap2 (PC.fromInput input) c)
 
     r <- restoreM str
     s <- restoreM sts
     return (r, s)
+  where
+    buf
+      | ?bufSize == 0 = PC.unbounded
+      | otherwise     = PC.bounded (fromIntegral ?bufSize)
 
 
 (<||<) ::

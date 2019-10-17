@@ -1,5 +1,3 @@
-{-# language QuantifiedConstraints #-}
-{-# language BlockArguments #-}
 module Pipes.Concurrent.Synchronize where
 
 import qualified Control.Concurrent.Async.Lifted as Async
@@ -12,14 +10,13 @@ import qualified Control.Monad.STM              as STM
 import Control.Lens ((%~))
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Morph (hoist)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Control (MonadBaseControl, StM, restoreM)
+import Control.Monad.Trans.Control (StM)
 
 import Data.Function (fix)
 import Numeric.Natural (Natural)
 
-import Pipes (Consumer, Producer, Pipe, (>->))
+import Pipes (Consumer, Producer)
 import qualified Pipes.Concurrent.Async as PA
 
 import qualified Pipes            as P
@@ -34,24 +31,6 @@ bufferedChunks chunkSize =
       (items, f) <- P.lift $ P.toListM' chunk
       P.yield items
       return f
-
-
-runAsyncSafeT ::
-    MonadIO n
-    => PA.AsyncProxy p c (PS.SafeT IO) s
-    -> PA.AsyncProxy p c n             s
-runAsyncSafeT = hoist (liftIO . PS.runSafeT)
-
-
-restoreProducerWith :: (Monad m, MonadBaseControl IO n)
-                    => (forall x. m x -> n x)
-                    -> Producer (StM n a) m r
-                    -> Producer a n r
-restoreProducerWith f producer = hoist f producer >-> P.mapM restoreM
-
-
-restoreProducer :: MonadBaseControl b m => Pipe (StM m a) a m r
-restoreProducer = P.mapM restoreM
 
 
 -- convert a Producer to an asynchronous producer via work stealing
@@ -120,9 +99,7 @@ synchronize queueSize aproducer = do
     consumerQueue values = P.mapM_ (liftIO . STM.atomically . STM.writeTBQueue values)
 
     feed :: STM.TBQueue a -> n s
-    feed values =
-        PA.runAsyncEffect_ $
-            aproducer PA.>|-> consumerQueue values
+    feed values = PA.runAsyncEffect_ $ aproducer PA.>|-> consumerQueue values
 
     readValues :: STM.TBQueue a -> STM.TMVar () -> Producer a n ()
     readValues values done = fix $ \loop -> do

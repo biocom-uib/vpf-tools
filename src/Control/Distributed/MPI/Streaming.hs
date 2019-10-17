@@ -6,7 +6,7 @@
 {-# language DeriveGeneric #-}
 {-# language GeneralizedNewtypeDeriving #-}
 {-# language StrictData #-}
-module VPF.Concurrency.MPI where
+module Control.Distributed.MPI.Streaming where
 
 import GHC.Generics (Generic)
 
@@ -121,7 +121,7 @@ messagesFrom :: forall a m.
     -> MPI.Comm
     -> Producer (MPI.Status, a) m ()
 messagesFrom rank tag comm = fix $ \loop -> do
-    (status, msg) <- liftIO $ recvYielding rank tag comm
+    (!status, !msg) <- liftIO $ recvYielding rank tag comm
 
     case msg of
       StreamItem a -> P.yield (status, a) >> loop
@@ -143,8 +143,9 @@ messagesFrom_ rank tag comm = fix $ \loop -> do
 
 
 genericSender :: forall a m r. MonadIO m => Store a => MPI.Comm -> Consumer (MPI.Status, a) m r
-genericSender comm = do
-    P.mapM_ (\(s, a) -> liftIO $ sendYielding_ a (MPI.msgRank s) (MPI.msgTag s) comm)
+genericSender comm =
+    P.mapM_ (\(s, a) ->
+        liftIO $ sendYielding_ a (MPI.msgRank s) (MPI.msgTag s) comm)
 
 
 messagesTo :: forall m a r. (PS.MonadSafe m, Store a)

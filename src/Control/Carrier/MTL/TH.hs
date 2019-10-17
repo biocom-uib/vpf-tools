@@ -16,6 +16,7 @@ import Data.Monoid (Ap(..))
 import Control.Carrier.Class
 import Control.Carrier.MTL
 import Control.Effect.Sum
+import Control.Effect.Sum.Extra
 import Control.Effect.Class
 
 import qualified Control.Monad.Catch         as MT
@@ -34,7 +35,7 @@ import Language.Haskell.TH.Lens
 tyConName :: Type -> Q Name
 tyConName (ConT n)    = return n
 tyConName (AppT ty _) = tyConName ty
-tyConName ty          = fail $ "cannot find concrete type constructor of " ++ show ty
+tyConName ty          = fail $ "cannot find concrete type constructor of " ++ pprint ty
 
 
 decomposeTransStack :: Type -> ([Type], Type)
@@ -110,9 +111,9 @@ getCarrierInfo mayTyArgs carrierName = do
 
                       return (tyVars, conName, innerCarrierM, a, derives)
 
-                  t -> fail $ "error: the inner carrier type is not of the form M a: " ++ show t
+                  t -> fail $ "error: the inner carrier type is not of the form M a: " ++ pprint t
 
-          _ -> fail $ "invalid carrier declaration: " ++ show carrierDec
+          _ -> fail $ "invalid carrier declaration: " ++ pprint carrierDec
 
     (stack, m) <-
         case decomposeTransStack innerCarrierM of
@@ -147,14 +148,14 @@ getInterpInfo interpName = do
               return (cxt, effType, cType)
 
           _ -> fail $ "could not match interpreter type with forall <vars>. Cxt => Eff M a -> M a: "
-                        ++ show interpType
+                        ++ pprint interpType
 
     (effType, carrierM, a) <-
         case satEffType of
           AppT (AppT effType carrierM) (VarT a) ->
               return (effType, carrierM, a)
 
-          _ -> fail $ "could not match saturated effect type with Eff M a: " ++ show satEffType
+          _ -> fail $ "could not match saturated effect type with Eff M a: " ++ pprint satEffType
 
     (carrierT, m) <-
         case satCarrierType of
@@ -402,7 +403,7 @@ deriveCarrier interpName = do
         instance
             ( Carrier $sigQ $mQ
             , Carrier $innerSigQ $innerMQ
-            , SubEffects $sigQ $innerSigQ
+            , Subsumes $sigQ $innerSigQ
             , HFunctor $sigQ
             , $cxtQ
             )
