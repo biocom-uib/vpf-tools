@@ -40,7 +40,7 @@ extra-deps:
 - extensible-effects-5.0.0.1
 - name: fused-effects
   github: bielr/fused-effects
-  commit: parameterized-effect
+  commit: 560c30eb31290dc83e120cb5c6729c084c1f3b3d
 
 # - acme-missiles-0.3
 # - git: https://github.com/commercialhaskell/stack.git

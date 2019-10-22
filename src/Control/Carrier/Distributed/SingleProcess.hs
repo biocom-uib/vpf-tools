@@ -11,7 +11,7 @@ module Control.Carrier.Distributed.SingleProcess
 
 import GHC.Generics (Generic)
 
-import Control.Carrier.MTL.TH (deriveMonadTrans, deriveCarrier)
+import Control.Carrier.MTL.TH (deriveMonadTrans, deriveAlgebra)
 import Control.Distributed.SClosure
 import Control.Effect.Distributed
 
@@ -42,4 +42,4 @@ interpretSingleProcessT (WithWorkers block k)             = k . pure =<< block L
 interpretSingleProcessT (RunInWorker LocalWorker _ clo k) = k =<< SingleProcessT (seval clo)
 
 
-deriveCarrier 'interpretSingleProcessT
+deriveAlgebra 'interpretSingleProcessT

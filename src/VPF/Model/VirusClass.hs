@@ -11,7 +11,7 @@ module VPF.Model.VirusClass where
 
 import GHC.Generics (Generic)
 
-import Control.Carrier (Has)
+import Control.Algebra (Has)
 import Control.Distributed.SClosure
 import Control.Effect.Reader
 import Control.Effect.Distributed

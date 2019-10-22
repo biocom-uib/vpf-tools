@@ -21,8 +21,8 @@ import GHC.Generics (Generic)
 import Data.Kind (Type)
 import Data.Store (Store)
 
-import Control.Carrier
-import Control.Carrier.MTL (relayCarrierUnwrap)
+import Control.Algebra
+import Control.Algebra.Helpers (relayAlgebraUnwrap)
 import Control.Carrier.MTL.TH (deriveMonadTrans)
 
 import Control.Effect.Error
@@ -116,19 +116,19 @@ interpretExceptsT (R (Catch mb emb bmk)) =
           Nothing -> MT.throwE es
 
 
-instance (KnownList es, HFunctor sig', Handles (Either (Errors es)) sig, Carrier sig m, sig' ~ ExceptsSig es sig)
-    => Carrier sig' (ExceptsT es m) where
+instance (KnownList es, HFunctor sig', Handles (Either (Errors es)) sig, Algebra sig m, sig' ~ ExceptsSig es sig)
+    => Algebra sig' (ExceptsT es m) where
 
     eff = go (singList @es)
       where
         go ::
             ( forall e. MemberError e es' => MemberError e es
-            , Carrier sig m
+            , Algebra sig m
             )
             => SList es'
             -> ExceptsSig es' sig (ExceptsT es m) a
             -> ExceptsT es m a
-        go SNil         sig = relayCarrierUnwrap ExceptsT sig
+        go SNil         sig = relayAlgebraUnwrap ExceptsT sig
         go (SCons sing) sig =
             case sig of
               L e     -> interpretExceptsT e

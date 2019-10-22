@@ -12,7 +12,7 @@ module Control.Effect.Distributed
 
 import Control.Distributed.SClosure
 
-import Control.Carrier
+import Control.Algebra
 import Control.Effect.Sum.Extra
 
 import Numeric.Natural (Natural)

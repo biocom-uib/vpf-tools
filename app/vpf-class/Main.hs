@@ -1,3 +1,4 @@
+{-# options_ghc -ddump-spec #-}
 {-# language BlockArguments #-}
 {-# language CPP #-}
 {-# language GeneralizedNewtypeDeriving #-}
@@ -6,7 +7,7 @@
 {-# language StaticPointers #-}
 module Main where
 
-import Control.Carrier (Has)
+import Control.Algebra (Has)
 import Control.Carrier.Error.Excepts (Error, ExceptsT, handleErrorCase, runLastExceptT, throwError)
 
 import Control.Monad (forM_)

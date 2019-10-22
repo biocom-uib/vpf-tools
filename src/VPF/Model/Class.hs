@@ -13,7 +13,7 @@ module VPF.Model.Class
 
 import GHC.Generics (Generic)
 
-import Control.Carrier (Has)
+import Control.Algebra (Has)
 import Control.Effect.Throw (Throw)
 import Control.Monad.IO.Class (MonadIO)
 import qualified Control.Lens as L

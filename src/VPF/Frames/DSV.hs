@@ -27,7 +27,7 @@ module VPF.Frames.DSV
 import GHC.Generics (Generic)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 
-import Control.Carrier (Has)
+import Control.Algebra (Has)
 import Control.Effect.Throw (Throw, throwError)
 import Control.Monad (when, (>=>))
 import Control.Exception (try)

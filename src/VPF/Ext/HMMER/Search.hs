@@ -27,8 +27,8 @@ import Data.Store (Store)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
-import Control.Carrier
-import Control.Carrier.MTL.TH (deriveMonadTrans, deriveCarrier)
+import Control.Algebra
+import Control.Carrier.MTL.TH (deriveMonadTrans, deriveAlgebra)
 
 import qualified Control.Monad.IO.Class      as MT
 import qualified Control.Monad.Morph         as MT
@@ -145,4 +145,4 @@ interpretHMMSearchT (HMMSearch args@HMMSearchArgs{..} k) = do
       ExitSuccess    -> k
       ExitFailure ec -> HMMSearchT $ MT.throwE $ HMMSearchError args ec (decodeUtf8 (BL.toStrict stderr))
 
-deriveCarrier 'interpretHMMSearchT
+deriveAlgebra 'interpretHMMSearchT

@@ -3,14 +3,14 @@
 {-# language Strict #-}
 {-# language UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
-module Control.Carrier.MTL
-  ( relayCarrierIso
-  , relayCarrierUnwrap
-  , relayCarrierControl
-  , relayCarrierControlYo
+module Control.Algebra.Helpers
+  ( relayAlgebraIso
+  , relayAlgebraUnwrap
+  , relayAlgebraControl
+  , relayAlgebraControlYo
   ) where
 
-import Control.Carrier
+import Control.Algebra
 import Control.Effect.Sum.Extra
 
 import Control.Monad (join)
@@ -23,8 +23,8 @@ import Data.Reflection (give, Given(given))
 
 -- relay the effect to an equivalent carrier
 
-relayCarrierIso :: forall t' t sig alg' m a.
-    ( Carrier (alg' :+: sig)  (t' m)
+relayAlgebraIso :: forall t' t sig alg' m a.
+    ( Algebra (alg' :+: sig)  (t' m)
     , Functor (t m)
     , HFunctor sig
     )
@@ -32,15 +32,15 @@ relayCarrierIso :: forall t' t sig alg' m a.
     -> (forall x. t' m x -> t m x)
     -> sig (t m) a
     -> t m a
-relayCarrierIso tt' t't = t't . eff . R . hmap tt'
+relayAlgebraIso tt' t't = t't . eff . R . hmap tt'
 
 
 -- relay the effect to the inner type of a newtype
 
-relayCarrierUnwrap :: forall m' sig' m sig a.
+relayAlgebraUnwrap :: forall m' sig' m sig a.
     ( Coercible m m'
     , Coercible (m' a) (m a)
-    , Carrier sig' m'
+    , Algebra sig' m'
     , Subsumes sig sig'
     , HFunctor sig
     , Functor m
@@ -48,7 +48,7 @@ relayCarrierUnwrap :: forall m' sig' m sig a.
     => (forall x. m' x -> m x)
     -> sig m a
     -> m a
-relayCarrierUnwrap _ = coerce @(m' a) @(m a) . eff . injR @sig @sig' . handleCoercible
+relayAlgebraUnwrap _ = coerce @(m' a) @(m a) . eff . injR @sig @sig' . handleCoercible
 
 
 newtype StT t a = StT { unStT :: MTC.StT t a }
@@ -63,9 +63,9 @@ instance Given (StFunctor t) => Functor (StT t) where
 
 -- use StT as the state functor with a reflected instance
 
-relayCarrierControl :: forall sig t m a.
+relayAlgebraControl :: forall sig t m a.
     ( MTC.MonadTransControl t
-    , Carrier sig m
+    , Algebra sig m
     , forall f. Functor f => Handles f sig
     , Monad m
     , Monad (t m)
@@ -73,7 +73,7 @@ relayCarrierControl :: forall sig t m a.
     => (forall x y. (x -> y) -> MTC.StT t x -> MTC.StT t y)
     -> sig (t m) a
     -> t m a
-relayCarrierControl fmap' sig = give (StFunctor @t fmap') $ do
+relayAlgebraControl fmap' sig = give (StFunctor @t fmap') $ do
     state <- captureStT
 
     sta <- MTC.liftWith $ \runT -> do
@@ -104,9 +104,9 @@ newtype YoStT t a = YoStT { unYoStT :: Yoneda (StT t) a }
   deriving Functor via Yoneda (StT t)
 
 
-relayCarrierControlYo :: forall sig t m a.
+relayAlgebraControlYo :: forall sig t m a.
     ( MTC.MonadTransControl t
-    , Carrier sig m
+    , Algebra sig m
     , Handles (YoStT t) sig
     , Monad m
     , Monad (t m)
@@ -114,7 +114,7 @@ relayCarrierControlYo :: forall sig t m a.
     => (forall x y. (x -> y) -> MTC.StT t x -> MTC.StT t y)
     -> sig (t m) a
     -> t m a
-relayCarrierControlYo fmap' sig = do
+relayAlgebraControlYo fmap' sig = do
     state <- captureYoT
 
     yosta <- MTC.liftWith $ \runT -> do

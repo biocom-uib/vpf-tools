@@ -2,7 +2,7 @@
 module Control.Carrier.MTL.TH
   ( deriveMonadTrans
   , deriveMonadTransExcept
-  , deriveCarrier
+  , deriveAlgebra
   ) where
 
 import Data.Bifunctor (first)
@@ -13,11 +13,9 @@ import qualified Data.Map as Map
 import Data.Maybe (fromMaybe)
 import Data.Monoid (Ap(..))
 
-import Control.Carrier.Class
-import Control.Carrier.MTL
-import Control.Effect.Sum
+import Control.Algebra
+import Control.Algebra.Helpers
 import Control.Effect.Sum.Extra
-import Control.Effect.Class
 
 import qualified Control.Monad.Catch         as MT
 import qualified Control.Monad.IO.Class      as MT
@@ -371,8 +369,8 @@ deriveMonadTrans :: Name -> Q [Dec]
 deriveMonadTrans carrierName = deriveMonadTransExcept carrierName []
 
 
-deriveCarrier :: Name -> Q [Dec]
-deriveCarrier interpName = do
+deriveAlgebra :: Name -> Q [Dec]
+deriveAlgebra interpName = do
     interp <- getInterpInfo interpName
 
     carrierName <- tyConName (interpCarrierT interp)
@@ -401,15 +399,15 @@ deriveCarrier interpName = do
 
     [d|
         instance
-            ( Carrier $sigQ $mQ
-            , Carrier $innerSigQ $innerMQ
+            ( Algebra $sigQ $mQ
+            , Algebra $innerSigQ $innerMQ
             , Subsumes $sigQ $innerSigQ
             , HFunctor $sigQ
             , $cxtQ
             )
-            => Carrier ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
+            => Algebra ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
 
             eff (L $effPQ) = $interpQ $effEQ
-            eff (R other)  = relayCarrierUnwrap @($innerMQ) @($innerSigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
+            eff (R other)  = relayAlgebraUnwrap @($innerMQ) @($innerSigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
             {-# inline eff #-}
       |]

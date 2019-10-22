@@ -24,8 +24,8 @@ import Data.Store (Store)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
-import Control.Carrier
-import Control.Carrier.MTL.TH (deriveMonadTrans, deriveCarrier)
+import Control.Algebra
+import Control.Carrier.MTL.TH (deriveMonadTrans, deriveAlgebra)
 
 import qualified Control.Monad.IO.Class      as MT
 import qualified Control.Monad.Morph         as MT
@@ -142,4 +142,4 @@ interpretProdigalT (Prodigal args@ProdigalArgs{..} k) = do
           ProdigalT $ MT.throwE $ ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
 
 
-deriveCarrier 'interpretProdigalT
+deriveAlgebra 'interpretProdigalT

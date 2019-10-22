@@ -6,7 +6,7 @@ module Control.Effect.Sum.Extra
   , Subsumes(..)
   ) where
 
-import Control.Carrier.Class
+import Control.Algebra
 import Control.Effect.Sum
 
 import Data.Type.Equality (type (==))
@@ -50,8 +50,8 @@ class (Member sig sigs, Found sigF sig sigs) => FindMember sigF sig sigs | sigF 
 instance (Member sig sigs, Found sigF sig sigs) => FindMember sigF sig sigs
 
 
-class (Carrier sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m | sigF m -> sig sigs
-instance (Carrier sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m
+class (Algebra sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m | sigF m -> sig sigs
+instance (Algebra sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m
 
 
 class Subsumes sub sup where

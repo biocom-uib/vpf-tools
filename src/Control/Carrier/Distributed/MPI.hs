@@ -26,7 +26,7 @@ import qualified Control.Distributed.MPI           as CMPI
 import qualified Control.Distributed.MPI.Store     as MPI
 import qualified Control.Distributed.MPI.Streaming as SMPI
 
-import Control.Carrier.MTL.TH (deriveMonadTrans, deriveCarrier)
+import Control.Carrier.MTL.TH (deriveMonadTrans, deriveAlgebra)
 
 import Control.Lens (_2)
 import Control.Monad (when)
@@ -160,7 +160,7 @@ interpretMpiMasterT (RunInWorker (MPIWorker rank tag) sdict (clo :: SClosure (n 
               k a
 
 
-deriveCarrier 'interpretMpiMasterT
+deriveAlgebra 'interpretMpiMasterT
 
 
 data ExitHandlers n = ExitHandlers
