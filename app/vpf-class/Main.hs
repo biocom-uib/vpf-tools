@@ -1,4 +1,3 @@
-{-# options_ghc -ddump-spec #-}
 {-# language BlockArguments #-}
 {-# language CPP #-}
 {-# language GeneralizedNewtypeDeriving #-}
@@ -8,7 +7,7 @@
 module Main where
 
 import Control.Algebra (Has)
-import Control.Carrier.Error.Excepts (Error, ExceptsT, handleErrorCase, runLastExceptT, throwError)
+import Control.Carrier.Error.Excepts (Throw, ExceptsT, handleErrorCase, runLastExceptT, throwError)
 
 import Control.Monad (forM_)
 import Control.Monad.IO.Class (MonadIO(liftIO))
@@ -60,7 +59,7 @@ newtype DieMsg = DieMsg String
     deriving Store
 
 
-type Die = Error DieMsg
+type Die = Throw DieMsg
 
 
 putErrLn :: MonadIO m => String -> m ()

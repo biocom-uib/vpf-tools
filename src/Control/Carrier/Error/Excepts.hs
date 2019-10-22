@@ -8,11 +8,10 @@
 module Control.Carrier.Error.Excepts
   ( module Control.Effect.Error
   , Errors(..)
-  , KnownList
   , MemberError
-  , ExceptsSig
   , ExceptsT(..)
   , runExceptsT
+  , runPureExceptsT
   , runLastExceptT
   , handleErrorCase
   ) where
@@ -24,9 +23,11 @@ import Data.Store (Store)
 import Control.Algebra
 import Control.Algebra.Helpers (relayAlgebraUnwrap)
 import Control.Carrier.MTL.TH (deriveMonadTrans)
+import Control.Effect.Pure
 
 import Control.Effect.Error
 
+import Control.Monad.Trans        as MT
 import Control.Monad.Trans.Except as MT
 
 
@@ -41,21 +42,6 @@ data instance Errors (e ': es) = Error e | InjError (Errors es)
     deriving Generic
 
 deriving instance (Store e, Store (Errors es)) => Store (Errors (e ': es))
-
-
-data SList as where
-    SNil  :: SList '[]
-    SCons :: SList as -> SList (a ': as)
-
-
-class KnownList as where
-    singList :: SList as
-
-instance KnownList '[] where
-    singList = SNil
-
-instance KnownList as => KnownList (a ': as) where
-    singList = SCons singList
 
 
 class MemberError e es where
@@ -75,11 +61,6 @@ instance {-# incoherent #-} MemberError e es => MemberError e (e' ': es) where
     prjE (InjError es) = prjE es
 
 
-type family ExceptsSig es sig where
-    ExceptsSig '[]       sig = sig
-    ExceptsSig (e ': es) sig = Error e :+: ExceptsSig es sig
-
-
 newtype ExceptsT es m a = ExceptsT { unExceptsT :: MT.ExceptT (Errors es) m a }
 
 deriveMonadTrans ''ExceptsT
@@ -87,6 +68,14 @@ deriveMonadTrans ''ExceptsT
 
 runExceptsT :: ExceptsT es m a -> m (Either (Errors es) a)
 runExceptsT (ExceptsT m) = MT.runExceptT m
+
+
+runPureExceptsT :: Functor m => ExceptsT '[] m a -> m a
+runPureExceptsT = fmap noLeft . runExceptsT
+  where
+    noLeft :: Either (Errors '[]) a -> a
+    noLeft (Left e)  = case e of
+    noLeft (Right a) = a
 
 
 runLastExceptT :: Functor m => ExceptsT '[e] m a -> m (Either e a)
@@ -116,21 +105,37 @@ interpretExceptsT (R (Catch mb emb bmk)) =
           Nothing -> MT.throwE es
 
 
-instance (KnownList es, HFunctor sig', Handles (Either (Errors es)) sig, Algebra sig m, sig' ~ ExceptsSig es sig)
-    => Algebra sig' (ExceptsT es m) where
 
-    eff = go (singList @es)
-      where
-        go ::
-            ( forall e. MemberError e es' => MemberError e es
-            , Algebra sig m
-            )
-            => SList es'
-            -> ExceptsSig es' sig (ExceptsT es m) a
-            -> ExceptsT es m a
-        go SNil         sig = relayAlgebraUnwrap ExceptsT sig
-        go (SCons sing) sig =
-            case sig of
-              L e     -> interpretExceptsT e
-              R other -> go sing other
+class ErrorsAlgebra sig es where
+    effErrs :: Monad m => sig (ExceptsT es m) a -> ExceptsT es m a
+
+
+instance ErrorsAlgebra Pure es where
+    effErrs e = case e of
+    {-# inline effErrs #-}
+
+
+instance (ErrorsAlgebra sig es, MemberError e es) => ErrorsAlgebra (Error e :+: sig) es where
+    effErrs (L e)     = interpretExceptsT e
+    effErrs (R other) = effErrs other
+    {-# inline effErrs #-}
+
+
+instance Algebra sig m => Algebra (Pure :+: sig) (ExceptsT '[] m) where
+    eff (L e)     = effErrs e
+    eff (R other) = MT.lift $ eff (hmap runPureExceptsT other)
+    {-# inline eff #-}
+
+
+instance
+    ( Algebra sig m
+    , Algebra (errsig :+: sig) (ExceptsT es m) -- only required for the functional dependency
+    , ErrorsAlgebra errsig (e ': es)
+    , HFunctor errsig
+    , Handles (Either (Errors (e ': es))) sig
+    )
+    => Algebra ((Error e :+: errsig) :+: sig) (ExceptsT (e ': es) m) where
+
+    eff (L e)     = effErrs e
+    eff (R other) = relayAlgebraUnwrap ExceptsT other
     {-# inline eff #-}
