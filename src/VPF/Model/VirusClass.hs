@@ -223,8 +223,7 @@ searchGenomeHits wd vpfsFile genomes = do
           Right (_, _)    -> return False
 
     createEmptyHitsFile :: Path (HMMERTable ProtSearchHitCols) -> IO ()
-    createEmptyHitsFile fp = IO.withFile (untag fp) IO.WriteMode $ \h ->
-        IO.hPutStrLn h ""
+    createEmptyHitsFile fp = IO.withFile (untag fp) IO.WriteMode $ \_ -> return ()
 
 
 aggregateHits :: forall r.
