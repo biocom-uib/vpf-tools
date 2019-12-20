@@ -3,7 +3,8 @@
 module Control.Effect.Sum.Extra
   ( FindMember
   , HasAny
-  , Subsumes(..)
+  , Subsumes
+  , injR
   ) where
 
 import Control.Algebra
@@ -54,12 +55,12 @@ class (Algebra sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m | sig
 instance (Algebra sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m
 
 
-class Subsumes sub sup where
+class Subsumes (sub :: SigK) (sup :: SigK) where
     injR :: sub m a -> sup m a
 
 instance Subsumes sub sub where
     injR = id
-instance {-# overlappable #-} Subsumes sub (sub' :+: sub)where
+instance {-# overlappable #-} Subsumes sub (sub' :+: sub) where
     injR = R
 instance {-# overlappable #-} Subsumes sub sup => Subsumes sub (sub' :+: sup) where
     injR = R . injR

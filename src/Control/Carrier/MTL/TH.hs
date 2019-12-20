@@ -397,17 +397,35 @@ deriveAlgebra interpName = do
         effPQ = varP effName
         effEQ = varE effName
 
-    [d|
-        instance
-            ( Algebra $sigQ $mQ
-            , Algebra $innerSigQ $innerMQ
-            , Subsumes $sigQ $innerSigQ
-            , HFunctor $sigQ
-            , $cxtQ
-            )
-            => Algebra ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
+    -- FIXME: Ugly fix for newtype T m a = T (m a). `Subsumes` still fails if
+    -- the signature of innerM equals the signature of m (e.g. newtype T m a = T (IdentityT m a))
+    case carrierInnerStack carrier of
+      [] ->
+        [d|
+            instance
+                ( Algebra $sigQ $mQ
+                , HFunctor $sigQ
+                , $cxtQ
+                )
+                => Algebra ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
 
-            eff (L $effPQ) = $interpQ $effEQ
-            eff (R other)  = relayAlgebraUnwrap @($innerMQ) @($innerSigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
-            {-# inline eff #-}
-      |]
+                eff (L $effPQ) = $interpQ $effEQ
+                eff (R other)  = relayAlgebraUnwrap @($mQ) @($sigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
+                {-# inline eff #-}
+          |]
+
+      _ ->
+        [d|
+            instance
+                ( Algebra $sigQ $mQ
+                , Algebra $innerSigQ $innerMQ
+                , Subsumes $sigQ $innerSigQ
+                , HFunctor $sigQ
+                , $cxtQ
+                )
+                => Algebra ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
+
+                eff (L $effPQ) = $interpQ $effEQ
+                eff (R other)  = relayAlgebraUnwrap @($innerMQ) @($innerSigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
+                {-# inline eff #-}
+          |]

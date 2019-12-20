@@ -1,7 +1,8 @@
 {-# language DeriveGeneric #-}
-{-# language TemplateHaskell #-}
+{-# language NoPolyKinds #-}
 {-# language StaticPointers #-}
 {-# language Strict #-}
+{-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
 module Control.Carrier.Distributed.SingleProcess
   ( SingleProcessT
@@ -18,8 +19,7 @@ import Control.Effect.Distributed
 import Data.Store (Store)
 
 
-newtype SingleProcessT n m a = SingleProcessT { runSingleProcessT :: m a }
-
+newtype SingleProcessT m a = SingleProcessT { runSingleProcessT :: m a }
 
 deriveMonadTrans ''SingleProcessT
 
@@ -36,7 +36,7 @@ instance SInstance (Serializable LocalWorker) where
     sinst = static Dict
 
 
-interpretSingleProcessT :: (Monad m, n ~ m) => Distributed n LocalWorker (SingleProcessT n m) a -> SingleProcessT n m a
+interpretSingleProcessT :: (Monad m, n ~ m) => Distributed n LocalWorker (SingleProcessT m) a -> SingleProcessT m a
 interpretSingleProcessT (GetNumWorkers k)                 = k 1
 interpretSingleProcessT (WithWorkers block k)             = k . pure =<< block LocalWorker
 interpretSingleProcessT (RunInWorker LocalWorker _ clo k) = k =<< SingleProcessT (seval clo)

@@ -87,7 +87,7 @@ type M = Trans Stack IO
 
 main :: IO ()
 main = do
-    cfg <- Opts.parseArgs []
+    cfg <- Opts.parseArgs
 
     ec <-
         dyingWithExitCode 1 $
