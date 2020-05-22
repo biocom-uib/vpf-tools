@@ -118,7 +118,7 @@ configParser defConcOpts = do
         <> metavar "PROCEDURE"
         <> hidden
         <> showDefault
-        <> value "single"
+        <> value "meta"
         <> help "Prodigal procedure (-p) to use (for version 2.6.3: single or meta)"
 
     hmmerPrefix <- optional $ strOption $
@@ -126,7 +126,7 @@ configParser defConcOpts = do
         <> metavar "HMMER"
         <> hidden
         <> showDefault
-        <> help "Prefix to the HMMER installation (e.g. HMMER/bin/hmmsearch should exist)"
+        <> help "Prefix to the HMMER installation (e.g. HMMER/bin/hmmsearch must exist)"
 
     evalueThreshold <- option auto $
         long "evalue"
@@ -147,7 +147,7 @@ configParser defConcOpts = do
     dataFilesIndexFile <- strOption $
         long "data-index"
         <> metavar "DATA_INDEX"
-        <> help ".yaml file containing references to all required data files"
+        <> help "Yaml file containing references to all required data files"
 
     genomesFile <- strOption $
         long "input-seqs"
@@ -167,7 +167,7 @@ configParser defConcOpts = do
         long "output-dir"
         <> short 'o'
         <> metavar "OUTPUT_DIR"
-        <> help "Output directory (e.g. -c family=fam.tsv -o output would produce output/family.tsv)"
+        <> help "Output directory"
 
     concurrencyOpts <- concOpts
 
