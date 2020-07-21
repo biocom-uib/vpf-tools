@@ -99,8 +99,8 @@ instance RMonoid ARec where
 -- (strictly) monotone Nat lists
 
 type family IncSeq is = dec_is | dec_is -> is where
-  IncSeq '[] = '[]
-  IncSeq (i ': is) = S i ': IncSeq is
+    IncSeq '[] = '[]
+    IncSeq (i ': is) = S i ': IncSeq is
 
 type DecSeq is dec_is = IncSeq dec_is ~ is
 
@@ -166,21 +166,21 @@ instance
 -- field subsequences (different from subsets)
 
 class ReplaceSubseq ss ss' rs rs' is => RecSubseq rec ss ss' rs rs' is where
-  rsubseqC :: Lens (rec f rs) (rec f rs') (rec f ss) (rec f ss')
+    rsubseqC :: Lens (rec f rs) (rec f rs') (rec f ss) (rec f ss')
 
-  -- Isomorphism when ss' ~ '[]: splitting rs into ss and rs'
-  --  view rsubseqC :: rs -> ss
-  --  set rsubseqC RNil :: rs -> rs'
-  --  view (rsubseqSplitC Refl) = view rsubseqC &&& set rsubseqC RNil
-  --  rs :~: ss ++ rs'
-  rsubseqSplitC :: ss' E.:~: '[] -> Iso' (rec f rs) (rec f ss, rec f rs')
+    -- Isomorphism when ss' ~ '[]: splitting rs into ss and rs'
+    --  view rsubseqC :: rs -> ss
+    --  set rsubseqC RNil :: rs -> rs'
+    --  view (rsubseqSplitC Refl) = view rsubseqC &&& set rsubseqC RNil
+    --  rs :~: ss ++ rs'
+    rsubseqSplitC :: ss' E.:~: '[] -> Iso' (rec f rs) (rec f ss, rec f rs')
 
 
 -- RecSubseq implementation helpers
 
 type family DiscriminateEmpty xs a b where
-  DiscriminateEmpty '[]       a b = a
-  DiscriminateEmpty (x ': xs) a b = b
+    DiscriminateEmpty '[]       a b = a
+    DiscriminateEmpty (x ': xs) a b = b
 
 
 impossibleList :: (x ': xs) E.:~: '[] -> a
@@ -223,14 +223,15 @@ instance
     , s ~ r
     )
     => RecSubseq Rec (s ': ss) '[] (r ': rs) rs' (Z ': is') where
-  rsubseqC f (r :& rs) = rsubseqC (f . (r :&)) rs
-  {-# inline rsubseqC #-}
 
-  rsubseqSplitC eq =
-      L.withIso (rsubseqSplitC @Rec @ss eq) $ \split join ->
-          L.iso (\(s :& rs)      -> first (s :&) (split rs))
-                (\(s :& ss, rs') -> s :& join (ss, rs'))
-  {-# inline rsubseqSplitC #-}
+    rsubseqC f (r :& rs) = rsubseqC (f . (r :&)) rs
+    {-# inline rsubseqC #-}
+
+    rsubseqSplitC eq =
+        L.withIso (rsubseqSplitC @Rec @ss eq) $ \split join ->
+            L.iso (\(s :& rs)      -> first (s :&) (split rs))
+                  (\(s :& ss, rs') -> s :& join (ss, rs'))
+    {-# inline rsubseqSplitC #-}
 
 
 -- replace nonempty ss with nonempty ss'
@@ -243,14 +244,15 @@ instance
     , s' ~ r'
     )
     => RecSubseq Rec (s ': ss) (s' ': ss') (r ': rs) (r' ': rs') (Z ': is') where
-  rsubseqC f (r :& rs) =
-      restore (:&) $ rsubseqC (keep runcons . f . (r :&)) rs
-    where
-      runcons :: Rec f (s' ': ss') -> (f s', Rec f ss')
-      runcons (s' :& ss') = (s', ss')
-  {-# inline rsubseqC #-}
 
-  rsubseqSplitC = impossibleList
+    rsubseqC f (r :& rs) =
+        restore (:&) $ rsubseqC (keep runcons . f . (r :&)) rs
+      where
+        runcons :: Rec f (s' ': ss') -> (f s', Rec f ss')
+        runcons (s' :& ss') = (s', ss')
+    {-# inline rsubseqC #-}
+
+    rsubseqSplitC = impossibleList
 
 
 instance
@@ -260,15 +262,16 @@ instance
     , r ~ r'
     )
     => RecSubseq Rec ss ss' (r ': rs) (r' ': rs') (S i ': is') where
-  rsubseqC f (r :& rs) =
-      (r :&) <$> rsubseqC f rs
-  {-# inline rsubseqC #-}
 
-  rsubseqSplitC eq =
-      L.withIso (rsubseqSplitC @Rec @ss eq) $ \split join ->
-          L.iso (\(r :& rs)      -> second (r :&) (split rs))
-                (\(ss, r :& rs') -> r :& join (ss, rs'))
-  {-# inline rsubseqSplitC #-}
+    rsubseqC f (r :& rs) =
+        (r :&) <$> rsubseqC f rs
+    {-# inline rsubseqC #-}
+
+    rsubseqSplitC eq =
+        L.withIso (rsubseqSplitC @Rec @ss eq) $ \split join ->
+            L.iso (\(r :& rs)      -> second (r :&) (split rs))
+                  (\(ss, r :& rs') -> r :& join (ss, rs'))
+    {-# inline rsubseqSplitC #-}
 
 
 -- ARec instance
@@ -282,52 +285,52 @@ instance
     )
     => RecSubseq ARec ss ss' rs rs' is where
 
-  rsubseqC = L.lens rcast $ \(ARec ars) (ARec ass') ->
-      let
-        replace :: Int -> [Int] -> [Any] -> [Any] -> [Any]
-        replace !_ _  rs []  = rs
-        replace !_ _  [] ss' = ss'
-        replace !_ [] rs ss' = ss' ++ rs
-
-        replace !i jjs@(j : js) (r : rs) s'ss'@(s' : ss')
-          | i == j    = s' : replace (i+1) js rs ss'
-          | otherwise = r : replace (i+1) jjs rs s'ss'
-
-        ars' = A.listArray (0, natToInt @(RLength rs') - 1) $
-                replace 0 (indexWitnesses @is) (A.elems ars) (A.elems ass')
-      in
-        ARec ars'
-
-  rsubseqSplitC E.Refl = L.iso
-      (\(ARec ars) ->
-          let
-            split :: Int -> [Any] -> [Int] -> ([Any], [Any])
-            split !_ rs [] = ([], rs)
-
-            split !i (r : rs) jjs@(j : js)
-              | i == j    = case split (i+1) rs js  of (!ss, !rs') -> (r : ss, rs')
-              | otherwise = case split (i+1) rs jjs of (!ss, !rs') -> (ss, r : rs')
-
-            split !_ [] (_:_) = error "rsubseqSplitC @ARec: split: the impossible happened"
-          in
-            case split 0 (A.elems ars) (indexWitnesses @is) of
-              (ss, rs') -> (ARec $ A.listArray (0, natToInt @(RLength ss) - 1) ss,
-                            ARec $ A.listArray (0, natToInt @(RLength rs') - 1) rs'))
-      (\(ARec ass, ARec ars') ->
+    rsubseqC = L.lens rcast $ \(ARec ars) (ARec ass') ->
         let
-          merge :: Int -> [Int] -> [Any] -> [Any] -> [Any]
-          merge !_ [] [] rs' = rs'
-          merge !_ _  ss []  = ss
+          replace :: Int -> [Int] -> [Any] -> [Any] -> [Any]
+          replace !_ _  rs []  = rs
+          replace !_ _  [] ss' = ss'
+          replace !_ [] rs ss' = ss' ++ rs
 
-          merge !i jjs@(j : js) sss@(s : ss) rrs'@(r : rs')
-            | i == j    = s : merge (i+1) js ss rrs'
-            | otherwise = r : merge (i+1) jjs sss rs'
+          replace !i jjs@(j : js) (r : rs) s'ss'@(s' : ss')
+            | i == j    = s' : replace (i+1) js rs ss'
+            | otherwise = r : replace (i+1) jjs rs s'ss'
 
-          merge !_ [] (_:_) _ = error "rsubseqSplitC @ARec: merge: the impossible happened"
-          merge !_ (_:_) [] _ = error "rsubseqSplitC @ARec: merge: the impossible happened"
+          ars' = A.listArray (0, natToInt @(RLength rs') - 1) $
+                  replace 0 (indexWitnesses @is) (A.elems ars) (A.elems ass')
         in
-          ARec $ A.listArray (0, natToInt @(RLength rs) - 1) $
-            merge 0 (indexWitnesses @is) (A.elems ass) (A.elems ars'))
+          ARec ars'
+
+    rsubseqSplitC E.Refl = L.iso
+        (\(ARec ars) ->
+            let
+              split :: Int -> [Any] -> [Int] -> ([Any], [Any])
+              split !_ rs [] = ([], rs)
+
+              split !i (r : rs) jjs@(j : js)
+                | i == j    = case split (i+1) rs js  of (!ss, !rs') -> (r : ss, rs')
+                | otherwise = case split (i+1) rs jjs of (!ss, !rs') -> (ss, r : rs')
+
+              split !_ [] (_:_) = error "rsubseqSplitC @ARec: split: the impossible happened"
+            in
+              case split 0 (A.elems ars) (indexWitnesses @is) of
+                (ss, rs') -> (ARec $ A.listArray (0, natToInt @(RLength ss) - 1) ss,
+                              ARec $ A.listArray (0, natToInt @(RLength rs') - 1) rs'))
+        (\(ARec ass, ARec ars') ->
+          let
+            merge :: Int -> [Int] -> [Any] -> [Any] -> [Any]
+            merge !_ [] [] rs' = rs'
+            merge !_ _  ss []  = ss
+
+            merge !i jjs@(j : js) sss@(s : ss) rrs'@(r : rs')
+              | i == j    = s : merge (i+1) js ss rrs'
+              | otherwise = r : merge (i+1) jjs sss rs'
+
+            merge !_ [] (_:_) _ = error "rsubseqSplitC @ARec: merge: the impossible happened"
+            merge !_ (_:_) [] _ = error "rsubseqSplitC @ARec: merge: the impossible happened"
+          in
+            ARec $ A.listArray (0, natToInt @(RLength rs) - 1) $
+              merge 0 (indexWitnesses @is) (A.elems ass) (A.elems ars'))
 
 
 type RSubseq ss ss' rs rs' = RecSubseq Rec ss ss' rs rs' (RImage ss rs)

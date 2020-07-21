@@ -1,6 +1,5 @@
 {-# language AllowAmbiguousTypes #-}
-{-# language DeriveFunctor #-}
-{-# language DeriveFoldable #-}
+{-# language Strict #-}
 module VPF.Frames.Dplyr.Index where
 
 import qualified Control.Lens as L

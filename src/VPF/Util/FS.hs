@@ -1,3 +1,4 @@
+{-# language Strict #-}
 module VPF.Util.FS where
 
 import Control.Monad (forever, when)
@@ -125,6 +126,7 @@ lineReader get = loop
 stdinReader :: (MonadIO m, MonadCatch m) => Producer Text m ()
 stdinReader = lineReader TIO.getLine
 
+
 fileReader :: P.MonadSafe m => FilePath -> Producer Text m ()
 fileReader fp =
     P.withFile fp IO.ReadMode $
@@ -133,6 +135,7 @@ fileReader fp =
 
 stdoutWriter :: MonadIO m => Consumer Text m r
 stdoutWriter = P.mapM_ (liftIO . TIO.putStrLn)
+
 
 fileWriter :: P.MonadSafe m => FilePath -> Consumer Text m r
 fileWriter fp =

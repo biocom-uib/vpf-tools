@@ -1,6 +1,4 @@
-{-# language QuantifiedConstraints #-}
-{-# language BlockArguments #-}
-module VPF.Concurrency.Pipes where
+module Pipes.Concurrent.Synchronize where
 
 import qualified Control.Concurrent.Async.Lifted as Async
 
@@ -12,89 +10,56 @@ import qualified Control.Monad.STM              as STM
 import Control.Lens ((%~))
 import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Morph (hoist)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Control (MonadBaseControl, StM, restoreM)
+import Control.Monad.Trans.Control (StM)
 
 import Data.Function (fix)
-import Data.Monoid (Ap(..))
 import Numeric.Natural (Natural)
 
-import Pipes (Producer, Pipe, (>->))
+import Pipes (Consumer, Producer)
+import qualified Pipes.Concurrent.Async as PA
+
 import qualified Pipes            as P
 import qualified Pipes.Prelude    as P
 import qualified Pipes.Group      as PG
 import qualified Pipes.Safe       as PS
 
-import VPF.Concurrency.Async (MonadAsync, AsyncProducer(..), premapProducer)
 
-
-bufferedChunks :: Monad m => Int -> Producer a m r -> Producer [a] m r
+bufferedChunks :: Monad m => Natural -> Producer a m r -> Producer [a] m r
 bufferedChunks chunkSize =
-    PG.chunksOf chunkSize . PG.individually %~ \chunk -> do
+    PG.chunksOf (fromIntegral chunkSize) . PG.individually %~ \chunk -> do
       (items, f) <- P.lift $ P.toListM' chunk
       P.yield items
       return f
 
 
-restoreProducerWith :: (Monad m, MonadBaseControl IO n)
-                    => (forall x. m x -> n x)
-                    -> Producer (StM n a) m r
-                    -> Producer a n r
-restoreProducerWith f producer = hoist f producer >-> P.mapM restoreM
-
-
-runAsyncSafeT :: MonadIO n
-              => AsyncProducer a m r (PS.SafeT IO) s
-              -> AsyncProducer a m r n s
-runAsyncSafeT = hoist (liftIO . PS.runSafeT)
-
-
-restoreProducer :: MonadBaseControl b m => Pipe (StM m a) a m r
-restoreProducer = P.mapM restoreM
-
-
 -- convert a Producer to an asynchronous producer via work stealing
 -- an AsyncProducer is less flexible than a producer, but the API is safer
-stealingAsyncProducer :: (MonadAsync m, PS.MonadSafe m)
-                      => Natural
-                      -> Producer a m r
-                      -> IO (AsyncProducer a m r m r)
+stealingAsyncProducer ::
+    (PA.MonadAsync m, PS.MonadSafe m)
+    => Natural
+    -> Producer a m r
+    -> IO (PA.AsyncProducer' a m r)
 stealingAsyncProducer queueSize producer = do
     producer' <- stealingBufferedProducer queueSize producer
 
-    return $ AsyncProducer (\c -> P.runEffect (producer' >-> c))
-
-stealingAsyncProducer_ :: (MonadAsync m, PS.MonadSafe m, Monoid r)
-                       => Natural
-                       -> Producer a m r
-                       -> IO (AsyncProducer a m () m r)
-stealingAsyncProducer_ queueSize =
-    fmap (premapProducer (mempty <$)) . stealingAsyncProducer queueSize
+    return $ PA.duplicatingAsyncProducer producer'
 
 
-stealingAsyncProducerA :: (MonadAsync m, PS.MonadSafe m, Applicative f, Monoid r)
-                       => Natural
-                       -> Producer a m (f r)
-                       -> IO (AsyncProducer a m () m (f r))
-stealingAsyncProducerA queueSize =
-    fmap (fmap getAp) . stealingAsyncProducer_ queueSize . fmap Ap
-
-
-stealingBufferedProducer :: (MonadAsync m, PS.MonadSafe m)
-                         => Natural
-                         -> Producer a m r
-                         -> IO (Producer a m r)
-stealingBufferedProducer queueSize producer =
-    synchronize queueSize $
-        AsyncProducer (\c -> P.runEffect $ (producer >-> c))
+stealingBufferedProducer ::
+    (PA.MonadAsync m, PS.MonadSafe m)
+    => Natural
+    -> Producer a m r
+    -> IO (Producer a m r)
+stealingBufferedProducer queueSize =
+    synchronize queueSize . PA.duplicatingAsyncProducer
 
 
 synchronize :: forall a m r n s.
-            (MonadIO m, MonadAsync n, PS.MonadSafe n)
-            => Natural
-            -> AsyncProducer a m r n s
-            -> IO (Producer a n s)
+    (PA.MonadAsync n, PS.MonadSafe n, MonadIO m)
+    => Natural
+    -> PA.AsyncProducer a m r n s
+    -> IO (Producer a n s)
 synchronize queueSize aproducer = do
     threadVar <- MVar.newMVar Nothing
     values <- STM.newTBQueueIO queueSize
@@ -130,9 +95,11 @@ synchronize queueSize aproducer = do
               liftIO $ MVar.putMVar threadVar (Just thread')
               return thread'
 
+    consumerQueue :: STM.TBQueue a -> Consumer a m u
+    consumerQueue values = P.mapM_ (liftIO . STM.atomically . STM.writeTBQueue values)
+
     feed :: STM.TBQueue a -> n s
-    feed values =
-        feedFrom aproducer $ P.mapM_ (liftIO . STM.atomically . STM.writeTBQueue values)
+    feed values = PA.runAsyncEffect_ $ aproducer PA.>|-> consumerQueue values
 
     readValues :: STM.TBQueue a -> STM.TMVar () -> Producer a n ()
     readValues values done = fix $ \loop -> do

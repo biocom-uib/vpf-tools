@@ -1,4 +1,5 @@
 {-# language AllowAmbiguousTypes #-}
+{-# language Strict #-}
 {-# language TypeSynonymInstances #-}
 {-# language UndecidableInstances #-}
 module VPF.Frames.Dplyr.Basic where

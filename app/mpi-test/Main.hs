@@ -1,90 +1,95 @@
-{-# language DataKinds #-}
+{-# options_ghc -Wno-partial-type-signatures #-}
+{-# language BlockArguments #-}
+{-# language NumericUnderscores #-}
+{-# language PartialTypeSignatures #-}
+{-# language StaticPointers #-}
 module Main where
 
-import Data.Monoid (Alt(..))
-import Data.Text (Text)
-import Data.Semigroup.Foldable (foldMap1)
-import qualified Data.Text.IO as T
+import Control.Concurrent (threadDelay)
 
-import qualified Control.Monad.Catch as MC
+import Data.Function ((&))
+
+import Control.Carrier.Distributed.MPI
+import Control.Distributed.SClosure
+import Control.Effect.Distributed
+
 import qualified Control.Foldl as L
-import Control.Lens (folded)
-import Control.Monad.IO.Class (liftIO)
-import qualified Control.Distributed.MPI.Store as MPI
+import Control.Monad.IO.Class (MonadIO(liftIO))
 
-import qualified Data.List.NonEmpty as NE
+import qualified Pipes      as P
+import qualified Pipes.Safe as PS
 
-import qualified Pipes         as P
-import qualified Pipes.Safe    as PS
-
-import System.Exit (exitWith, ExitCode(..))
-
-import VPF.Concurrency.Async ((>||>), (>-|>))
-import qualified VPF.Concurrency.Async as Conc
-import qualified VPF.Concurrency.MPI   as Conc
-import qualified VPF.Concurrency.Pipes as Conc
+import qualified Pipes.Prelude as P
+import Pipes.Concurrent.Async ((>||>), (>-|>))
+import qualified Pipes.Concurrent.Async       as PA
+import qualified Pipes.Concurrent.Synchronize as PA
 
 import VPF.Formats
 import qualified VPF.Util.Fasta as FA
 
 
-data MyTag = MyTag
-  deriving (Eq, Ord, Show, Bounded, Enum)
-
-inputTag :: Conc.JobTagIn MyTag [FA.FastaEntry Nucleotide]
-inputTag = Conc.JobTagIn MyTag
-
-resultTag :: Conc.JobTagOut MyTag [Text]
-resultTag = Conc.JobTagOut MyTag
-
-jobTags :: Conc.JobTags MyTag MyTag [FA.FastaEntry Nucleotide] [Text]
-jobTags = Conc.JobTags (Conc.JobTagIn MyTag) (Conc.JobTagOut MyTag)
-
-
 main :: IO ()
-main = MPI.mainMPI $ do
-  let comm = MPI.commWorld
-  rank <- MPI.commRank comm
-  size <- MPI.commSize comm
-
-  case rank of
-    0 -> do
-        r <- rootMain (NE.fromList [succ rank..pred size]) comm `MC.catch` \e -> do
-               print (e :: MC.SomeException)
-               MPI.abort comm 1
-               exitWith (ExitFailure 1)
-        print r
-    _ -> workerMain MPI.rootRank rank comm
+main =
+    runMpiWorld finalizeOnError id $ do
+        liftIO . print =<< helloWorld
+        liftIO . print =<< delays
+        liftIO . print =<< fastaEntryCounter
 
 
-rootMain :: NE.NonEmpty MPI.Rank -> MPI.Comm -> IO (Maybe FA.ParseError)
-rootMain slaves comm = do
-    PS.runSafeT $ do
-        let workers :: NE.NonEmpty (Conc.Worker [FA.FastaEntry Nucleotide] [Text])
-            workers = Conc.mpiWorkers slaves jobTags comm
+helloWorld :: _ ()
+helloWorld = do
+    let hello w = putStrLn $ "Hello, from " ++ show w ++ "!"
 
-            asyncPrinter :: Conc.AsyncConsumer' [Text] (PS.SafeT IO) ()
-            asyncPrinter = Conc.asyncFoldM (L.handlesM folded $ L.mapM_ (liftIO . T.putStrLn))
+    withWorkers_ $ \w -> do
+        runInWorker_ w (static Dict) $ static hello <:*> spureWith (static Dict) w
 
-        fmap (getAlt . fst) $
-          Conc.runAsyncEffect (nslaves+1) $
-              Conc.duplicatingAsyncProducer (fmap Alt fastaProducer)
-              >||>
-              foldMap1 (\worker -> Conc.workerToPipe worker >-|> asyncPrinter)
-                       workers
+
+delays :: _ ()
+delays = do
+    nslaves <- getNumWorkers_
+
+    producer <- liftIO $ PA.stealingBufferedProducer (nslaves+1) (P.each [0..10])
+
+    let delay i = liftIO do
+          threadDelay 10_000_000
+          print i
+
+    withWorkers_ $ \w ->
+        PS.runSafeT $ P.runEffect $ producer P.>-> P.mapM_ \(i :: Int) ->
+            P.lift $ runInWorker_ w (static Dict) $ static delay <:*> spureWith (static Dict) i
+
+
+fastaEntryCounter :: _ (Either FA.ParseError ())
+fastaEntryCounter = do
+    let workFn :: SClosure ([FA.FastaEntry Nucleotide] -> IO Int)
+        workFn = static (\chunk -> threadDelay 1000000 >> return (length chunk))
+
+    nslaves <- getNumWorkers_
+
+    aproducer :: PA.AsyncProducer [_] (PS.SafeT IO) () _ (Either _ ()) <- liftIO $
+        fastaEntries
+          & PA.bufferedChunks 500
+          & PA.stealingAsyncProducer (nslaves+1)
+          & fmap \ap -> ap
+          & PA.cmapOutput (Right () <$)
+          & PA.hoist (liftIO . PS.runSafeT)
+
+    let aconsumer :: MonadIO m => PA.AsyncConsumer' Int m ()
+        aconsumer = PA.asyncFoldM (L.hoists liftIO $ L.mapM_ print)
+
+    withWorkers_ $ \w -> do
+        (res, ()) <- PA.runAsyncEffect (nslaves+1) $
+            aproducer
+            >||>
+            P.mapM (runInWorker_ w (static Dict) . smap workFn . spureWith (static Dict))
+            >-|>
+            aconsumer
+
+        runInWorker_ w (static Dict) $
+            static (\w -> putStrLn $ show w ++ " done counting")
+                <:*> spureWith (static Dict) w
+
+        return res
   where
-    nslaves :: Num a => a
-    nslaves = fromIntegral (length slaves)
-
-    fastaProducer :: P.Producer [FA.FastaEntry Nucleotide] (PS.SafeT IO) (Maybe FA.ParseError)
-    fastaProducer =
-        fmap (either Just (\() -> Nothing)) $ Conc.bufferedChunks 10 fastaEntries
-
     fastaEntries :: P.Producer (FA.FastaEntry Nucleotide) (PS.SafeT IO) (Either FA.ParseError ())
     fastaEntries = FA.fastaFileReader (Tagged "../vpf-data/All_Viral_Contigs_4filters_final.fasta")
-
-
-workerMain :: MPI.Rank -> MPI.Rank -> MPI.Comm -> IO ()
-workerMain master _ comm = do
-    PS.runSafeT $ Conc.makeProcessWorker master jobTags comm $ \chunk -> do
-        return (map FA.entryName chunk)

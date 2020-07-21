@@ -1,4 +1,5 @@
 {-# language DeriveGeneric #-}
+{-# language Strict #-}
 module VPF.Model.Class
   ( classObjs
   , loadClassification
@@ -12,8 +13,9 @@ module VPF.Model.Class
 
 import GHC.Generics (Generic)
 
-import Control.Eff
-import Control.Eff.Exception (Exc)
+import Control.Algebra (Has)
+import Control.Effect.Throw (Throw)
+import Control.Monad.IO.Class (MonadIO)
 import qualified Control.Lens as L
 import Control.Lens.Type
 
@@ -40,23 +42,32 @@ classObjs = L.iso (F.groups %~ F.cat
                      F.col @"class_obj" %~ unnestClassObj |. F.unnestFrame @"class_obj")
 
 
-loadClassification :: (Lifted IO r, Member (Exc DSV.ParseError) r)
-                   => Path (DSV "\t" ClassificationCols)
-                   -> Eff r (GroupedFrameRec (Field ModelName) ModelClassCols)
+loadClassification ::
+    ( MonadIO m
+    , Has (Throw DSV.ParseError) sig m
+    )
+    => Path (DSV "\t" ClassificationCols)
+    -> m (GroupedFrameRec (Field ModelName) ModelClassCols)
 loadClassification fp = F.setIndex @"model_name" <$> DSV.readFrame fp opts
   where
     opts = (DSV.defParserOptions '\t') { DSV.hasHeader = True }
 
 
-loadClassObjs :: (Lifted IO r, Member (Exc DSV.ParseError) r)
-                   => Path (DSV "\t" ClassificationCols)
-                   -> Eff r (GroupedFrameRec (Field ModelName) '[ClassObj])
+loadClassObjs ::
+    ( MonadIO m
+    , Has (Throw DSV.ParseError) sig m
+    )
+    => Path (DSV "\t" ClassificationCols)
+    -> m (GroupedFrameRec (Field ModelName) '[ClassObj])
 loadClassObjs = fmap (L.view classObjs) . loadClassification
 
 
-loadScoreSamples :: (Lifted IO r, Member (Exc DSV.ParseError) r)
-                 => Path (DSV "\t" '[M.VirusHitScore])
-                 -> Eff r (Vector (Field M.VirusHitScore))
+loadScoreSamples ::
+    ( MonadIO m
+    , Has (Throw DSV.ParseError) sig m
+    )
+    => Path (DSV "\t" '[M.VirusHitScore])
+    -> m (Vector (Field M.VirusHitScore))
 loadScoreSamples fp = do
     df <- DSV.readFrame fp opts
     return $ F.toRowsVec (fmap unRec df)
@@ -84,9 +95,13 @@ data ClassificationParams = ClassificationParams
     , scoreSamples :: Vector (Field M.VirusHitScore)
     }
 
-loadClassificationParams :: (Lifted IO r, Member (Exc DSV.ParseError) r)
-                         => ClassificationFiles
-                         -> Eff r ClassificationParams
+
+loadClassificationParams ::
+    ( MonadIO m
+    , Has (Throw DSV.ParseError) sig m
+    )
+    => ClassificationFiles
+    -> m ClassificationParams
 loadClassificationParams paths = do
     cls <- loadClassification (modelClassesFile paths)
     scores <- loadScoreSamples (scoreSamplesFile paths)

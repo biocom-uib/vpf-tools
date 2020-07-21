@@ -29,14 +29,16 @@ dependencies:
 - containers
 - directory
 - exceptions
-- extensible-effects
 - filepath
 - foldl
+- fused-effects
+- kan-extensions
 - lens
 - lifted-async
 - memory
 - mmorph
 - monad-control
+- mtl
 - optparse-applicative
 - pipes
 - pipes-concurrency
@@ -44,12 +46,15 @@ dependencies:
 - pipes-parse
 - pipes-safe
 - primitive
+- profunctors
+- reflection
 - regex-base
 - regex-pcre-builtin
 - semigroupoids
 - stm
 - store
 - tagged
+- template-haskell
 - temporary
 - text
 - transformers
@@ -100,7 +105,8 @@ library:
   when:
   - condition: flag(mpi)
     exposed-modules:
-    - VPF.Concurrency.MPI
+    - Control.Carrier.Distributed.MPI
+    - Control.Distributed.MPI.Streaming
 
 executables:
   vpf-class:
@@ -144,5 +150,5 @@ tests:
 flags:
   mpi:
     description: Enable MPI support (OpenMPI with mpi-hs)
-    manual: true
-    default: false
+    manual: false
+    default: true

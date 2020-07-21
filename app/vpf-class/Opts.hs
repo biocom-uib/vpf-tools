@@ -1,6 +1,5 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# language ApplicativeDo #-}
-{-# language CPP #-}
 {-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
 {-# language StrictData #-}
@@ -20,10 +19,6 @@ import qualified Data.Yaml.Aeson as Y
 import qualified System.FilePath as FP
 
 import Options.Applicative
-
-#ifdef VPF_ENABLE_MPI
-import qualified Control.Distributed.MPI.Store  as MPI
-#endif
 
 import VPF.Formats
 import VPF.Frames.Types
@@ -83,15 +78,9 @@ data Config = Config
     }
 
 
-#ifdef VPF_ENABLE_MPI
-parseArgs :: [MPI.Rank] -> IO Config
-parseArgs slaves = do
-    parser <- configParserIO slaves
-#else
 parseArgs :: IO Config
 parseArgs = do
     parser <- configParserIO
-#endif
     execParser (parserInfo parser)
   where
     parserInfo :: Parser a -> ParserInfo a
@@ -102,22 +91,12 @@ parseArgs = do
             <> header "vpf-class: VPF-based virus sequence classifier"
 
 
-#ifdef VPF_ENABLE_MPI
-configParserIO :: [MPI.Rank] -> IO (Parser Config)
-configParserIO = fmap configParser . defaultConcurrencyOpts
-#else
 configParserIO :: IO (Parser Config)
 configParserIO = fmap configParser defaultConcurrencyOpts
-#endif
 
 
-#ifdef VPF_ENABLE_MPI
-defaultConcurrencyOpts :: [MPI.Rank] -> IO ConcurrencyOpts
-defaultConcurrencyOpts _slaves = do
-#else
 defaultConcurrencyOpts :: IO ConcurrencyOpts
 defaultConcurrencyOpts = do
-#endif
     numWorkers <- getNumCapabilities
     let fastaChunkSize = 1
 
@@ -147,7 +126,7 @@ configParser defConcOpts = do
         <> metavar "HMMER"
         <> hidden
         <> showDefault
-        <> help "Prefix to the HMMER installation (e.g. HMMER/bin/hmmsearch should exist)"
+        <> help "Prefix to the HMMER installation (e.g. HMMER/bin/hmmsearch must exist)"
 
     evalueThreshold <- option auto $
         long "evalue"
@@ -168,7 +147,7 @@ configParser defConcOpts = do
     dataFilesIndexFile <- strOption $
         long "data-index"
         <> metavar "DATA_INDEX"
-        <> help ".yaml file containing references to all required data files"
+        <> help "Yaml file containing references to all required data files"
 
     genomesFile <- strOption $
         long "input-seqs"
@@ -188,7 +167,7 @@ configParser defConcOpts = do
         long "output-dir"
         <> short 'o'
         <> metavar "OUTPUT_DIR"
-        <> help "Output directory (e.g. -c family=fam.tsv -o output would produce output/family.tsv)"
+        <> help "Output directory"
 
     concurrencyOpts <- concOpts
 

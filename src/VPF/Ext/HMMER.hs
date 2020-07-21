@@ -1,4 +1,5 @@
 {-# language DeriveGeneric #-}
+{-# language Strict #-}
 module VPF.Ext.HMMER where
 
 import GHC.Generics (Generic)

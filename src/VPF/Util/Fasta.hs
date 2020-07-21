@@ -1,7 +1,7 @@
 {-# language AllowAmbiguousTypes #-}
 {-# language DeriveGeneric #-}
 {-# language OverloadedStrings #-}
-{-# language StrictData #-}
+{-# language Strict #-}
 module VPF.Util.Fasta
   ( FastaEntry
   , ParseError(..)

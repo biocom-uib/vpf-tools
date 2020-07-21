@@ -1,23 +1,26 @@
 {-# language BlockArguments #-}
 {-# language CPP #-}
+{-# language GeneralizedNewtypeDeriving #-}
 {-# language MonoLocalBinds #-}
 {-# language OverloadedStrings #-}
+{-# language StaticPointers #-}
 module Main where
 
-import Control.Concurrent (getNumCapabilities)
-import Control.Eff (Eff, Member, Lift, Lifted, lift, runLift)
-import Control.Eff.Reader.Strict (Reader, runReader)
-import Control.Eff.Exception (Exc, runError, Fail, die, runFail)
+import Control.Algebra (Has)
+import Control.Carrier.Error.Excepts (Throw, ExceptsT, handleErrorCase, runLastExceptT, throwError)
+
 import Control.Monad (forM_)
-import qualified Control.Monad.Catch as MC
 import Control.Monad.IO.Class (MonadIO(liftIO))
-import Control.Monad.Trans.Control (MonadBaseControl, RunInBase, liftBaseWith)
+import Control.Monad.Morph (hoist)
+import Control.Monad.Trans.Control (MonadBaseControl)
+import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 
 import qualified Data.ByteString as BS
+import Data.Constraint (Dict(..))
 import Data.Foldable (toList)
 import Data.Maybe (fromMaybe, listToMaybe)
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Yaml.Aeson as Y
+import Data.Store (Store)
 import Data.Text (Text)
 import qualified Data.Text.Encoding         as T
 import qualified Text.Regex.Base            as PCRE
@@ -27,12 +30,6 @@ import qualified System.Directory as D
 import qualified System.IO   as IO
 import System.Exit (exitWith, ExitCode(..))
 
-import qualified Pipes         as P
-import qualified Pipes.Prelude as P
-
-import qualified VPF.Concurrency.Async as Conc
-
-import VPF.Eff.Cmd (Cmd)
 import qualified VPF.Ext.HMMER        as HMM
 import qualified VPF.Ext.HMMER.Search as HMM
 import qualified VPF.Ext.Prodigal     as Pr
@@ -49,193 +46,113 @@ import qualified Opts
 
 
 #ifdef VPF_ENABLE_MPI
-import qualified Control.Distributed.MPI.Store as MPI
-import Control.Monad.Trans.Control (StM)
-
-import Pipes.Safe (runSafeT)
-
-import qualified VPF.Concurrency.MPI as Conc
+import Control.Carrier.Distributed.MPI
+#else
+import Control.Carrier.Distributed.SingleProcess
 #endif
 
 
 type Config = Opts.Config
 
-type SearchHitsM = Eff
-   '[ Exc FA.ParseError
-    , Cmd HMM.HMMSearch
-    , Exc HMM.HMMSearchError
-    , Cmd Pr.Prodigal
-    , Exc Pr.ProdigalError
-    , Exc DSV.ParseError
-    , Exc VC.CheckpointLoadError
-    , Fail
-    , Lift IO
-    ]
 
-type ProcessHitsM = Eff
-   '[ Exc FA.ParseError
-    , Reader VC.ModelConfig
-    , Exc DSV.ParseError
-    , Exc VC.CheckpointLoadError
-    , Fail
-    , Lift IO
-    ]
+newtype DieMsg = DieMsg String
+    deriving Store
+
+
+type Die = Throw DieMsg
 
 
 putErrLn :: MonadIO m => String -> m ()
 putErrLn = liftIO . IO.hPutStrLn IO.stderr
 
 
-#ifndef VPF_ENABLE_MPI
+dieWith :: Has Die sig m => String -> m a
+dieWith = throwError . DieMsg
 
-type Ranks = ()
+
+type family Trans ts m where
+    Trans '[]       m = m
+    Trans (t ': ts) m = t (Trans ts m)
+
+
+type Stack =
+    '[ Pr.ProdigalT
+     , HMM.HMMSearchT
+     , ReaderT VC.WorkDir
+     , ExceptsT '[FA.ParseError, DSV.ParseError, VC.CheckpointLoadError, DieMsg]
+     ]
+
+type M = Trans Stack IO
+
 
 main :: IO ()
 main = do
     cfg <- Opts.parseArgs
 
-    ec <- masterClassify cfg () `MC.catch` \(e :: MC.SomeException) -> do
-        putErrLn "exception was caught in master task"
-        MC.throwM e
+    ec <-
+        dyingWithExitCode 1 $
+        withCfgWorkDir cfg $
+        hoist (handleCheckpointLoadError . handleDSVParseErrors . handleFastaParseErrors) $
+        withHMMSearchCfg cfg $
+        withProdigalCfg cfg $
+            mainClassify cfg
+
 
     exitWith ec
 
-#else
 
-type Ranks = [MPI.Rank]
-
-tagsSearchHits :: Conc.JobTags Int Int
-                [FA.FastaEntry Nucleotide]
-                (StM SearchHitsM [ ( VC.GenomeChunkKey
-                                   , Path (FASTA Aminoacid)
-                                   , Path (HMMERTable HMM.ProtSearchHitCols)
-                                   )
-                                 ])
-tagsSearchHits = Conc.JobTags (Conc.JobTagIn 0) (Conc.JobTagOut 0)
-
-
-mpiAbortWith :: Int -> String -> IO a
-mpiAbortWith ec msg = do
-    IO.hFlush IO.stdout
-    IO.hPutStrLn IO.stderr msg
-    IO.hFlush IO.stderr
-    MPI.abort MPI.commWorld ec
-    exitWith (ExitFailure ec)
-
-
-main :: IO ()
-main = MPI.mainMPI $ do
-    let comm = MPI.commWorld
-    rank <- MPI.commRank comm
-    size <- MPI.commSize comm
-
-    let slaves = [succ MPI.rootRank .. pred size]
-    cfg <- Opts.parseArgs slaves
-
-    case rank of
-      0 -> do
-          ec <- masterClassify cfg slaves `MC.catch` \(e :: MC.SomeException) -> do
-                      putErrLn "exception was caught in master task"
-                      mpiAbortWith 1 (show e)
-
-          case ec of
-            ExitSuccess   -> return ()
-            ExitFailure i -> mpiAbortWith i "errors were produced in master task, aborting"
-
-      r -> do
-          ec <- slaveClassify cfg r `MC.catch` \(e :: MC.SomeException) -> do
-                      putErrLn "exception was caught in slave task"
-                      mpiAbortWith 2 (show e)
-
-          case ec of
-            ExitSuccess   -> return ()
-            ExitFailure i -> mpiAbortWith i "errors were produced in slave task, aborting"
-
-#endif
-
-
-masterClassify :: Config -> Ranks -> IO ExitCode
-masterClassify cfg slaves = runLift $ failingWithExitCode 3 $ do
+mainClassify :: Config -> M ()
+mainClassify cfg = do
     dataFilesIndex <- loadDataFilesIndex cfg
 
     let genomesFile = Opts.genomesFile cfg
         outputDir = Opts.outputDir cfg
 
         classFiles = Opts.classificationFiles dataFilesIndex
-        vpfsFile    = Opts.vpfsFile dataFilesIndex
+        vpfsFile = Opts.vpfsFile dataFilesIndex
 
-    outputs <- withCfgWorkDir cfg $ \workDir ->
-        handleCheckpointLoadError $
-          VC.runClassification workDir genomesFile $ \resume -> \case
-              VC.SearchHitsStep run -> do
-                  putErrLn "searching hits"
-
-                  checkpoint <-
-                      handleDSVParseErrors $
-                      withProdigalCfg cfg $
-                      withHMMSearchCfg cfg $
-                      handleFastaParseErrors $ do
-                          concOpts <- newSearchHitsConcOpts cfg (Just slaves) workDir vpfsFile
-                          run genomesFile concOpts
-
-                  resume checkpoint
-
-              VC.ProcessHitsStep run -> do
-                  putErrLn "processing hits"
-                  modelCfg <- newModelCfg cfg
-
-                  checkpoint <-
-                      handleDSVParseErrors $
-                      runReader modelCfg $
-                      handleFastaParseErrors $
-                          run =<< newProcessHitsConcOpts cfg workDir
-
-                  resume checkpoint
-
-              VC.PredictMembershipStep run -> do
-                  putErrLn "predicting memberships"
-
-                  let concOpts = VC.PredictMembershipConcurrencyOpts {
-                          VC.predictingNumWorkers = fromIntegral $
-                              Opts.numWorkers (Opts.concurrencyOpts cfg)
-                      }
-
-                  handleDSVParseErrors $
-                      run classFiles outputDir concOpts
-
-    forM_ outputs $ \(Tagged output) ->
-        putErrLn $ "written " ++ output
-
+        concurrencyOpts = Opts.concurrencyOpts cfg
 
 #ifdef VPF_ENABLE_MPI
-
-slaveClassify :: Config -> MPI.Rank -> IO ExitCode
-slaveClassify cfg _ = runLift $ failingWithExitCode 4 $ do
-    dataFilesIndex <- loadDataFilesIndex cfg
-
-    let vpfsFile = Opts.vpfsFile dataFilesIndex
-
-    withCfgWorkDir cfg $ \workDir ->
-        handleCheckpointLoadError $
-        handleDSVParseErrors $
-        withProdigalCfg cfg $
-        withHMMSearchCfg cfg $
-        handleFastaParseErrors $
-            worker workDir vpfsFile
-  where
-    worker :: Path Directory -> Path HMMERModel -> SearchHitsM ()
-    worker workDir vpfsFile = do
-      concOpts <- newSearchHitsConcOpts cfg Nothing workDir vpfsFile
-
-      liftBaseWith $ \runInIO ->
-          runSafeT $ Conc.makeProcessWorker MPI.rootRank tagsSearchHits MPI.commWorld $ \chunk ->
-              liftIO $ runInIO $
-                  VC.asyncSearchHits (fmap Right $ P.each chunk) concOpts
-
+    runMpiWorld finalizeOnError id $ do
+#else
+    runSingleProcessT $ do
 #endif
+        outputs <- VC.runClassification genomesFile $ \resume -> \case
+            VC.SearchHitsStep run -> do
+                putErrLn "searching hits"
+
+                let concOpts = VC.SearchHitsConcurrencyOpts
+                      { VC.numSearchingWorkers = Opts.numWorkers concurrencyOpts
+                      , VC.fastaChunkSize      = Opts.fastaChunkSize concurrencyOpts
+                      }
+
+                resume =<< run (static Dict) concOpts vpfsFile genomesFile
+
+            VC.ProcessHitsStep run -> do
+                putErrLn "processing hits"
+                modelCfg <- newModelCfg cfg
+
+                let concOpts = VC.ProcessHitsConcurrencyOpts
+                      { VC.numProcessingHitsWorkers = Opts.numWorkers concurrencyOpts
+                      }
+
+                resume =<< runReaderT (run concOpts) modelCfg
+
+            VC.PredictMembershipStep run -> do
+                putErrLn "predicting memberships"
+
+                let concOpts = VC.PredictMembershipConcurrencyOpts
+                      { VC.numPredictingWorkers = Opts.numWorkers concurrencyOpts
+                      }
+
+                run concOpts classFiles outputDir
+
+        forM_ outputs $ \(Tagged output) ->
+            putErrLn $ "written " ++ output
 
 
-newModelCfg :: (Lifted IO r, Member Fail r) => Config -> Eff r VC.ModelConfig
+newModelCfg :: (MonadIO m, Has Die sig m) => Config -> m VC.ModelConfig
 newModelCfg cfg = do
     virusNameExtractor <- compileRegex (Opts.virusNameRegex cfg)
 
@@ -248,15 +165,14 @@ newModelCfg cfg = do
         }
 
 
-compileRegex :: (Lifted IO r, Member Fail r) => Text -> Eff r (Text -> Maybe Text)
+compileRegex :: (MonadIO m, Has Die sig m) => Text -> m (Text -> Maybe Text)
 compileRegex src = do
-    erx <- lift $ PCRE.compile (PCRE.compUTF8 + PCRE.compAnchored)
-                               (PCRE.execAnchored + PCRE.execNoUTF8Check)
-                               (T.encodeUtf8 src)
+    erx <- liftIO $ PCRE.compile (PCRE.compUTF8 + PCRE.compAnchored)
+                                 (PCRE.execAnchored + PCRE.execNoUTF8Check)
+                                 (T.encodeUtf8 src)
     case erx of
-      Left (_, err) -> do
-          putErrLn $ "Could not compile the regex " ++ show src ++ ": " ++ err
-          die
+      Left (_, err) ->
+          dieWith $ "Could not compile the regex " ++ show src ++ ": " ++ err
 
       Right rx -> return $ \text -> do
           let btext = T.encodeUtf8 text
@@ -266,198 +182,97 @@ compileRegex src = do
           return (T.decodeUtf8 (BS.drop off (BS.take len btext)))
 
 
-newSearchHitsConcOpts :: Config
-                      -> Maybe Ranks
-                      -> Path Directory
-                      -> Path HMMERModel
-                      -> SearchHitsM (VC.SearchHitsConcurrencyOpts SearchHitsM)
-newSearchHitsConcOpts cfg slaves workDir vpfsFile =
-    liftBaseWith $ \runInIO -> return $
-#ifndef VPF_ENABLE_MPI
-        case slaves of
-          Nothing  -> multithreadedMode runInIO
-          Just ()  -> multithreadedMode runInIO
-#else
-        case slaves of
-          Nothing  -> multithreadedMode runInIO
-          Just []  -> multithreadedMode runInIO
-          Just slv -> mpiMode runInIO (NE.fromList slv)
-#endif
-  where
-    nworkers :: Int
-    nworkers = max 1 $ Opts.numWorkers (Opts.concurrencyOpts cfg)
-
-#ifdef VPF_ENABLE_MPI
-    mpiMode :: RunInBase SearchHitsM IO -> NE.NonEmpty MPI.Rank -> VC.SearchHitsConcurrencyOpts SearchHitsM
-    mpiMode _ slv = VC.SearchHitsConcurrencyOpts
-        { VC.fastaChunkSize   = Opts.fastaChunkSize (Opts.concurrencyOpts cfg) * nworkers
-        , VC.searchingWorkers = pipelineWorkers
-        }
-      where
-        pipelineWorkers :: NE.NonEmpty (VC.SearchHitsPipeline SearchHitsM)
-        pipelineWorkers =
-            fmap Conc.workerToPipe $ Conc.mpiWorkers slv tagsSearchHits MPI.commWorld
-#endif
-
-    multithreadedMode :: RunInBase SearchHitsM IO -> VC.SearchHitsConcurrencyOpts SearchHitsM
-    multithreadedMode runInIO = VC.SearchHitsConcurrencyOpts
-        { VC.fastaChunkSize   = Opts.fastaChunkSize (Opts.concurrencyOpts cfg)
-        , VC.searchingWorkers = pipelineWorkers
-        }
-      where
-        pipelineWorkers :: NE.NonEmpty (VC.SearchHitsPipeline SearchHitsM)
-        pipelineWorkers =
-            let
-              workerBody chunk = liftIO $ runInIO $ do
-                  hitsFiles <- VC.searchGenomeHits workDir vpfsFile (P.each chunk)
-                  return [hitsFiles]
-            in
-              Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
-
-
-newProcessHitsConcOpts :: Config -> Path Directory -> ProcessHitsM (VC.ProcessHitsConcurrencyOpts ProcessHitsM)
-newProcessHitsConcOpts _ workDir = do
-    nworkers <- liftIO $ getNumCapabilities
-
-    liftBaseWith $ \runInIO -> do
-        let workerBody (key, protsFile, hitsFile) = liftIO $ runInIO $ do
-              aggHitsFile <- VC.processHits workDir key protsFile hitsFile
-              return (key, aggHitsFile)
-
-
-        return $ VC.ProcessHitsConcurrencyOpts {
-            VC.processingHitsWorkers = Conc.replicate1 (fromIntegral nworkers) (P.mapM workerBody)
-        }
-
-
-withCfgWorkDir :: (MonadIO m, MonadBaseControl IO m)
-               => Config
-               -> (Path Directory -> m a)
-               -> m a
+withCfgWorkDir :: (MonadIO m, MonadBaseControl IO m) => Config -> ReaderT VC.WorkDir m a -> m a
 withCfgWorkDir cfg fm =
     case Opts.workDir cfg of
       Nothing ->
-          FS.withTmpDir "." "vpf-work" fm
+          FS.withTmpDir "." "vpf-work" (runReaderT fm . VC.WorkDir)
       Just wd -> do
           liftIO $ D.createDirectoryIfMissing True (untag wd)
-          fm wd
+          runReaderT fm (VC.WorkDir wd)
 
 
-failingWithExitCode :: Int -> Eff (Fail ': r) () -> Eff r ExitCode
-failingWithExitCode ec m = do
-    r <- runFail m
+dyingWithExitCode :: MonadIO m => Int -> ExceptsT '[DieMsg] m () -> m ExitCode
+dyingWithExitCode ec m = do
+    r <- runLastExceptT m
 
     case r of
-      Just () -> return ExitSuccess
-      Nothing -> return (ExitFailure ec)
+      Right ()        -> return ExitSuccess
+      Left (DieMsg e) -> do
+          putErrLn e
+          return (ExitFailure ec)
 
 
-loadDataFilesIndex :: (Lifted IO r, Member Fail r) => Config -> Eff r Opts.DataFilesIndex
+loadDataFilesIndex :: (MonadIO m, Has Die sig m) => Config -> m Opts.DataFilesIndex
 loadDataFilesIndex cfg = do
     r <- liftIO $ Opts.loadDataFilesIndex (Opts.dataFilesIndexFile cfg)
 
     case r of
-      Right idx -> return idx
-      Left err -> do
-          putErrLn "error loading data file index:"
+      Right idx ->
+          return idx
+      Left err ->
           let indentedPretty = unlines . map ('\t':) . lines . Y.prettyPrintParseException
-          putErrLn (indentedPretty err)
-          die
+          in  dieWith $ "error loading data file index:\n" ++ indentedPretty err
 
 
-withProdigalCfg :: (Lifted IO r, Member Fail r)
-               => Config
-               -> Eff (Cmd Pr.Prodigal ': Exc Pr.ProdigalError ': r) a
-               -> Eff r a
+withProdigalCfg :: (MonadIO m, Has Die sig m) => Config -> Pr.ProdigalT m a -> m a
 withProdigalCfg cfg m = do
-    handleProdigalErrors $ do
-        prodigalCfg <- Pr.prodigalConfig
-                           (Opts.prodigalPath cfg)
-                           ["-p", Opts.prodigalProcedure cfg]
+    res <- Pr.runProdigalT (Opts.prodigalPath cfg) ["-p", Opts.prodigalProcedure cfg] m
 
-        Pr.execProdigal prodigalCfg m
-  where
-    handleProdigalErrors :: (Lifted IO r, Member Fail r)
-                         => Eff (Exc Pr.ProdigalError ': r) a -> Eff r a
-    handleProdigalErrors m = do
-        res <- runError m
-
-        case res of
-          Right a -> return a
-          Left e -> do
-            putErrLn $ "prodigal error: " ++ show e
-            die
+    case res of
+      Right a -> return a
+      Left e  -> dieWith $ "prodigal error: " ++ show e
 
 
-withHMMSearchCfg :: (Lifted IO r, Member Fail r)
-                 => Config
-                 -> Eff (Cmd HMM.HMMSearch ': Exc HMM.HMMSearchError ': r) a
-                 -> Eff r a
+withHMMSearchCfg :: (MonadIO m, Has Die sig m) => Config -> HMM.HMMSearchT m a -> m a
 withHMMSearchCfg cfg m = do
     let hmmerConfig = HMM.HMMERConfig (Opts.hmmerPrefix cfg)
 
-    handleHMMSearchErrors $ do
-        hmmsearchCfg <- HMM.hmmsearchConfig hmmerConfig []
-        HMM.execHMMSearch hmmsearchCfg m
-  where
-    handleHMMSearchErrors :: (Lifted IO r, Member Fail r)
-                          => Eff (Exc HMM.HMMSearchError ': r) a -> Eff r a
-    handleHMMSearchErrors m = do
-        res <- runError m
-
-        case res of
-          Right a -> return a
-          Left e -> do
-              putErrLn $ "hmmsearch error: " ++ show e
-              die
-
-
-handleCheckpointLoadError :: (Lifted IO r, Member Fail r)
-                          => Eff (Exc VC.CheckpointLoadError ': r) a
-                          -> Eff r a
-handleCheckpointLoadError m = do
-    res <- runError m
+    res <- HMM.runHMMSearchT hmmerConfig [] m
 
     case res of
       Right a -> return a
-
-      Left (VC.CheckpointJSONLoadError e) -> do
-          putErrLn $ "Error loading checkpoint: " ++ e
-          putErrLn "  try deleting the checkpoint file and restarting from scratch"
-          die
+      Left e  -> dieWith $ "hmmsearch error: " ++ show e
 
 
-handleFastaParseErrors :: (Lifted IO r, Member Fail r)
-                       => Eff (Exc FA.ParseError ': r) a
-                       -> Eff r a
-handleFastaParseErrors m = do
-    res <- runError m
-
-    case res of
-      Right a -> return a
-
-      Left (FA.ExpectedNameLine found) -> do
-          putErrLn $ "FASTA parsing error: expected name line but found " ++ show found
-          die
-
-      Left (FA.ExpectedSequenceLine []) -> do
-          putErrLn $ "FASTA parsing error: expected sequence but found EOF"
-          die
-
-      Left (FA.ExpectedSequenceLine (l:_)) -> do
-          putErrLn $ "FASTA parsing error: expected sequence but found " ++ show l
-          die
+handleCheckpointLoadError ::
+    ( Monad m
+    , Has Die sig (ExceptsT es m)
+    )
+    => ExceptsT (VC.CheckpointLoadError ': es) m a
+    -> ExceptsT es m a
+handleCheckpointLoadError = handleErrorCase $ \case
+    VC.CheckpointJSONLoadError e ->
+        dieWith $
+            "Error loading checkpoint: " ++ e ++ "\n" ++
+            "  try deleting the checkpoint file and restarting from scratch"
 
 
-handleDSVParseErrors :: (Lifted IO r, Member Fail r)
-                     => Eff (Exc DSV.ParseError ': r) a
-                     -> Eff r a
-handleDSVParseErrors m = do
-    res <- runError m
+handleFastaParseErrors ::
+    ( Monad m
+    , Has Die sig (ExceptsT es m)
+    )
+    => ExceptsT (FA.ParseError ': es) m a
+    -> ExceptsT es m a
+handleFastaParseErrors = handleErrorCase $ \case
+    FA.ExpectedNameLine found ->
+        dieWith $ "FASTA parsing error: expected name line but found " ++ show found
 
-    case res of
-      Right a -> return a
-      Left (DSV.ParseError ctx row) -> do
-          putErrLn $ "DSV parse error in " ++ show ctx ++ ": "
-                       ++ "could not parse row " ++ show row
-          die
+    FA.ExpectedSequenceLine [] ->
+        dieWith $ "FASTA parsing error: expected sequence but found EOF"
+
+    FA.ExpectedSequenceLine (l:_) ->
+        dieWith $ "FASTA parsing error: expected sequence but found " ++ show l
+
+
+handleDSVParseErrors ::
+    ( Monad m
+    , Has Die sig (ExceptsT es m)
+    )
+    => ExceptsT (DSV.ParseError ': es) m a
+    -> ExceptsT es m a
+handleDSVParseErrors = handleErrorCase $ \case
+    DSV.ParseError ctx row -> do
+        dieWith $
+            "DSV parse error in " ++ show ctx ++ ": " ++
+            "could not parse row " ++ show row

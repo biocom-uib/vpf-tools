@@ -1,4 +1,5 @@
 {-# language OverloadedStrings #-}
+{-# language Strict #-}
 module VPF.Ext.HMMER.TableFormat where
 
 import Data.Coerce (coerce)
