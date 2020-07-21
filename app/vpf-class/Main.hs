@@ -9,7 +9,6 @@ module Main where
 import Control.Algebra (Has)
 import Control.Carrier.Error.Excepts (Throw, ExceptsT, handleErrorCase, runLastExceptT, throwError)
 
-import Control.Monad (forM_)
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Control.Monad.Morph (hoist)
 import Control.Monad.Trans.Control (MonadBaseControl)
@@ -118,7 +117,7 @@ mainClassify cfg = do
 #else
     runSingleProcessT $ do
 #endif
-        outputs <- VC.runClassification genomesFile $ \resume -> \case
+        _outputs <- VC.runClassification genomesFile $ \resume -> \case
             VC.SearchHitsStep run -> do
                 putErrLn "searching hits"
 
@@ -148,8 +147,7 @@ mainClassify cfg = do
 
                 run concOpts classFiles outputDir
 
-        forM_ outputs $ \(Tagged output) ->
-            putErrLn $ "written " ++ output
+        return ()
 
 
 newModelCfg :: (MonadIO m, Has Die sig m) => Config -> m VC.ModelConfig
@@ -255,14 +253,20 @@ handleFastaParseErrors ::
     => ExceptsT (FA.ParseError ': es) m a
     -> ExceptsT es m a
 handleFastaParseErrors = handleErrorCase $ \case
-    FA.ExpectedNameLine found ->
-        dieWith $ "FASTA parsing error: expected name line but found " ++ show found
+    FA.ExpectedNameLine fp linenum found ->
+        dieWith $
+            fp ++ ":" ++ show linenum ++
+                ": FASTA parsing error: expected name line but found " ++ show found
 
-    FA.ExpectedSequenceLine [] ->
-        dieWith $ "FASTA parsing error: expected sequence but found EOF"
+    FA.ExpectedSequenceLine fp linenum [] ->
+        dieWith $
+            fp ++ ":" ++ show linenum ++
+                ": FASTA parsing error: expected sequence but found EOF"
 
-    FA.ExpectedSequenceLine (l:_) ->
-        dieWith $ "FASTA parsing error: expected sequence but found " ++ show l
+    FA.ExpectedSequenceLine fp linenum (l:_) ->
+        dieWith $
+            fp ++ ":" ++ show linenum ++
+                ": FASTA parsing error: expected sequence but found " ++ show l
 
 
 handleDSVParseErrors ::

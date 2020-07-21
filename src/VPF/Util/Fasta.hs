@@ -41,8 +41,8 @@ data FastaEntry acid = FastaEntry Text [Text]
 instance Store (FastaEntry acid)
 
 data ParseError
-    = ExpectedNameLine     Text
-    | ExpectedSequenceLine [Text]
+    = ExpectedNameLine     FilePath Int Text
+    | ExpectedSequenceLine FilePath Int [Text]
   deriving (Show, Generic)
 
 instance Store ParseError
@@ -82,7 +82,7 @@ entrySeqNumBases (FastaEntry _ seq) = sum (map (seqNumBases @acid) seq)
 fastaFileReader :: forall acid m. P.MonadSafe m
                 => Path (FASTA acid)
                 -> Producer (FastaEntry acid) m (Either ParseError ())
-fastaFileReader p = parsedFastaEntries (fileReader (untag p))
+fastaFileReader p = parsedFastaEntries p (fileReader (untag p))
 
 
 fastaFileWriter :: P.MonadSafe m => Path (FASTA acid) -> Consumer (FastaEntry acid) m ()
@@ -93,21 +93,32 @@ fastaLines :: Monad m => Pipe (FastaEntry acid) Text m r
 fastaLines = P.map (\(FastaEntry name seq) -> name : seq) >-> P.concat
 
 
-parsedFastaEntries :: Monad m
-                   => Producer Text m r
-                   -> Producer (FastaEntry acid) m (Either ParseError r)
-parsedFastaEntries producer = do
-    (r, p') <- P.parsed fastaParser $ producer >-> P.filter (not . T.null)
+parsedFastaEntries :: forall m acid r.
+    Monad m
+    => Path (FASTA acid)
+    -> Producer Text m r
+    -> Producer (FastaEntry acid) m (Either ParseError r)
+parsedFastaEntries fp producer = do
+    let linenums :: Producer Int m r
+        linenums = P.unfoldr (\i -> return (Right (i, i+1))) 1
+
+        enumerated :: Producer (Int, Text) m r
+        enumerated = P.zip linenums producer >-> P.filter (not . T.null . snd)
+
+    (r, p') <- P.parsed (fastaParser fp) enumerated
 
     case r of
       Nothing -> lift $ fmap Right $ runEffect (p' >-> P.drain)
       Just e  -> return (Left e)
 
 
-fastaParser :: Monad m => P.Parser Text m (Either (Maybe ParseError) (FastaEntry acid))
-fastaParser = runExceptT $ do
-    nameLine <- parseNameLine
-    sequenceLines <- parseSequenceLines
+fastaParser ::
+    Monad m
+    => Path (FASTA acid)
+    -> P.Parser (Int, Text) m (Either (Maybe ParseError) (FastaEntry acid))
+fastaParser fp = runExceptT $ do
+    (linenum, nameLine) <- parseNameLine
+    sequenceLines <- parseSequenceLines (linenum+1)
 
     return (FastaEntry nameLine sequenceLines)
 
@@ -118,16 +129,16 @@ fastaParser = runExceptT $ do
       case mline of
         Nothing -> throwE Nothing -- finished parsing
 
-        Just line
-          | isNameLine line -> return line
-          | otherwise       -> throwE (Just (ExpectedNameLine line))
+        Just (linenum, line)
+          | isNameLine line -> return (linenum, line)
+          | otherwise       -> throwE (Just (ExpectedNameLine (untag fp) linenum line))
 
-    parseSequenceLines = do
-      sequenceLines <- lift $ zoom (P.span isSequenceLine) P.drawAll
+    parseSequenceLines linenum = do
+      sequenceLines <- lift $ zoom (P.span (isSequenceLine . snd)) P.drawAll
 
       case sequenceLines of
-        [] -> throwE (Just (ExpectedSequenceLine []))
-        ls -> return ls
+        [] -> throwE (Just (ExpectedSequenceLine (untag fp) linenum []))
+        ls -> return (map snd ls)
 
     isNameLine = T.isPrefixOf ">"
     isSequenceLine = not . isNameLine
