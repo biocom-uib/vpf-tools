@@ -38,6 +38,11 @@ rows = L.mapped
 {-# inline rows #-}
 
 
+foldedRows :: Fold (Frame row) row
+foldedRows = L.folded
+{-# inline foldedRows #-}
+
+
 -- generalized 'rows', but slower
 traverseRows :: Traversal (Frame row) (Frame row') row row'
 traverseRows = rowsVec . traverse

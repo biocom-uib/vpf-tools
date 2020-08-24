@@ -14,6 +14,7 @@ module Control.Carrier.Error.Excepts
   , runPureExceptsT
   , runLastExceptT
   , handleErrorCase
+  , ThrowErrors, throwErrors
   ) where
 
 import GHC.Generics (Generic)
@@ -84,6 +85,18 @@ runLastExceptT (ExceptsT m) = MT.runExceptT (MT.withExceptT single m)
     single :: Errors '[e] -> e
     single (Error e)    = e
     single (InjError e) = case e of
+
+
+class Algebra sig m => ThrowErrors es sig m | m -> sig where
+    throwErrors :: Errors es -> m a
+
+
+instance Algebra sig m => ThrowErrors '[] sig m where
+    throwErrors e = case e of
+
+instance (Has (Throw e) sig m, ThrowErrors es sig m) => ThrowErrors (e ': es) sig m where
+    throwErrors (Error e)    = throwError e
+    throwErrors (InjError e) = throwErrors e
 
 
 handleErrorCase :: forall e es m a. Monad m => (e -> ExceptsT es m a) -> ExceptsT (e ': es) m a -> ExceptsT es m a

@@ -11,13 +11,17 @@ module Pipes.Concurrent.Async
   , AsyncConsumer
   , AsyncConsumer'
   , cmapOutput
+  , defaultOutput
   , cmapInput
+  , defaultInput
   -- , hoistPipe
   , hoist
-  , mapPipeM
+  , mapResultM
   , duplicatingAsyncProducer
+  , duplicatingAsyncConsumer
   , asyncProducer
   , asyncConsumer
+  , asyncConsumer_
   , toListM
   , toListM'
   , asyncFold
@@ -26,7 +30,8 @@ module Pipes.Concurrent.Async
   , (>||>), (<||<)
   , (>|->), (<-|<)
   , (>-|>), (<|-<)
-  , runAsyncEffect_
+  , runAsyncProducer
+  , feedAsyncConsumer
   , runAsyncEffect
   , asyncMapOutputM
   , asyncFoldMapOutputM
@@ -38,6 +43,7 @@ import GHC.Stack (HasCallStack)
 
 import Data.Functor.Apply (Apply(..))
 import qualified Data.List.NonEmpty as NE
+import Data.Semigroup (Semigroup(..))
 import Data.Semigroup.Foldable (Foldable1, foldMap1)
 import Data.Semigroup.Traversable (Traversable1, traverse1)
 import Numeric.Natural (Natural)
@@ -90,18 +96,35 @@ instance (p ~ Producer a n r, c ~ Consumer a n r, MonadAsync n) => Applicative (
 instance (MonadAsync n, Semigroup s) => Semigroup (AsyncProxy p c n s) where
     p1 <> p2 = liftF2 (<>) p1 p2
 
+    stimes n = sconcat . replicate1 (fromIntegral n)
+
+    sconcat aps = AsyncProxy $ \p c -> do
+        ss <- Async.mapConcurrently (\ap -> runAsyncProxy ap p c) aps
+        return (sconcat ss)
+
 instance (p ~ Producer a n r, c ~ Consumer a n r, MonadAsync n, Monoid s) => Monoid (AsyncProxy p c n s) where
     mempty = pure mempty
+
+    mconcat []       = mempty
+    mconcat (ap:aps) = sconcat (ap NE.:| aps)
 
 instance MFunctor (AsyncProxy p c) where
     hoist g (AsyncProxy f) = AsyncProxy (\p c -> g (f p c))
 
 
 cmapOutput ::
-    (Consumer a' m' r' -> Consumer a m r)
-    -> AsyncProxy p (Consumer a  m  r)  n s
-    -> AsyncProxy p (Consumer a' m' r') n s
+    (c' -> c)
+    -> AsyncProxy p c  n s
+    -> AsyncProxy p c' n s
 cmapOutput g (AsyncProxy f) = AsyncProxy (\p c -> f p (g c))
+
+
+defaultOutput ::
+    Functor c
+    => r
+    -> AsyncProxy p (c r)  n s
+    -> AsyncProxy p (c ()) n s
+defaultOutput r = cmapOutput (r <$)
 
 
 (>|->) :: Functor m => AsyncProxy p (Consumer a m r) n s -> Pipe a b m r -> AsyncProxy p (Consumer b m r) n s
@@ -112,15 +135,25 @@ ap >|-> pipe = cmapOutput (pipe >->) ap
 
 
 cmapInput ::
-    (p' -> p) -- (P.Proxy req a' m' r' -> Producer a mp rp)
+    (p' -> p)
     -> AsyncProxy p  c n s
     -> AsyncProxy p' c n s
 cmapInput g (AsyncProxy f) = AsyncProxy (\p c -> f (g p) c)
 
-(>-|>) :: Functor m
-       => Pipe a b m r
-       -> AsyncProxy (Producer b m r) c n s
-       -> AsyncProxy (Producer a m r) c n s
+
+defaultInput ::
+    Functor p
+    => r
+    -> AsyncProxy (p r)  c n s
+    -> AsyncProxy (p ()) c n s
+defaultInput r = cmapInput (r <$)
+
+
+(>-|>) ::
+    Functor m
+    => Pipe a b m r
+    -> AsyncProxy (Producer b m r) c n s
+    -> AsyncProxy (Producer a m r) c n s
 pipe >-|> ac = cmapInput (>-> pipe) ac
 
 (<|-<) :: Functor m => AsyncProxy (Producer b m r) c n s -> Pipe a b m r -> AsyncProxy (Producer a m r) c n s
@@ -131,14 +164,20 @@ infixr 6 >-|>, <-|<
 infixl 6 <|-<, >|->
 
 
-mapPipeM :: Monad n => (s -> n t) -> AsyncProxy p c n s -> AsyncProxy p c n t
-mapPipeM g (AsyncProxy f) = AsyncProxy (\p c -> g =<< f p c)
+mapResultM :: Monad n => (s -> n t) -> AsyncProxy p c n s -> AsyncProxy p c n t
+mapResultM g (AsyncProxy f) = AsyncProxy (\p c -> g =<< f p c)
 
 
--- The producer is executed from start in every thread
+-- The producer is executed from the beginning in each thread
 duplicatingAsyncProducer :: Monad m => Producer a m r -> AsyncProducer' a m r
 duplicatingAsyncProducer producer = AsyncProxy $ \p c ->
     P.runEffect $ do { () <- P.lift (P.runEffect p); producer } >-> c
+
+
+-- The consumer is executed from the beginning in each thread
+duplicatingAsyncConsumer :: Monad m => Consumer a m r -> AsyncConsumer' a m r
+duplicatingAsyncConsumer consumer = AsyncProxy $ \p c ->
+    P.runEffect $ p >-> do { () <- P.lift (P.runEffect c); consumer }
 
 
 -- Ensure that the Consumer is actually run
@@ -150,6 +189,7 @@ asyncProducer f = AsyncProxy $ \p c -> do
     () <- P.runEffect p
     f c
 
+
 -- Ensure that the Producer is actually run
 asyncConsumer ::
     Monad m
@@ -159,6 +199,16 @@ asyncConsumer f = AsyncProxy $ \p c -> do
     sr <- f p
     () <- P.runEffect c
     return sr
+
+asyncConsumer_ ::
+    Monad m
+    => (forall m' r'. Monad m' => Producer a m' r' -> m' (s, r'))
+    -> AsyncConsumer a m () m s
+asyncConsumer_ f = AsyncProxy $ \p c -> do
+    (s, ()) <- f p
+    () <- P.runEffect c
+    return s
+
 
 toListM :: Monad m => AsyncConsumer a m r m [a]
 toListM = fmap fst toListM'
@@ -221,11 +271,19 @@ infixr 5 <||<
 infixl 5 >||>
 
 
-runAsyncEffect_ ::
+runAsyncProducer ::
     (Functor m, Functor m')
     => AsyncProxy (Effect m ()) (Consumer P.X m' r) n a
     -> n a
-runAsyncEffect_ e = runAsyncProxy e (return ()) (P.map P.closed)
+runAsyncProducer ap = runAsyncProxy ap (return ()) (P.map P.closed)
+
+
+feedAsyncConsumer ::
+    (Functor m, Functor m')
+    => Producer a m r
+    -> AsyncProxy (Producer a m r) (Effect m' ()) n s
+    -> n s
+feedAsyncConsumer p ac = runAsyncProxy ac p (return ())
 
 
 runAsyncEffect ::

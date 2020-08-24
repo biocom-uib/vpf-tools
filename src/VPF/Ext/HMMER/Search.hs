@@ -131,6 +131,7 @@ interpretHMMSearchT (HMMSearch args@HMMSearchArgs{..} k) = do
 
     let cmdlineArgs =
           [ "--tformat", "FASTA"
+          , "--cpu", "1"
           , "--tblout", untag outputFile
           , untag inputModelFile
           , untag inputSeqsFile

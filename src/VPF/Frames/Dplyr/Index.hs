@@ -52,7 +52,7 @@ setIndex :: forall i keys cols quot_cols rec.
          )
          => FrameFields rec cols
          -> GroupedFrameFields rec (KeyType keys rec) quot_cols
-setIndex = reindexBy (\row -> (getKey @keys row, rquotient @keys row))
+setIndex = reindexBy (\row -> row^.rquotientSplit @i & L._1 %~ L.review keyRecord)
 {-# inline setIndex #-}
 
 

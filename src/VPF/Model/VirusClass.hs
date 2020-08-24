@@ -12,6 +12,7 @@ module VPF.Model.VirusClass where
 import GHC.Generics (Generic)
 
 import Control.Algebra (Has)
+import Control.Carrier.Error.Excepts (ExceptsT, runExceptsT, Errors, throwErrors)
 import Control.Distributed.SClosure
 import Control.Effect.Reader
 import Control.Effect.Distributed
@@ -19,29 +20,36 @@ import Control.Effect.Sum.Extra (HasAny)
 import Control.Effect.Throw
 import qualified Control.Foldl as Fold
 import qualified Control.Lens as L
+import Control.Monad
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Monad.Trans.Reader (runReaderT)
 
 import qualified Data.Aeson as Aeson
+import Data.Bifunctor (first)
 import qualified Data.ByteString.Char8 as BC
-import Data.List (isPrefixOf, isSuffixOf)
+import Data.List (genericLength, isPrefixOf, isSuffixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
+import Data.Monoid (Ap(..))
+import Data.Proxy (Proxy(..))
 import Data.Semigroup (stimes)
 import Data.Store (Store)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.IO as T
 import Data.Vector (Vector)
 import qualified Data.Vector as Vec
 
 import qualified Data.Vinyl as V
 
-import Pipes (Producer, (>->))
+import Pipes (Producer, Pipe, (>->))
 import qualified Pipes         as P
+import qualified Pipes.Lift    as P
 import qualified Pipes.Prelude as P
 import Pipes.Safe (SafeT, runSafeT)
+import qualified Pipes.Safe as PS
 
 import Pipes.Concurrent.Async ((>||>), (>-|>))
 import qualified Pipes.Concurrent.Async       as PA
@@ -67,9 +75,10 @@ import qualified VPF.Model.Cols       as M
 import qualified VPF.Model.Class      as Cls
 import qualified VPF.Model.Class.Cols as Cls
 
-import qualified VPF.Util.Hash  as Hash
-import qualified VPF.Util.Fasta as FA
-import qualified VPF.Util.FS    as FS
+import qualified VPF.Util.Hash     as Hash
+import qualified VPF.Util.Fasta    as FA
+import qualified VPF.Util.FS       as FS
+import qualified VPF.Util.Progress as Progress
 
 
 newtype GenomeChunkKey = GenomeChunkKey { getGenomeChunkHash :: String }
@@ -296,10 +305,12 @@ aggregateHits aminoacidsFile hitsFile = do
 
             |. F.summarizing @"query_name" %~ do
                   let normalizedScore = F.give $ F.val @"sequence_score" / F.val @"k_base_size"
+                  aggNormScore <- L.sumOf (F.foldedRows . L.to normalizedScore)
 
-                  F.singleField @"protein_hit_score" . sum . F.rowwise normalizedScore
+                  return (F.singleField @"protein_hit_score" aggNormScore)
 
             |. F.rename @"query_name" @"model_name"
+            |. F.copySoA
 
 
 processHits ::
@@ -339,19 +350,25 @@ predictMembership classParams = F.groups %~ do
 
       |. F.summarizing @"class_name" %~ do
             let products = F.give $
-                  F.val @"protein_hit_score" * F.val @"class_percent"/100 * F.val @"protein_hit_score"
+                  F.val @"protein_hit_score"
+                  * F.val @"class_percent"/100
+                  * catWeight (F.val @"class_cat")
 
-            F.singleField @"protein_hit_score" . sum . F.rowwise products
+            classScore <- L.sumOf (F.foldedRows . L.to products)
+            return (F.singleField @"class_score" classScore)
 
-      |. do
-          \df -> do
-            let totalScore = sum (df & F.rows %~ F.get @"protein_hit_score")
-                confidence = percentileRank (Cls.scoreSamples classParams) (Tagged totalScore)
+      |. F.arrange @(F.Desc "class_score")
 
-            df & F.cat
+      |. F.copySoA
+
+      |. id %~ do
+            totalScore <- L.sumOf (F.foldedRows . F.field @"class_score")
+            let confidence = percentileRank (Cls.scoreSamples classParams) (Tagged totalScore)
+
+            F.cat
               |. F.mutate1 @"virus_hit_score"  (const totalScore)
               |. F.mutate1 @"confidence_score" (const confidence)
-              |. F.mutate1 @"membership_ratio" (F.give $ F.val @"protein_hit_score" / totalScore)
+              |. F.mutate1 @"membership_ratio" (F.give $ F.val @"class_score" / totalScore)
               |. F.select_
   where
     percentileRank :: Ord a => Vector a -> a -> Double
@@ -364,6 +381,9 @@ predictMembership classParams = F.groups %~ do
                         f = fromIntegral $ Vec.length equal
                         n = fromIntegral $ Vec.length v
                     in  (c + 0.5*f) / n
+
+    catWeight :: Int -> Double
+    catWeight cat = (5 - fromIntegral cat) / 4
 
 
 -- asynchronous versions
@@ -389,18 +409,16 @@ asyncSearchHits :: forall sig m.
     -> [(GenomeChunkKey, Path (FASTA Nucleotide))]
     -> m [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
 asyncSearchHits concOpts vpfsFile genomesFiles = do
-    let nworkers = fromIntegral $ numSearchingWorkers concOpts
+    let nworkers = numSearchingWorkers concOpts
 
-    ((), r) <- PA.runAsyncEffect (nworkers+1) $
-        PA.hoist liftIO (PA.duplicatingAsyncProducer (P.each genomesFiles))
-        >||>
+    genomesFilesProducer <- liftIO $ PA.stealingEach genomesFiles
+
+    PA.feedAsyncConsumer genomesFilesProducer $
         P.mapM (\(key, genomesFile) -> do
             (protsFile, hitsFile) <- searchGenomeHits key genomesFile vpfsFile
             return (key, protsFile, hitsFile))
         >-|>
         stimes nworkers PA.toListM
-
-    return r
 
 
 distribSearchHits :: forall sigm m sign n w.
@@ -428,32 +446,41 @@ distribSearchHits sdict concOpts vpfsFile genomes = do
 
     wd <- ask @WorkDir
 
-    let genomesChunkWriter :: P.Pipe [FA.FastaEntry Nucleotide] (_, Path _) (SafeT IO) r
-        genomesChunkWriter = P.mapM $ \chunk ->
-            liftIO $ runReaderT (writeGenomesFile (P.each chunk)) wd
+    let genomesChunkWriter :: Pipe [FA.FastaEntry Nucleotide] (Integer, (GenomeChunkKey, Path _)) (SafeT IO) r
+        genomesChunkWriter = P.mapM $ \chunk -> do
+            kp <- liftIO $ runReaderT (writeGenomesFile (P.each chunk)) wd
+            return (genericLength chunk, kp)
 
-    genomesFilesProducer :: PA.AsyncProducer [(_, _)] (SafeT IO) () m () <- liftIO $
+        chunkGenomeCount :: Pipe [(Integer, a)] (Integer, [a]) (SafeT IO) r
+        chunkGenomeCount = P.map (first sum . unzip)
+
+    genomesFilesProducer :: PA.AsyncProducer (Integer, [(_, _)]) (SafeT IO) () m () <- liftIO $
         genomes
           & PA.bufferedChunks (fromIntegral $ fastaChunkSize concOpts)
           & (>-> genomesChunkWriter)
-          & PA.bufferedChunks nslaves
+          & PA.bufferedChunks (fromIntegral $ numSearchingWorkers concOpts)
+          & (>-> chunkGenomeCount)
           & PA.stealingAsyncProducer (nslaves+1)
           & fmap \ap -> ap
-          & PA.cmapOutput (Right () <$)
+          & PA.defaultOutput (Right ())
           & PA.hoist (liftIO . runSafeT)
-          & PA.mapPipeM (either throwError return)
+          & PA.mapResultM (either throwError return)
 
-    let asyncSearchHits' =
+    let asyncSearchHits' kps =
           static (\Dict -> asyncSearchHits @sign @n)
             <:*> sdict
             <:*> spureWith (static Dict) concOpts
             <:*> spureWith (static Dict) vpfsFile
+            <:*> spureWith (static Dict) kps
 
-    withWorkers_ $ \w -> do
+    progress <- liftIO $ Progress.init 0 (\nseqs -> "processsed " ++ show nseqs ++ " sequences")
+    let updateProgress n = liftIO $ Progress.update progress (+ n)
+
+    rs <- withWorkers_ $ \w -> do
         ((), r) <- PA.runAsyncEffect (nslaves+1) $
             genomesFilesProducer
             >||>
-            P.mapM (runInWorker_ w (static Dict) . smap asyncSearchHits' . spureWith (static Dict))
+            P.mapM (\(n, kps) -> runInWorker_ w (static Dict) (asyncSearchHits' kps) <* updateProgress n)
             >-|>
             P.concat
             >-|>
@@ -461,6 +488,9 @@ distribSearchHits sdict concOpts vpfsFile genomes = do
 
         return r
 
+    liftIO $ Progress.finish progress Nothing
+
+    return rs
 
 
 newtype ProcessHitsConcurrencyOpts = ProcessHitsConcurrencyOpts
@@ -480,21 +510,14 @@ asyncProcessHits :: forall sig m.
     -> [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
     -> m [(GenomeChunkKey, Path (DSV "\t" AggregatedHitsCols))]
 asyncProcessHits concOpts hitsFiles = do
-    let nworkers = fromIntegral $ numProcessingHitsWorkers concOpts
+    let nworkers = numProcessingHitsWorkers concOpts
 
-        hitsFilesProducer :: PA.AsyncProducer (_, _ ,_) IO () m ()
-        hitsFilesProducer = P.each hitsFiles
-          & PA.duplicatingAsyncProducer
-          & PA.hoist liftIO
+    hitsFilesProducer <- liftIO $ PA.stealingEach hitsFiles
 
-    ((), r) <- PA.runAsyncEffect (nworkers+1) $
-        hitsFilesProducer
-        >||>
+    PA.feedAsyncConsumer hitsFilesProducer $
         P.mapM (\(key, protsFile, hitsFile) -> (,) key <$> processHits key protsFile hitsFile)
         >-|>
         stimes nworkers PA.toListM
-
-    return r
 
 
 newtype PredictMembershipConcurrencyOpts = PredictMembershipConcurrencyOpts
@@ -517,54 +540,80 @@ asyncPredictMemberships concOpts classFiles aggHitsFiles outputDir = do
 
     liftIO $ D.createDirectoryIfMissing True (untag outputDir)
 
-    ((), aggHitss) <- PA.runAsyncEffect (nworkers+1) $
-        PA.duplicatingAsyncProducer (P.each aggHitsFiles)
-        >||>
-        P.mapM (\aggHitFile -> DSV.readFrame aggHitFile (DSV.defParserOptions '\t'))
-        >-|>
-        P.map (F.setIndex @"virus_name")
-        >-|>
-        stimes nworkers PA.toListM
+    liftIO $ IO.hPutStrLn IO.stderr $ "loading VPF classifications"
 
-    ((), paths) <- PA.runAsyncEffect (nworkers+1) $
-        PA.duplicatingAsyncProducer (P.each (Map.toAscList classFiles))
-        >||>
-        P.mapM (L._2 %%~ Cls.loadClassificationParams)
-        >-|>
-        P.map (L._2 %~ predictAll aggHitss)
-        >-|>
-        P.mapM (\(classKey, prediction) -> writeOutput classKey prediction)
-        >-|>
-        PA.toListM
+    classes <- mapM (L._2 %%~ Cls.loadClassificationParams) (Map.toAscList classFiles)
 
-    return paths
+    (Ap errors, paths) <- liftIO $ runSafeT $ do
+        let sep = T.singleton '\t'
+            parserOpts = DSV.defParserOptions '\t'
+
+        classesWithHandles <-
+            forM classes \(classKey, classParams) -> do
+                let path = untag outputDir </> T.unpack (untag classKey) ++ ".tsv"
+
+                h <- PS.mask_ $ do
+                    hdl <- liftIO $ IO.openFile path IO.WriteMode
+                    PS.register (IO.hClose hdl)
+                    return hdl
+
+                liftIO $ T.hPutStrLn h (DSV.headerToDSV @PredictedCols Proxy sep)
+
+                return (Tagged path, (classParams, h))
+
+        let (paths, classHandles) = unzip classesWithHandles
+
+        liftIO $ IO.hPutStrLn IO.stderr $ "found " ++ show (length aggHitsFiles) ++ " aggregated hit files"
+
+        Progress.tracking 0 (\nchunks -> "predicted " ++ show nchunks ++ " units") $ \progress -> do
+            hitChunks <- liftIO $ PA.stealingEach aggHitsFiles
+
+            let toBeWritten :: PA.AsyncProducer' (IO.Handle, Vec.Vector Text) IO (Ap (Either _) ())
+                toBeWritten = PA.duplicatingAsyncProducer $
+                    (pure () <$ hitChunks)
+                    >->
+                    runApExceptsP (P.mapM (DSV.readFrame parserOpts))
+                    >->
+                    scheduleForWriting classHandles sep
+
+            liftIO $ PA.runAsyncEffect nworkers $
+                stimes nworkers (PA.defaultOutput (pure ()) toBeWritten)
+                >||>
+                -- we don't want concurrent writes
+                (paths <$ writeOutput progress)
+
+    case errors of
+      Left errs -> throwErrors @'[DSV.ParseError] errs
+      Right ()  -> return paths
   where
-    predictAll ::
+    runApExceptsP ::
         Monad n
-        => [GroupedFrameRec (Field M.VirusName) '[M.ModelName, M.ProteinHitScore]]
-        -> Cls.ClassificationParams
-        -> Producer (Record PredictedCols) n ()
-    predictAll aggHitss classParams =
-        P.each aggHitss
-        >-> P.map do
-              predictMembership classParams
-                |. F.groups %~ F.arrange @(F.Desc "membership_ratio")
-                |. F.resetIndex
-        >-> P.concat
+        => P.Proxy a' a b' b (ExceptsT es n) r
+        -> P.Proxy a' a b' b n (Ap (Either (Errors es)) r)
+    runApExceptsP = fmap Ap . runExceptsT . P.distribute
 
-    writeOutput ::
-        Field Cls.ClassKey
-        -> Producer (Record PredictedCols) (SafeT IO) ()
-        -> m (Path (DSV "\t" PredictedCols))
-    writeOutput classKey rows = do
-        let path = untag outputDir </> T.unpack (untag classKey) ++ ".tsv"
+    scheduleForWriting ::
+        [(Cls.ClassificationParams, IO.Handle)]
+        -> Text
+        -> Pipe (FrameRec AggregatedHitsCols) (IO.Handle, Vec.Vector Text) IO r
+    scheduleForWriting classHandles sep =
+        P.for P.cat \aggHits -> do
+            let indexed = F.setIndex @"virus_name" aggHits
 
-        liftIO $ runSafeT $ P.runEffect $
-            rows
-            >-> DSV.pipeDSVLines (DSV.defWriterOptions '\t')
-            >-> FS.fileWriter path
+            forM_ classHandles \(classParams, h) -> do
+                let predictedDSV = predictMembership classParams indexed
+                      & F.resetIndex
+                      & F.rows %~ DSV.rowToDSV sep
+                      & F.toRowsVec
 
-        return (Tagged path)
+                P.yield $! (h, predictedDSV)
+
+    writeOutput :: Progress.State Int -> PA.AsyncConsumer' (IO.Handle, Vec.Vector Text) IO ()
+    writeOutput progress =
+        PA.duplicatingAsyncConsumer $
+            P.mapM_ \(h, rows) -> do
+              mapM_ (T.hPutStrLn h) rows
+              Progress.update progress (+1)
 
 
 -- stopping/resuming from checkpoints

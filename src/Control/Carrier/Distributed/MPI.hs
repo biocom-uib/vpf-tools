@@ -246,7 +246,7 @@ runMpi mpiComm exitHandlers runN (MpiMasterT e) = do
 
         let slaveRanks = NE.fromList [succ rootRank .. pred size]
 
-        rankTags <- liftIO $ traverse (\_ -> newIORef 0) slaveRanks
+        rankTags <- traverse (\_ -> newIORef 0) slaveRanks
 
         return MPIHandle {..}
 

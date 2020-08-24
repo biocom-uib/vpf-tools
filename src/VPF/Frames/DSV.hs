@@ -18,6 +18,8 @@ module VPF.Frames.DSV
 
   , WriterOptions(..)
   , defWriterOptions
+  , headerToDSV
+  , rowToDSV
   , produceFromFrame
   , pipeDSVLines
   , produceDSVLinesFromFrame
@@ -66,7 +68,7 @@ data ParserOptions = ParserOptions
     , rowTokenizer :: RowTokenizer
     }
 
-data ParseCtx = ParseCtx { ctxPath :: FilePath, ctxSep :: Char, ctxColNames :: [String] }
+data ParseCtx = ParseCtx { ctxPath :: FilePath, ctxSep :: String, ctxColNames :: [String] }
   deriving (Eq, Generic)
 
 instance Show ParseCtx where
@@ -114,7 +116,7 @@ parseEitherRow tokenize row =
       Right rec -> Right rec
 
 
-pipeEitherRows :: forall m cols. (HasParseCtx, Monad m, CSV.ReadRec cols)
+pipeEitherRows :: (HasParseCtx, Monad m, CSV.ReadRec cols)
                => ParserOptions
                -> Pipe Text (Either ParseError (Record cols)) m ()
 pipeEitherRows opts =
@@ -129,14 +131,14 @@ produceEitherRows :: forall m sep cols.
     , CSV.ReadRec cols
     , MonadSafe m
     )
-    => Path (DSV sep cols)
-    -> ParserOptions
+    => ParserOptions
+    -> Path (DSV sep cols)
     -> Producer (Either ParseError (Record cols)) m ()
-produceEitherRows fp opts =
+produceEitherRows opts fp =
     CSV.produceTextLines (untag fp) >-> pipeEitherRows opts
   where
     ?parseRowCtx =
-        let [sep]    = symbolVal (Proxy @sep)
+        let sep      = symbolVal (Proxy @sep)
             colNames = columnHeaders (Proxy @(Record cols))
         in  ParseCtx (untag fp) sep colNames
 
@@ -162,11 +164,11 @@ readFrame ::
     , MonadIO m
     , Has (Throw ParseError) sig m
     )
-    => Path (DSV sep cols)
-    -> ParserOptions
+    => ParserOptions
+    -> Path (DSV sep cols)
     -> m (FrameRec cols)
-readFrame fp opts =
-    inCoreAoSExc (produceEitherRows fp opts >-> throwLeftsM)
+readFrame opts fp =
+    inCoreAoSExc (produceEitherRows opts fp >-> throwLeftsM)
 
 
 data WriterOptions = WriterOptions
@@ -183,6 +185,21 @@ defWriterOptions sep = WriterOptions
     }
 
 
+headerToDSV :: ColumnHeaders cols => proxy (Record cols) -> Text -> Text
+headerToDSV proxy sep =
+    T.intercalate sep $ map T.pack (columnHeaders proxy)
+
+
+rowToDSV ::
+    ( RecMapMethod CSV.ShowCSV ElField cols
+    , RecordToList cols
+    )
+    => Text
+    -> Record cols
+    -> Text
+rowToDSV sep = T.intercalate sep . CSV.showFieldsCSV
+
+
 produceFromFrame :: (Foldable f, Monad m) => f (Record cols) -> Producer (Record cols) m ()
 produceFromFrame = P.each
 
@@ -196,13 +213,12 @@ pipeDSVLines :: forall cols m.
     => WriterOptions
     -> Pipe (Record cols) Text m ()
 pipeDSVLines opts = do
-    let headers = map T.pack (columnHeaders (Proxy @(Record cols)))
-        sep     = T.singleton (writeSeparator opts)
+    let sep = T.singleton (writeSeparator opts)
 
     when (writeHeader opts) $
-      P.yield (T.intercalate sep headers)
+      P.yield (headerToDSV @cols Proxy sep)
 
-    P.map (T.intercalate sep . CSV.showFieldsCSV)
+    P.map (rowToDSV sep)
 
 
 produceDSVLinesFromFrame ::

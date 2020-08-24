@@ -1,7 +1,3 @@
-{-# options_ghc -ddump-simpl -dsuppress-idinfo
--dsuppress-coercions -dsuppress-type-applications
--dsuppress-uniques -dsuppress-module-prefixes #-}
-
 {-# language DeriveGeneric #-}
 {-# language QuantifiedConstraints #-}
 {-# language StaticPointers #-}

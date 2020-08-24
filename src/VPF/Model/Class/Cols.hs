@@ -74,5 +74,5 @@ unnestClassObj =
           \(Tagged name, Tagged percent, Tagged cat) -> (name, percent, cat)
   where
     inspectClass :: Class -> [(Field ClassName, Field ClassPercent, Field ClassCat)]
-    inspectClass (HomogClass name cat) = [(name, Tagged ((5 - fromIntegral cat) / 4), cat)]
+    inspectClass (HomogClass name cat) = [(name, 100, cat)]
     inspectClass (NonHomogClass m)     = [(name, percent, cat) | (name, (percent, cat)) <- Map.toAscList m]

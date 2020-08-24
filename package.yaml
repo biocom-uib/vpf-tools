@@ -101,6 +101,7 @@ library:
   source-dirs: src
   ghc-options:
   - -fsimpl-tick-factor=150
+  - -threaded
 
   when:
   - condition: flag(mpi)
@@ -135,6 +136,16 @@ executables:
       else:
         buildable: false
 
+  pipes-test:
+    main:                Main.hs
+    source-dirs:         app/pipes-test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - vpf-tools
+
 tests:
   vpf-test:
     main:                Spec.hs
@@ -150,5 +161,5 @@ tests:
 flags:
   mpi:
     description: Enable MPI support (OpenMPI with mpi-hs)
-    manual: false
-    default: true
+    manual: true
+    default: false

@@ -82,7 +82,7 @@ produceEitherRows :: forall rs m.
                   => Path (HMMERTable rs)
                   -> Producer (Either DSV.ParseError (Record rs)) m ()
 produceEitherRows fp =
-    DSV.produceEitherRows (tableAsDSV fp) (tblParserOptions maxCols)
+    DSV.produceEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
   where
     maxCols = V.natToInt @(V.RLength rs)
 
@@ -94,7 +94,7 @@ produceRows :: forall rs m.
             => Path (HMMERTable rs)
             -> Producer (Record rs) m ()
 produceRows fp =
-    DSV.produceEitherRows (tableAsDSV fp) (tblParserOptions maxCols)
+    DSV.produceEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
     >-> DSV.throwLeftsM
   where
     maxCols = V.natToInt @(V.RLength rs)

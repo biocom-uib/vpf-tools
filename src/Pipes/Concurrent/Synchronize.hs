@@ -13,6 +13,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Control (StM)
 
+import qualified Data.IORef as IORef
 import Data.Function (fix)
 import Numeric.Natural (Natural)
 
@@ -31,6 +32,23 @@ bufferedChunks chunkSize =
       (items, f) <- P.lift $ P.toListM' chunk
       P.yield items
       return f
+
+
+stealingEach :: MonadIO m => [a] -> IO (Producer a m ())
+stealingEach as = do
+    mas <- IORef.newIORef as
+
+    return (produce mas)
+  where
+    unconsNext []     = ([], Nothing)
+    unconsNext (a:as) = (as, Just a)
+
+    produce mas = do
+        ma <- liftIO $ IORef.atomicModifyIORef' mas unconsNext
+
+        case ma of
+          Nothing -> return ()
+          Just a  -> P.yield a >> produce mas
 
 
 -- convert a Producer to an asynchronous producer via work stealing
@@ -99,7 +117,7 @@ synchronize queueSize aproducer = do
     consumerQueue values = P.mapM_ (liftIO . STM.atomically . STM.writeTBQueue values)
 
     feed :: STM.TBQueue a -> n s
-    feed values = PA.runAsyncEffect_ $ aproducer PA.>|-> consumerQueue values
+    feed values = PA.runAsyncProducer $ aproducer PA.>|-> consumerQueue values
 
     readValues :: STM.TBQueue a -> STM.TMVar () -> Producer a n ()
     readValues values done = fix $ \loop -> do
