@@ -2,38 +2,67 @@
 
 ## The tools
 
-Currently, only `vpf-class` is implemented.
+Currently, only `vpf-class` is implemented, but we have plans to include more tools
+in this framework.
 
 ### vpf-class
 
 `vpf-class` attemps to classify viruses using Viral Protein Families.
 
-Usage example 1: With existing `.hmmout` file containing the result of
-performing `hmmsearch` on a FASTA file of viral proteins against the VPF models.
-This simply loads the `tblout` file from `hmmsearch` and matches the best hits
-against the classification of the VPFs (given in `vpf-classes.tsv`).
+Usage example: Given a `.fna` file, obtain the proteins of each virus with
+`prodigal`, then perform a `hmmsearch` against the given `hmms` (VPFs) file to
+obtain a classification.
 ```sh
-stack exec -- vpf-class -c vpf-classes.tsv -h hits.hmmout -o classification.tsv
+stack exec -- vpf-class --data-index ../data/data-index.yaml -i ../data/test.fna -o test-classified
 ```
 
-Usage example 2: Given a `.fna` file, obtain the proteins of each virus with
-`prodigal`, then perform a `hmmsearch` against the given `hmms` file. Finally
-match the results against the classification of the VPFs (in `vpf-classes.tsv`).
-```sh
-stack exec -- vpf-class -c vpf-classes.tsv -v final_test.hmms -i test.fna -o classification.tsv
+This will output a directory with a `.tsv` file for each given classification
+type. For instance, if the contents of `../data/data-index.yaml` are
+
+```yaml
+classificationFiles:
+  baltimore:
+    modelClassesFile: ./vpf-classification/baltimore.tsv
+    scoreSamplesFile: ./score-samples/baltimore.tsv
+  family:
+    modelClassesFile: ./vpf-classification/family.tsv
+    scoreSamplesFile: ./score-samples/family.tsv
+  genus:
+    modelClassesFile: ./vpf-classification/genus.tsv
+    scoreSamplesFile: ./score-samples/genus.tsv
+  host_domain:
+    modelClassesFile: ./vpf-classification/domain.tsv
+    scoreSamplesFile: ./score-samples/domain.tsv
+  host_family:
+    modelClassesFile: ./vpf-classification/family.tsv
+    scoreSamplesFile: ./score-samples/family.tsv
+  host_genus:
+    modelClassesFile: ./vpf-classification/genus.tsv
+    scoreSamplesFile: ./score-samples/genus.tsv
+
+vpfsFile: final_list.hmms
 ```
 
-In this mode, concurrency options can be specified with `--workers` (number of
-workers running `prodigal` and/or `hmmsearch`) and `--chunk-size` (max number
-of genomes for each `prodigal`/`hmmsearch` process)
+then `vpf-class` produces the following files:
 
-If `-o` is not specified, the result is printed to the standard output.
+- `test-classified/baltimore.tsv`
+- `test-classified/family.tsv`
+- `test-classified/genus.tsv`
+- `test-classified/host_domain.tsv`
+- `test-classified/host_family.tsv`
+- `test-classified/host_genus.tsv`
+
+
+Concurrency options can be specified with `--workers` (number of
+workers running `prodigal` or `hmmsearch`) and `--chunk-size` (max number
+of genomes for each `prodigal`/`hmmsearch` process).
 
 ## Installation
 
 Since there are still no release binaries available, you will need to install
 [stack](haskellstack.org) and compile `vpf-tools` yourself. The instructions
-should be the same for Mac OS and Linux.
+are the same for both Mac OS and Linux, the tool has not been tested on
+Windows.
 
 First, install stack using
 ```sh
@@ -53,3 +82,16 @@ directory by prefixing them with `stack exec --`, for instance,
 ```sh
 stack exec -- vpf-class --help
 ```
+
+There is experimental support for MPI. Add `--flag vpf-class:+mpi` when
+building and then run the tool normally using `mpirun`.
+
+## Supplementary material
+
+You can find our classification of VPFs at [http://bioinfo.uib.es/~recerca/VPF-Class/]
+
+Score samples will be added soon, and only affect confidence scores. If
+you do not require them, you can use placeholder text files containing any single
+number.
+
+The `hmms` file containing the actual VPFs can be downloaded from (IMG/VR)[https://img.jgi.doe.gov/virus/doc/final_list.hmms.gz]
