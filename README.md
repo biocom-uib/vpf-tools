@@ -32,13 +32,13 @@ classificationFiles:
     scoreSamplesFile: ./score-samples/genus.tsv
   host_domain:
     modelClassesFile: ./vpf-classification/domain.tsv
-    scoreSamplesFile: ./score-samples/domain.tsv
+    scoreSamplesFile: ./score-samples/host_domain.tsv
   host_family:
     modelClassesFile: ./vpf-classification/family.tsv
-    scoreSamplesFile: ./score-samples/family.tsv
+    scoreSamplesFile: ./score-samples/host_family.tsv
   host_genus:
     modelClassesFile: ./vpf-classification/genus.tsv
-    scoreSamplesFile: ./score-samples/genus.tsv
+    scoreSamplesFile: ./score-samples/host_genus.tsv
 
 vpfsFile: final_list.hmms
 ```
