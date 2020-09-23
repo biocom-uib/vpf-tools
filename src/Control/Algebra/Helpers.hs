@@ -17,6 +17,7 @@ import Control.Monad (join)
 import qualified Control.Monad.Trans.Control as MTC
 
 import Data.Coerce
+import Data.Functor.Identity
 import Data.Functor.Yoneda
 import Data.Reflection (give, Given(given))
 
@@ -25,14 +26,19 @@ import Data.Reflection (give, Given(given))
 
 relayAlgebraIso :: forall t' t sig alg' m a.
     ( Algebra (alg' :+: sig)  (t' m)
-    , Functor (t m)
-    , HFunctor sig
+    , Monad (t m)
+    , Threads Identity sig
     )
     => (forall x. t m x -> t' m x)
     -> (forall x. t' m x -> t m x)
     -> sig (t m) a
     -> t m a
-relayAlgebraIso tt' t't = t't . eff . R . hmap tt'
+relayAlgebraIso tt' t't =
+    t't
+    . fmap runIdentity
+    . alg
+    . R
+    . thread (Identity ()) (fmap Identity . tt' . runIdentity)
 
 
 -- relay the effect to the inner type of a newtype
@@ -42,13 +48,18 @@ relayAlgebraUnwrap :: forall m' sig' m sig a.
     , Coercible (m' a) (m a)
     , Algebra sig' m'
     , Subsumes sig sig'
-    , HFunctor sig
-    , Functor m
+    , Threads Identity sig
+    , Monad m
     )
     => (forall x. m' x -> m x)
     -> sig m a
     -> m a
-relayAlgebraUnwrap _ = coerce @(m' a) @(m a) . eff . injR @sig @sig' . handleCoercible
+relayAlgebraUnwrap _ =
+    coerce @(m' a) @(m a)
+    . fmap runIdentity
+    . alg
+    . injR @sig @sig'
+    . thread (Identity ()) (fmap Identity . coerce . runIdentity)
 
 
 newtype StT t a = StT { unStT :: MTC.StT t a }
@@ -66,7 +77,7 @@ instance Given (StFunctor t) => Functor (StT t) where
 relayAlgebraControl :: forall sig t m a.
     ( MTC.MonadTransControl t
     , Algebra sig m
-    , forall f. Functor f => Handles f sig
+    , forall f. Functor f => Threads f sig
     , Monad m
     , Monad (t m)
     )
@@ -84,9 +95,9 @@ relayAlgebraControl fmap' sig = give (StFunctor @t fmap') $ do
             handler = runStT . join . restoreStT
 
             handle' :: sig (t m) a -> sig m (StT t a)
-            handle' = handle state handler
+            handle' = thread state handler
 
-        eff (handle' sig)
+        alg (handle' sig)
 
     restoreStT sta
   where
@@ -107,7 +118,7 @@ newtype YoStT t a = YoStT { unYoStT :: Yoneda (StT t) a }
 relayAlgebraControlYo :: forall sig t m a.
     ( MTC.MonadTransControl t
     , Algebra sig m
-    , Handles (YoStT t) sig
+    , Threads (YoStT t) sig
     , Monad m
     , Monad (t m)
     )
@@ -125,9 +136,9 @@ relayAlgebraControlYo fmap' sig = do
             handler = runTYo . join . restoreYoT
 
             handle' :: sig (t m) a -> sig m (YoStT t a)
-            handle' = handle state handler
+            handle' = thread state handler
 
-        eff (handle' sig)
+        alg (handle' sig)
 
     restoreYoT yosta
   where

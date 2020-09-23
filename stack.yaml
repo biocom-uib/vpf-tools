@@ -17,7 +17,7 @@
 #
 # resolver: ./custom-snapshot.yaml
 # resolver: https://example.com/snapshots/2018-01-01.yaml
-resolver: lts-14.7
+resolver: nightly-2020-09-23
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -35,12 +35,11 @@ packages:
 # forks / in-progress versions pinned to a git hash. For example:
 #
 extra-deps:
-- Frames-0.6.1
-- discrimination-0.4
-- extensible-effects-5.0.0.1
+- Frames-0.7.0
+- discrimination-0.4@rev:1
 - name: fused-effects
   github: bielr/fused-effects
-  commit: 560c30eb31290dc83e120cb5c6729c084c1f3b3d
+  commit: 8bd165aa7b1c8ee61a94fe6c2f42d756c2c8ab8d
 
 # - acme-missiles-0.3
 # - git: https://github.com/commercialhaskell/stack.git

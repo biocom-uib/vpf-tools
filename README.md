@@ -54,10 +54,10 @@ then `vpf-class` produces the following files:
 
 
 Concurrency options can be specified with `--workers` (number of
-workers running `prodigal` or `hmmsearch`) and `--chunk-size` (max number
-of genomes for each `prodigal`/`hmmsearch` process).
+parallel workers running `prodigal` or `hmmsearch`) and `--chunk-size` (max
+number of genomes for each `prodigal`/`hmmsearch` process).
 
-## Installation
+## Building
 
 Since there are still no release binaries available, you will need to install
 [stack](haskellstack.org) and compile `vpf-tools` yourself. The instructions
@@ -83,15 +83,18 @@ directory by prefixing them with `stack exec --`, for instance,
 stack exec -- vpf-class --help
 ```
 
-There is experimental support for MPI. Add `--flag vpf-class:+mpi` when
-building and then run the tool normally using `mpirun`.
+There is experimental support for OpenMPI. Add `--flag vpf-class:+mpi` when
+building and then run the tool normally as any other program with `mpirun`.
 
 ## Supplementary material
 
-You can find our classification of VPFs at [http://bioinfo.uib.es/~recerca/VPF-Class/]
+The most recent `hmms` file containing the HMMER models of VPFs (`vpfsFile` in
+`data-index.yml`) can be downloaded from
+[IMG/VR](https://img.jgi.doe.gov/virus/doc/final_list.hmms.gz)
 
-Score samples will be added soon, and only affect confidence scores. If
-you do not require them, you can use placeholder text files containing any single
-number.
-
-The `hmms` file containing the actual VPFs can be downloaded from (IMG/VR)[https://img.jgi.doe.gov/virus/doc/final_list.hmms.gz]
+You can find our classification of VPFs at
+[](http://bioinfo.uib.es/~recerca/VPF-Class/), at the "VPF classification" tab.
+The data files that `vpf-class` needs are in the rows "Full data" (`modelClassesFile`) and "UViG
+Score samples" (`scoreSamplesFile`). This VPF classification has been obtained
+as described in the paper, but the tool is designed to work with any
+user-provided classification files.

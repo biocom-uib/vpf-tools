@@ -35,20 +35,14 @@ instance Functor m => Functor (Distributed n w m) where
     fmap f (RunInWorker w sdict clo k) = RunInWorker w sdict clo (fmap f . k)
 
 
-instance HFunctor (Distributed n w) where
-    hmap f (GetNumWorkers k)           = GetNumWorkers (f . k)
-    hmap f (WithWorkers block k)       = WithWorkers (f . block) (f . k)
-    hmap f (RunInWorker w sdict clo k) = RunInWorker w sdict clo (f . k)
-
-
-instance Apply f => Handles f (Distributed n w) where
-    handle state handler (GetNumWorkers k) =
+instance Apply f => Threads f (Distributed n w) where
+    thread state handler (GetNumWorkers k) =
         GetNumWorkers (handler . (<$ state) . k)
 
-    handle state handler (WithWorkers block k) =
+    thread state handler (WithWorkers block k) =
         WithWorkers (handler . (<$ state) . block)  (handler . fmap k . sequence1)
 
-    handle state handler (RunInWorker w sdict clo k) =
+    thread state handler (RunInWorker w sdict clo k) =
         RunInWorker w sdict clo (handler . (<$ state) . k)
 
 

@@ -57,8 +57,7 @@ data HMMSearch m k where
     HMMSearch :: HMMSearchArgs -> m k -> HMMSearch m k
     deriving (Generic1)
 
-instance HFunctor HMMSearch
-instance Functor f => Handles f HMMSearch
+instance Functor f => Threads f HMMSearch
 
 
 hmmsearch ::

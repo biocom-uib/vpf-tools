@@ -10,7 +10,7 @@ import Control.Lens.Type
 import Data.Bifunctor (second)
 import Data.Foldable (toList)
 import Data.Function (on)
-import Data.Kind (Constraint, Type)
+import Data.Kind (Constraint)
 import Data.Map.Strict (Map)
 import Data.Monoid (Ap(..))
 import qualified Data.Vector                as Vec
@@ -27,7 +27,6 @@ import VPF.Frames.VinylExts
 
 
 class AsKey (keys :: FieldsK) where
-    type KeyType (keys :: FieldsK) (rec :: RecK) = (t :: Type) | t -> keys
     type HasKey  (keys :: FieldsK) (rec :: RecK) (cols :: FieldsK) :: Constraint
 
     type KeyRecordCtx (keys :: FieldsK) (rec :: RecK) :: Constraint
@@ -36,8 +35,12 @@ class AsKey (keys :: FieldsK) where
     keyRecord :: KeyRecordCtx keys rec => Iso' (KeyType keys rec) (Fields rec keys)
 
 
+type family KeyType keys rec = t | t -> keys where
+    KeyType '[ '(s, a)]      rec = Tagged s a
+    KeyType (k1 ': k2 ': ks) rec = Fields rec (k1 ': k2 ': ks)
+
+
 instance (col ~ '(s, a), V.KnownField col) => AsKey ('[col] :: FieldsK) where
-    type KeyType '[col] rec = Field col
     type HasKey '[col] rec cols = GetField rec col cols
     type KeyRecordCtx '[col] rec = RSingleton rec
 
@@ -46,7 +49,6 @@ instance (col ~ '(s, a), V.KnownField col) => AsKey ('[col] :: FieldsK) where
 
 
 instance subs ~ (col1 ': col2 ': cols) => AsKey ((col1 ': col2 ': cols) :: FieldsK) where
-    type KeyType (col1 ': col2 ': cols) rec = Fields rec (col1 ': col2 ': cols)
     type HasKey (col1 ': col2 ': cols) rec colss = FieldSubset rec (col1 ': col2 ': cols) colss
     type KeyRecordCtx (col1 ': col2 ': cols) rec = ()
 

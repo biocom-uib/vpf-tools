@@ -1,4 +1,5 @@
 {-# language Strict #-}
+{-# language StandaloneKindSignatures #-}
 {-# language UndecidableInstances #-}
 module Control.Effect.Sum.Extra
   ( FindMember
@@ -18,7 +19,9 @@ import Data.Kind (Type)
 type SigK = (Type -> Type) -> Type -> Type
 
 
-type family Desaturate' k l (sig :: l) :: Maybe k where
+type Desaturate' :: forall k -> forall l -> l -> Maybe k
+
+type family Desaturate' k l sig where
     Desaturate' k k sig                   = 'Just sig
     Desaturate' k l ((sig1 :: l' -> l) _) = Desaturate' k (l' -> l) sig1
     Desaturate' k l _                     = 'Nothing

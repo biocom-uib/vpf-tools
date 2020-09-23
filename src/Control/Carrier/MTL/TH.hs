@@ -8,6 +8,7 @@ module Control.Carrier.MTL.TH
 import Data.Bifunctor (first)
 import Data.Profunctor.Unsafe ((#.), (.#))
 import Data.Coerce (Coercible, coerce)
+import Data.Functor.Identity
 import Data.List ((\\), foldl')
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe)
@@ -404,14 +405,14 @@ deriveAlgebra interpName = do
         [d|
             instance
                 ( Algebra $sigQ $mQ
-                , HFunctor $sigQ
+                , Threads Identity $sigQ
                 , $cxtQ
                 )
                 => Algebra ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
 
-                eff (L $effPQ) = $interpQ $effEQ
-                eff (R other)  = relayAlgebraUnwrap @($mQ) @($sigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
-                {-# inline eff #-}
+                alg (L $effPQ) = $interpQ $effEQ
+                alg (R other)  = relayAlgebraUnwrap @($mQ) @($sigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
+                {-# inline alg #-}
           |]
 
       _ ->
@@ -420,12 +421,12 @@ deriveAlgebra interpName = do
                 ( Algebra $sigQ $mQ
                 , Algebra $innerSigQ $innerMQ
                 , Subsumes $sigQ $innerSigQ
-                , HFunctor $sigQ
+                , Threads Identity $sigQ
                 , $cxtQ
                 )
                 => Algebra ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
 
-                eff (L $effPQ) = $interpQ $effEQ
-                eff (R other)  = relayAlgebraUnwrap @($innerMQ) @($innerSigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
-                {-# inline eff #-}
+                alg (L $effPQ) = $interpQ $effEQ
+                alg (R other)  = relayAlgebraUnwrap @($innerMQ) @($innerSigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
+                {-# inline alg #-}
           |]

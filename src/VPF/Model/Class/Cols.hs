@@ -14,7 +14,6 @@ import Data.Text (Text)
 import Data.Vector (Vector)
 import qualified Data.Vinyl.FromTuple as V
 
-import Frames (Frame(..))
 import Frames.InCore (VectorFor)
 import Frames.TH (declareColumn)
 

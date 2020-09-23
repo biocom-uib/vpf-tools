@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# language ApplicativeDo #-}
+{-# language CPP #-}
 {-# language DeriveGeneric #-}
 {-# language RecordWildCards #-}
 {-# language StrictData #-}
@@ -89,6 +90,13 @@ parseArgs = do
             fullDesc
             <> progDesc "Classify virus sequences using an existing VPF classification"
             <> header "vpf-class: VPF-based virus sequence classifier"
+#ifdef VPF_ENABLE_MPI
+            <> footer "NOTE: This build is OpenMPI-enabled. The support is\
+                      \ experimental and the --workers and --chunk-size flags\
+                      \ are used for each individual worker."
+#else
+            <> footer "NOTE: OpenMPI support is disabled in this build."
+#endif
 
 
 configParserIO :: IO (Parser Config)
@@ -147,7 +155,7 @@ configParser defConcOpts = do
     dataFilesIndexFile <- strOption $
         long "data-index"
         <> metavar "DATA_INDEX"
-        <> help "Yaml file containing references to all required data files"
+        <> help "YAML file containing references to all required data files"
 
     genomesFile <- strOption $
         long "input-seqs"

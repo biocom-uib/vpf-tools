@@ -53,8 +53,7 @@ data Prodigal m k where
     Prodigal :: ProdigalArgs -> m k -> Prodigal m k
     deriving (Generic1)
 
-instance HFunctor Prodigal
-instance Functor f => Handles f Prodigal
+instance Functor f => Threads f Prodigal
 
 
 prodigal :: Has Prodigal sig m
