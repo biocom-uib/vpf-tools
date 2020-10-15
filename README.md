@@ -90,7 +90,7 @@ building and then run the tool normally as any other program with `mpirun`.
 
 The most recent `hmms` file containing the HMMER models of VPFs (`vpfsFile` in
 `data-index.yml`) can be downloaded from
-[IMG/VR](https://img.jgi.doe.gov/virus/doc/final_list.hmms.gz)
+[IMG/VR](https://img.jgi.doe.gov//docs/final_list.hmms.gz)
 
 You can find our classification of VPFs at
 [](http://bioinfo.uib.es/~recerca/VPF-Class/), at the "VPF classification" tab.
