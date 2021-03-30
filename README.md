@@ -92,8 +92,8 @@ The most recent `hmms` file containing the HMMER models of VPFs (`vpfsFile` in
 `data-index.yml`) can be downloaded from
 [IMG/VR](https://img.jgi.doe.gov//docs/final_list.hmms.gz)
 
-You can find our classification of VPFs at
-[](http://bioinfo.uib.es/~recerca/VPF-Class/), at the "VPF classification" tab.
+You can find our classification of VPFs
+[here](http://bioinfo.uib.es/~recerca/VPF-Class/), at the "VPF classification" tab.
 The data files that `vpf-class` needs are in the rows "Full data" (`modelClassesFile`) and "UViG
 Score samples" (`scoreSamplesFile`). This VPF classification has been obtained
 as described in the paper, but the tool is designed to work with any
