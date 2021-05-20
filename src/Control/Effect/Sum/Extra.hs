@@ -13,7 +13,7 @@ import Control.Effect.Sum
 
 import Data.Type.Equality (type (==))
 
-import Data.Kind (Type)
+import Data.Kind (Type, Constraint)
 
 
 type SigK = (Type -> Type) -> Type -> Type
@@ -50,12 +50,15 @@ class Find sigF sigs ~ 'Just sig => Found sigF sig sigs | sigF sigs -> sig
 instance Find sigF sigs ~ 'Just sig => Found sigF sig sigs
 
 
+type FindMember :: forall k. k -> SigK -> SigK -> Constraint
 class (Member sig sigs, Found sigF sig sigs) => FindMember sigF sig sigs | sigF sigs -> sig
 instance (Member sig sigs, Found sigF sig sigs) => FindMember sigF sig sigs
 
 
-class (Algebra sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m | sigF m -> sig sigs
-instance (Algebra sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m
+type HasAny :: forall k. k -> SigK -> (Type -> Type) -> Constraint
+type HasAny sigF sig m = (FindMember sigF sig (Sig m), Has sig m)
+-- class (FindMember sigF sig sigs) => HasAny sigF sig sigs m | sigF m -> sig sigs
+-- instance (Algebra sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m
 
 
 class Subsumes (sub :: SigK) (sup :: SigK) where

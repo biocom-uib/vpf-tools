@@ -12,7 +12,8 @@ module Control.Carrier.Distributed.SingleProcess
 
 import GHC.Generics (Generic)
 
-import Control.Carrier.MTL.TH (deriveMonadTrans, deriveAlgebra)
+import Control.Algebra
+import Control.Carrier.MTL.TH (deriveMonadTrans)
 import Control.Distributed.SClosure
 import Control.Effect.Distributed
 
@@ -36,10 +37,21 @@ instance SInstance (Serializable LocalWorker) where
     sinst = static Dict
 
 
-interpretSingleProcessT :: (Monad m, n ~ m) => Distributed n LocalWorker (SingleProcessT m) a -> SingleProcessT m a
-interpretSingleProcessT (GetNumWorkers k)                 = k 1
-interpretSingleProcessT (WithWorkers block k)             = k . pure =<< block LocalWorker
-interpretSingleProcessT (RunInWorker LocalWorker _ clo k) = k =<< SingleProcessT (seval clo)
+interpretSingleProcessT :: Monad m => Distributed m LocalWorker (SingleProcessT m) a -> SingleProcessT m a
+interpretSingleProcessT GetNumWorkers                   = return 1
+interpretSingleProcessT (WithWorkers block)             = pure <$> block LocalWorker
+interpretSingleProcessT (RunInWorker LocalWorker _ clo) = SingleProcessT $ seval clo
+
+TODO: understand
 
 
-deriveAlgebra 'interpretSingleProcessT
+instance (Monad m, Algebra ctx m) => Algebra ctx (SingleProcessT m) where
+    type Sig (SingleProcessT m) = Distributed m LocalWorker :+: Sig m
+
+    alg hdl sig ctx = SingleProcessT $
+        case sig of
+            L GetNumWorkers                   -> fmap (<$ ctx) $ return 1
+            L (WithWorkers block)             -> runSingleProcessT $ fmap pure <$> hdl (block LocalWorker <$ ctx)
+            L (RunInWorker LocalWorker _ clo) -> fmap (<$ ctx) $ (seval clo)
+            R other                           -> alg (runSingleProcessT . hdl) other ctx
+

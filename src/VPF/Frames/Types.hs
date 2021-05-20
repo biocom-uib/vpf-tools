@@ -64,7 +64,9 @@ type RecK = (FieldK -> Type) -> FieldsK -> Type
 
 -- type-level polymorphic field indexers
 
-type family ProjField (ki :: Type) (kr :: Type) (rs :: FieldsK) (i :: ki) :: kr where
+type ProjField :: forall (ki :: Type) -> forall (kr :: Type) -> FieldsK -> ki -> kr
+
+type family ProjField ki kr rs i where
     ProjField (Symbol, Type) (Symbol, Type)  rs  '(s, a)   = '(s, a)
     ProjField Symbol         (Symbol, Type)  rs  s         = '(s, FieldType s rs)
     ProjField (Symbol, Type) Symbol          rs  '(s, a)   = s

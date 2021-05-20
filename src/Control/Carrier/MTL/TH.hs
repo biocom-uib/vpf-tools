@@ -2,7 +2,7 @@
 module Control.Carrier.MTL.TH
   ( deriveMonadTrans
   , deriveMonadTransExcept
-  , deriveAlgebra
+  --, deriveAlgebra
   ) where
 
 import Data.Bifunctor (first)
@@ -370,6 +370,7 @@ deriveMonadTrans :: Name -> Q [Dec]
 deriveMonadTrans carrierName = deriveMonadTransExcept carrierName []
 
 
+{-
 deriveAlgebra :: Name -> Q [Dec]
 deriveAlgebra interpName = do
     interp <- getInterpInfo interpName
@@ -404,11 +405,19 @@ deriveAlgebra interpName = do
       [] ->
         [d|
             instance
-                ( Algebra $sigQ $mQ
-                , Threads Identity $sigQ
+                ( Algebra ctx $mQ
                 , $cxtQ
                 )
-                => Algebra ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
+                => Algebra ctx ($carrierTQ $mQ) where
+
+                type Sig ($carrierTQ $mQ) = $effTQ :+: Sig $mQ
+
+                alg hdl sig ctx = $carrierConQ $
+                    case sig of
+                        L $effPQ -> _
+                        R other  ->
+
+                alg
 
                 alg (L $effPQ) = $interpQ $effEQ
                 alg (R other)  = relayAlgebraUnwrap @($mQ) @($sigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
@@ -421,7 +430,7 @@ deriveAlgebra interpName = do
                 ( Algebra $sigQ $mQ
                 , Algebra $innerSigQ $innerMQ
                 , Subsumes $sigQ $innerSigQ
-                , Threads Identity $sigQ
+                , Algebra Identity $m
                 , $cxtQ
                 )
                 => Algebra ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
@@ -430,3 +439,4 @@ deriveAlgebra interpName = do
                 alg (R other)  = relayAlgebraUnwrap @($innerMQ) @($innerSigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
                 {-# inline alg #-}
           |]
+            -}

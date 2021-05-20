@@ -91,9 +91,11 @@ parseArgs = do
             <> progDesc "Classify virus sequences using an existing VPF classification"
             <> header "vpf-class: VPF-based virus sequence classifier"
 #ifdef VPF_ENABLE_MPI
-            <> footer "NOTE: This build is OpenMPI-enabled. The support is\
-                      \ experimental and the --workers and --chunk-size flags\
-                      \ are used for each individual worker."
+            <> footer (unlines
+                [ "NOTE: This build is OpenMPI-enabled. The support is"
+                , "experimental and the --workers and --chunk-size flags"
+                , "are used for each individual worker."
+                ])
 #else
             <> footer "NOTE: OpenMPI support is disabled in this build."
 #endif

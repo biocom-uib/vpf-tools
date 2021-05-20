@@ -70,6 +70,8 @@ deriveMonadTrans ''MpiMasterT
 data MPIWorker = MPIWorker MPI.Rank MPI.Tag
     deriving (Generic, Show)
 
+instance Store MPI.Rank
+instance Store MPI.Tag
 instance Store MPIWorker
 
 

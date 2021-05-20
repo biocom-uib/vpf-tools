@@ -3,12 +3,12 @@
 {-# language Strict #-}
 {-# language UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
-module Control.Algebra.Helpers
-  ( relayAlgebraIso
-  , relayAlgebraUnwrap
-  , relayAlgebraControl
-  , relayAlgebraControlYo
-  ) where
+module Control.Algebra.Helpers where
+  --( relayAlgebraIso
+  --, relayAlgebraUnwrap
+  --, relayAlgebraControl
+  --, relayAlgebraControlYo
+  --) where
 
 import Control.Algebra
 import Control.Effect.Sum.Extra
@@ -24,14 +24,18 @@ import Data.Reflection (give, Given(given))
 
 -- relay the effect to an equivalent carrier
 
+{-
 relayAlgebraIso :: forall t' t sig alg' m a.
-    ( Algebra (alg' :+: sig)  (t' m)
+    ( Algebra Identity (t' m)
+    , Sig (t' m) ~ (alg' :+: sig)
+    , Algebra Identity m
     , Monad (t m)
-    , Threads Identity sig
     )
     => (forall x. t m x -> t' m x)
     -> (forall x. t' m x -> t m x)
-    -> sig (t m) a
+    -> Handler ctx n m
+    -> Sig m n a
+    ->
     -> t m a
 relayAlgebraIso tt' t't =
     t't
@@ -46,9 +50,10 @@ relayAlgebraIso tt' t't =
 relayAlgebraUnwrap :: forall m' sig' m sig a.
     ( Coercible m m'
     , Coercible (m' a) (m a)
-    , Algebra sig' m'
+    , sig' ~ Sig m'
+    , Algebra Identity m'
     , Subsumes sig sig'
-    , Threads Identity sig
+    , Algebra Identity m
     , Monad m
     )
     => (forall x. m' x -> m x)
@@ -60,8 +65,10 @@ relayAlgebraUnwrap _ =
     . alg
     . injR @sig @sig'
     . thread (Identity ()) (fmap Identity . coerce . runIdentity)
+-}
 
 
+{-
 newtype StT t a = StT { unStT :: MTC.StT t a }
 
 newtype StFunctor t = StFunctor (forall x y. (x -> y) -> MTC.StT t x -> MTC.StT t y)
@@ -76,8 +83,8 @@ instance Given (StFunctor t) => Functor (StT t) where
 
 relayAlgebraControl :: forall sig t m a.
     ( MTC.MonadTransControl t
-    , Algebra sig m
-    , forall f. Functor f => Threads f sig
+    , sig ~ Sig m
+    , forall f. Functor f => Algebra f m
     , Monad m
     , Monad (t m)
     )
@@ -117,8 +124,8 @@ newtype YoStT t a = YoStT { unYoStT :: Yoneda (StT t) a }
 
 relayAlgebraControlYo :: forall sig t m a.
     ( MTC.MonadTransControl t
-    , Algebra sig m
-    , Threads (YoStT t) sig
+    , sig ~ Sig m
+    , Algebra (YoStT t) m
     , Monad m
     , Monad (t m)
     )
@@ -153,3 +160,4 @@ relayAlgebraControlYo fmap' sig = do
 
     lowerYo' :: forall x. YoStT t x -> MTC.StT t x
     lowerYo' = unStT . lowerYoneda . unYoStT
+-}

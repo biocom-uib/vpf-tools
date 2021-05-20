@@ -19,23 +19,16 @@ module VPF.Frames.VinylExts
   , RQuotient
   ) where
 
-import GHC.Exts (Any)
-
 import Control.Lens (Iso, Iso', Lens)
 import qualified Control.Lens as L
 
-import qualified Data.Array as A
 import Data.Bifunctor (first, second)
 import qualified Data.Type.Equality as E
 
 import Data.Vinyl (Rec(..), (<+>))
-import Data.Vinyl.ARec (ARec(..))
 
 import Data.Vinyl.Functor (Compose(..))
-import Data.Vinyl.Lens (rcast)
 import Data.Vinyl.TypeLevel
-
-import Unsafe.Coerce (unsafeCoerce)
 
 
 -- Class for any record that can be constructed from a single element
@@ -47,12 +40,6 @@ instance RSingleton Rec where
     rsingleton = L.iso (\(fa :& RNil) -> fa) (:& RNil)
     {-# inline rsingleton #-}
 
-instance RSingleton ARec where
-    rsingleton = L.iso (\(ARec afas) -> unsafeCoerce (afas A.! 0))
-                       (\fa -> ARec (A.listArray (0, 0) [unsafeCoerce fa]))
-    {-# inline rsingleton #-}
-
-
 -- Generic monoid-like structure for any rec (RNil/<+>)
 
 class RMonoid rec where
@@ -63,6 +50,7 @@ class RMonoid rec where
     rcons = rappend . L.review rsingleton
     {-# inline rcons #-}
 
+
 instance RMonoid Rec where
     rempty = RNil
     {-# inline rempty #-}
@@ -72,28 +60,6 @@ instance RMonoid Rec where
 
     rcons = (:&)
     {-# inline rcons #-}
-
-
-instance RMonoid ARec where
-    rempty = ARec (A.array (0,-1) [])
-    {-# inline rempty #-}
-
-    rappend (ARec as) (ARec bs) =
-      let
-        (0, u1) = A.bounds as
-        (0, u2) = A.bounds bs
-        u3 = u1+1 + u2+1 - 1
-      in
-        ARec $ A.listArray (0, u3) (A.elems as ++ A.elems bs)
-    {-# inline rappend #-}
-
-    rcons fa (ARec afas) =
-        let
-          (0, u) = A.bounds afas
-        in
-          ARec (A.listArray (0, u+1) (unsafeCoerce fa : A.elems afas))
-    {-# inline rcons #-}
-
 
 
 -- (strictly) monotone Nat lists
@@ -272,65 +238,6 @@ instance
             L.iso (\(r :& rs)      -> second (r :&) (split rs))
                   (\(ss, r :& rs') -> r :& join (ss, rs'))
     {-# inline rsubseqSplitC #-}
-
-
--- ARec instance
-
-instance
-    ( ReplaceSubseq ss ss' rs rs' is
-    , NatToInt (RLength ss)
-    , NatToInt (RLength rs)
-    , NatToInt (RLength rs')
-    , IndexWitnesses (RImage ss rs)
-    )
-    => RecSubseq ARec ss ss' rs rs' is where
-
-    rsubseqC = L.lens rcast $ \(ARec ars) (ARec ass') ->
-        let
-          replace :: Int -> [Int] -> [Any] -> [Any] -> [Any]
-          replace !_ _  rs []  = rs
-          replace !_ _  [] ss' = ss'
-          replace !_ [] rs ss' = ss' ++ rs
-
-          replace !i jjs@(j : js) (r : rs) s'ss'@(s' : ss')
-            | i == j    = s' : replace (i+1) js rs ss'
-            | otherwise = r : replace (i+1) jjs rs s'ss'
-
-          ars' = A.listArray (0, natToInt @(RLength rs') - 1) $
-                  replace 0 (indexWitnesses @is) (A.elems ars) (A.elems ass')
-        in
-          ARec ars'
-
-    rsubseqSplitC E.Refl = L.iso
-        (\(ARec ars) ->
-            let
-              split :: Int -> [Any] -> [Int] -> ([Any], [Any])
-              split !_ rs [] = ([], rs)
-
-              split !i (r : rs) jjs@(j : js)
-                | i == j    = case split (i+1) rs js  of (!ss, !rs') -> (r : ss, rs')
-                | otherwise = case split (i+1) rs jjs of (!ss, !rs') -> (ss, r : rs')
-
-              split !_ [] (_:_) = error "rsubseqSplitC @ARec: split: the impossible happened"
-            in
-              case split 0 (A.elems ars) (indexWitnesses @is) of
-                (ss, rs') -> (ARec $ A.listArray (0, natToInt @(RLength ss) - 1) ss,
-                              ARec $ A.listArray (0, natToInt @(RLength rs') - 1) rs'))
-        (\(ARec ass, ARec ars') ->
-          let
-            merge :: Int -> [Int] -> [Any] -> [Any] -> [Any]
-            merge !_ [] [] rs' = rs'
-            merge !_ _  ss []  = ss
-
-            merge !i jjs@(j : js) sss@(s : ss) rrs'@(r : rs')
-              | i == j    = s : merge (i+1) js ss rrs'
-              | otherwise = r : merge (i+1) jjs sss rs'
-
-            merge !_ [] (_:_) _ = error "rsubseqSplitC @ARec: merge: the impossible happened"
-            merge !_ (_:_) [] _ = error "rsubseqSplitC @ARec: merge: the impossible happened"
-          in
-            ARec $ A.listArray (0, natToInt @(RLength rs) - 1) $
-              merge 0 (indexWitnesses @is) (A.elems ass) (A.elems ars'))
 
 
 type RSubseq ss ss' rs rs' = RecSubseq Rec ss ss' rs rs' (RImage ss rs)

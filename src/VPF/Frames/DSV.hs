@@ -150,7 +150,7 @@ throwLeftsM = P.mapM (either throwM return)
 inCoreAoSExc ::
     ( RecVec cols
     , MonadIO m
-    , Has (Throw ParseError) sig m
+    , Has (Throw ParseError) m
     )
     => Producer (Record cols) (SafeT IO) ()
     -> m (FrameRec cols)
@@ -162,7 +162,7 @@ readFrame ::
     ( KnownSymbol sep, ColumnHeaders cols
     , CSV.ReadRec cols, RecVec cols
     , MonadIO m
-    , Has (Throw ParseError) sig m
+    , Has (Throw ParseError) m
     )
     => ParserOptions
     -> Path (DSV sep cols)

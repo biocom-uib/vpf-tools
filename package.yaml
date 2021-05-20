@@ -1,5 +1,5 @@
 name:                vpf-tools
-version:             0.1.0.0
+version:             1.0.0.0
 github:              "biocom-uib/vpf"
 license:             BSD3
 author:              "Gabriel Riera"
@@ -70,6 +70,7 @@ when:
   cpp-options: -DVPF_ENABLE_MPI
   dependencies:
   - mpi-hs
+  - mpi-hs-store
 
 default-extensions:
 - BangPatterns
@@ -83,6 +84,7 @@ default-extensions:
 - MultiParamTypeClasses
 - PolyKinds
 - RankNTypes
+- StandaloneKindSignatures
 - ScopedTypeVariables
 - StandaloneDeriving
 - TypeApplications

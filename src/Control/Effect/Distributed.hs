@@ -21,65 +21,67 @@ import Data.Functor.Apply (Apply)
 import Data.Semigroup.Foldable (fold1)
 import Data.Semigroup.Traversable (sequence1)
 import Data.List.NonEmpty (NonEmpty)
+import Data.Kind
 
 
-data Distributed n w m k
-    = GetNumWorkers (Natural -> m k)
-    | forall a. WithWorkers (w -> m a) (NonEmpty a -> m k)
-    | forall a. RunInWorker w (SDict (Serializable a)) (SClosure (n a)) (a -> m k)
+type Distributed :: (Type -> Type) -> Type -> (Type -> Type) -> Type -> Type
+
+data Distributed n w m a where
+    GetNumWorkers :: forall n w m. Distributed n w m Natural
+    WithWorkers :: forall n w m a. (w -> m a) -> Distributed n w m (NonEmpty a)
+    RunInWorker :: forall n w m a. w -> SDict (Serializable a) -> SClosure (n a) -> Distributed n w m a
+
+-- instance Functor m => Functor (Distributed n w m) where
+--     fmap f (GetNumWorkers k)           = GetNumWorkers (fmap f . k)
+--     fmap f (WithWorkers block k)       = WithWorkers block (fmap f . k)
+--     fmap f (RunInWorker w sdict clo k) = RunInWorker w sdict clo (fmap f . k)
+--
+--
+-- instance Apply f => Threads f (Distributed n w) where
+--     thread state handler (GetNumWorkers k) =
+--         GetNumWorkers (handler . (<$ state) . k)
+--
+--     thread state handler (WithWorkers block k) =
+--         WithWorkers (handler . (<$ state) . block)  (handler . fmap k . sequence1)
+--
+--     thread state handler (RunInWorker w sdict clo k) =
+--         RunInWorker w sdict clo (handler . (<$ state) . k)
 
 
-instance Functor m => Functor (Distributed n w m) where
-    fmap f (GetNumWorkers k)           = GetNumWorkers (fmap f . k)
-    fmap f (WithWorkers block k)       = WithWorkers block (fmap f . k)
-    fmap f (RunInWorker w sdict clo k) = RunInWorker w sdict clo (fmap f . k)
+getNumWorkers :: forall n w m. Has (Distributed n w) m => m Natural
+getNumWorkers = send (GetNumWorkers @n @w)
 
 
-instance Apply f => Threads f (Distributed n w) where
-    thread state handler (GetNumWorkers k) =
-        GetNumWorkers (handler . (<$ state) . k)
-
-    thread state handler (WithWorkers block k) =
-        WithWorkers (handler . (<$ state) . block)  (handler . fmap k . sequence1)
-
-    thread state handler (RunInWorker w sdict clo k) =
-        RunInWorker w sdict clo (handler . (<$ state) . k)
+getNumWorkers_ :: forall n w m. HasAny Distributed (Distributed n w) m => m Natural
+getNumWorkers_ = send (GetNumWorkers @n @w)
 
 
-getNumWorkers :: forall n w sig m. Has (Distributed n w) sig m => m Natural
-getNumWorkers = send (GetNumWorkers @n @w return)
+withWorkers :: forall n w m a. (Has (Distributed n w) m, Semigroup a) => (w -> m a) -> m (NonEmpty a)
+withWorkers block = send (WithWorkers @n @w block)
 
 
-getNumWorkers_ :: forall n w sig m. HasAny Distributed (Distributed n w) sig m => m Natural
-getNumWorkers_ = send (GetNumWorkers @n @w return)
-
-
-withWorkers :: forall n w sig m a. (Has (Distributed n w) sig m, Semigroup a) => (w -> m a) -> m a
-withWorkers block = send (WithWorkers block (return . fold1) :: Distributed n w m a)
-
-
-withWorkers_ :: forall n w sig m a.
-    ( HasAny Distributed (Distributed n w) sig m
+withWorkers_ :: forall n w m a.
+    ( HasAny Distributed (Distributed n w) m
     , Semigroup a
     )
     => (w -> m a)
-    -> m a
-withWorkers_ block = send (WithWorkers block (return . fold1) :: Distributed n w m a)
+    -> m (NonEmpty a)
+withWorkers_ block = send (WithWorkers @n @w block)
 
 
 runInWorker ::
-    Has (Distributed n w) sig m
+    Has (Distributed n w) m
     => w
     -> SDict (Serializable a)
     -> SClosure (n a)
     -> m a
-runInWorker w sdict clo = send (RunInWorker w sdict clo return)
+runInWorker w sdict clo = send (RunInWorker w sdict clo)
 
 
 runInWorker_ ::
-    HasAny Distributed (Distributed n w) sig m
+    HasAny Distributed (Distributed n w) m
     => w
     -> SDict (Serializable a)
     -> SClosure (n a)
     -> m a
-runInWorker_ w sdict clo = send (RunInWorker w sdict clo return)
+runInWorker_ w sdict clo = send (RunInWorker w sdict clo)
