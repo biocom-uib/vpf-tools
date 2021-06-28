@@ -24,14 +24,17 @@ dependencies:
 - aeson
 - array
 - bytestring
-- cryptonite
+- conduit
 - constraints
 - containers
+- cryptonite
 - directory
 - exceptions
 - feed
 - filepath
 - foldl
+- ftp-client
+- ftp-client-conduit
 - fused-effects
 - kan-extensions
 - lens
@@ -60,6 +63,7 @@ dependencies:
 - template-haskell
 - temporary
 - text
+- these
 - time
 - transformers
 - transformers-base
@@ -81,6 +85,7 @@ default-extensions:
 - BlockArguments
 - ConstraintKinds
 - DataKinds
+- DerivingStrategies
 - FlexibleContexts
 - FlexibleInstances
 - FunctionalDependencies

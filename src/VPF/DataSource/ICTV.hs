@@ -2,7 +2,7 @@
 {-# language RecordWildCards #-}
 {-# language Strict #-}
 {-# language TupleSections #-}
-module Bio.Requests.ICTV where
+module VPF.DataSource.ICTV where
 
 import Prelude hiding (last)
 
