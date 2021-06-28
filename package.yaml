@@ -29,6 +29,7 @@ dependencies:
 - containers
 - directory
 - exceptions
+- feed
 - filepath
 - foldl
 - fused-effects
@@ -37,6 +38,7 @@ dependencies:
 - lifted-async
 - memory
 - mmorph
+- modern-uri
 - monad-control
 - mtl
 - optparse-applicative
@@ -50,6 +52,7 @@ dependencies:
 - reflection
 - regex-base
 - regex-pcre-builtin
+- req
 - semigroupoids
 - stm
 - store
@@ -57,12 +60,14 @@ dependencies:
 - template-haskell
 - temporary
 - text
+- time
 - transformers
 - transformers-base
 - typed-process
 - vector
 - vector-algorithms
 - vinyl
+- xlsx
 - yaml
 
 when:
@@ -74,12 +79,14 @@ when:
 
 default-extensions:
 - BangPatterns
+- BlockArguments
 - ConstraintKinds
 - DataKinds
 - FlexibleContexts
 - FlexibleInstances
 - FunctionalDependencies
 - GADTs
+- ImportQualifiedPost
 - LambdaCase
 - MultiParamTypeClasses
 - PolyKinds
