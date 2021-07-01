@@ -2,7 +2,9 @@
 {-# language StandaloneKindSignatures #-}
 {-# language UndecidableInstances #-}
 module Control.Effect.Sum.Extra
-  ( FindMember
+  ( SumFst
+  , SumSnd
+  , FindMember
   , HasAny
   , Subsumes
   , injR
@@ -16,7 +18,17 @@ import Data.Type.Equality (type (==))
 import Data.Kind (Type, Constraint)
 
 
+
 type SigK = (Type -> Type) -> Type -> Type
+
+type SumFst :: SigK -> SigK
+type SumSnd :: SigK -> SigK
+
+type family SumFst sum where
+    SumFst (l :+: _) = l
+
+type family SumSnd sum where
+    SumSnd (_ :+: r) = r
 
 
 type Desaturate' :: forall k -> forall l -> l -> Maybe k

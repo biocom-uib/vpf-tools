@@ -5,6 +5,7 @@
 {-# language Strict #-}
 {-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
 module Control.Carrier.Error.Excepts
   ( module Control.Effect.Error
   , Errors(..)
@@ -19,7 +20,7 @@ module Control.Carrier.Error.Excepts
 
 import GHC.Generics (Generic)
 import Data.Functor.Identity
-import Data.Kind (Type)
+import Data.Kind (Constraint, Type)
 import Data.Store (Store)
 
 import Control.Algebra
@@ -27,6 +28,7 @@ import Control.Algebra.Helpers (relayAlgebraUnwrap)
 import Control.Carrier.MTL.TH (deriveMonadTrans)
 
 import Control.Effect.Error
+import Control.Effect.Sum.Extra
 
 import Control.Monad.Trans        as MT
 import Control.Monad.Trans.Except as MT
@@ -86,14 +88,14 @@ runLastExceptT (ExceptsT m) = MT.runExceptT (MT.withExceptT single m)
     single (Error e)    = e
 
 
-class Algebra sig m => ThrowErrors es sig m | m -> sig where
+class Algebra Identity m => ThrowErrors es m where
     throwErrors :: Errors es -> m a
 
 
-instance Algebra sig m => ThrowErrors '[] sig m where
+instance Algebra Identity m => ThrowErrors '[] m where
     throwErrors e = case e of
 
-instance (Has (Throw e) sig m, ThrowErrors es sig m) => ThrowErrors (e ': es) sig m where
+instance (Has (Throw e) m, ThrowErrors es m) => ThrowErrors (e ': es) m where
     throwErrors (Error e)    = throwError e
     throwErrors (InjError e) = throwErrors e
 
@@ -108,8 +110,8 @@ handleErrorCase h m = ExceptsT (MT.catchE (unExceptsT m) (\es -> handleE es h))
 
 interpretExceptsT :: (Monad m, MemberError e es) => Error e (ExceptsT es m) a -> ExceptsT es m a
 interpretExceptsT (L (Throw e))          = ExceptsT (MT.throwE (injE e))
-interpretExceptsT (R (Catch mb emb bmk)) =
-    ExceptsT $ MT.catchE (unExceptsT mb) (\es -> handleE es emb) >>= unExceptsT . bmk
+interpretExceptsT (R (Catch mb emb)) =
+    ExceptsT $ MT.catchE (unExceptsT mb) (\es -> handleE es emb)
   where
     handleE es h =
         case prjE es of
@@ -117,6 +119,13 @@ interpretExceptsT (R (Catch mb emb bmk)) =
           Nothing -> MT.throwE es
 
 
+
+type family ErrorsSig es where
+    ErrorsSig (e ': '[]) = Error e
+    ErrorsSig (e1 ': e2 ': es) = Error e1 :+: ErrorsSig (e2 ': es)
+
+
+type ErrorsAlgebra :: ((Type -> Type) -> Type -> Type) -> [Type] -> Constraint
 
 class ErrorsAlgebra sig es where
     algErrs :: Monad m => sig (ExceptsT es m) a -> ExceptsT es m a
@@ -132,38 +141,40 @@ instance (ErrorsAlgebra sig es, MemberError e es) => ErrorsAlgebra (Error e :+: 
     algErrs (R other) = algErrs other
     {-# inline algErrs #-}
 
+instance Algebra ctx m => Algebra ctx (ExceptsT '[] m) where
+    type Sig (ExceptsT '[] m) = Sig m
 
-instance Algebra sig m => Algebra sig (ExceptsT '[] m) where
-    alg = MT.lift . handleIdentity runPureExceptsT
+    alg hdl sig ctx = MT.lift $ alg (runPureExceptsT . hdl) sig ctx
     {-# inline alg #-}
 
 
-instance
-    ( Algebra sig m
-    , Threads (Either (Errors '[e])) sig
-    ) =>
-    Algebra
-        (Error e :+: sig)
-        (ExceptsT '[e] m)
-        where
+instance (Algebra ctx m, ErrorsAlgebra (ErrorsSig (e ': es)) es)
+    => Algebra ctx (ExceptsT (e ': es) m) where
 
-    alg (L e)     = algErrs e
-    alg (R other) = relayAlgebraUnwrap ExceptsT other
+    type Sig (ExceptsT (e ': es) m) = ErrorsSig (e ': es) :+: Sig m
+
+    alg hdl (L e)     ctx = _ $ algErrs @_ @(e ': es) @m e
+    alg hdl (R other) ctx = relayAlgebraUnwrap ExceptsT hdl other ctx
     {-# inline alg #-}
 
 
-instance
-    ( Algebra sig m
-    , Algebra (errsig :+: sig) (ExceptsT (e2 ': es) m) -- only required for the functional dependency
-    , ErrorsAlgebra errsig (e1 ': e2 ': es)
-    , Threads Identity errsig
-    , Threads (Either (Errors (e1 ': e2 ': es))) sig
-    )
-    => Algebra
-        ((Error e1 :+: errsig) :+: sig)
-        (ExceptsT (e1 ': e2 ': es) m)
-        where
-
-    alg (L e)     = algErrs e
-    alg (R other) = relayAlgebraUnwrap ExceptsT other
-    {-# inline alg #-}
+--instance
+--    ( Algebra ctx m
+--    --, Algebra (errsig :+: sig) (ExceptsT (e2 ': es) m) -- only required for the functional dependency
+--    , ErrorsAlgebra errsig (e1 ': e2 ': es)
+--    --, Threads Identity errsig
+--    --, Threads (Either (Errors (e1 ': e2 ': es))) sig
+--    )
+--    => Algebra
+--        ctx
+--        (ExceptsT (e1 ': e2 ': es) m)
+--        where
+--    --((Error e1 :+: errsig) :+: sig)
+--    type Sig (ExceptsT (e1 ': e2 ': es) m) =
+--        (Error e1 :+: SumFst (Sig (ExceptsT (e2 ': es) m)))
+--        :+:
+--        Sig m
+--
+--    alg hdl (L e)     ctx = algErrs e
+--    alg hdl (R other) ctx = relayAlgebraUnwrap ExceptsT other
+--    {-# inline alg #-}

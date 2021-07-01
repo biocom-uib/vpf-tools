@@ -4,11 +4,11 @@
 {-# language UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Control.Algebra.Helpers where
-  --( relayAlgebraIso
-  --, relayAlgebraUnwrap
-  --, relayAlgebraControl
-  --, relayAlgebraControlYo
-  --) where
+  -- ( relayAlgebraIso
+  -- , relayAlgebraUnwrap
+  -- , relayAlgebraControl
+  -- , relayAlgebraControlYo
+  -- ) where
 
 import Control.Algebra
 import Control.Effect.Sum.Extra
@@ -24,48 +24,46 @@ import Data.Reflection (give, Given(given))
 
 -- relay the effect to an equivalent carrier
 
-{-
-relayAlgebraIso :: forall t' t sig alg' m a.
-    ( Algebra Identity (t' m)
-    , Sig (t' m) ~ (alg' :+: sig)
-    , Algebra Identity m
-    , Monad (t m)
-    )
-    => (forall x. t m x -> t' m x)
-    -> (forall x. t' m x -> t m x)
-    -> Handler ctx n m
-    -> Sig m n a
-    ->
-    -> t m a
-relayAlgebraIso tt' t't =
-    t't
-    . fmap runIdentity
-    . alg
-    . R
-    . thread (Identity ()) (fmap Identity . tt' . runIdentity)
+-- relayAlgebraIso :: forall t' t sig alg' ctx m n a.
+--     ( Algebra ctx (t' m)
+--     , Sig (t' m) ~ (alg' :+: sig)
+--     , Algebra ctx (t m)
+--     , Monad (t m)
+--     )
+--     => (forall x. t' m x -> t m x)
+--     -> (forall x. t m x -> t' m x)
+--     -> Handler ctx n (t m)
+--     -> Sig m n a
+--     -> ctx ()
+--     -> t m (ctx a)
+-- relayAlgebraIso t't tt' hdl sig ctx =
+--     t't $ alg @ctx @(t' m) (tt' . hdl)
+    -- t't
+    -- . fmap runIdentity
+    -- . alg
+    -- . R
+    -- . thread (Identity ()) (fmap Identity . tt' . runIdentity)
 
 
 -- relay the effect to the inner type of a newtype
 
-relayAlgebraUnwrap :: forall m' sig' m sig a.
+relayAlgebraUnwrap :: forall m' m n ctx a.
     ( Coercible m m'
-    , Coercible (m' a) (m a)
-    , sig' ~ Sig m'
-    , Algebra Identity m'
-    , Subsumes sig sig'
-    , Algebra Identity m
-    , Monad m
+    , Algebra ctx m'
     )
     => (forall x. m' x -> m x)
-    -> sig m a
-    -> m a
-relayAlgebraUnwrap _ =
-    coerce @(m' a) @(m a)
-    . fmap runIdentity
-    . alg
-    . injR @sig @sig'
-    . thread (Identity ()) (fmap Identity . coerce . runIdentity)
--}
+    -> Handler ctx n m
+    -> Sig m' n a
+    -> ctx ()
+    -> m (ctx a)
+relayAlgebraUnwrap _ hdl sig ctx =
+    coerce @(m' (ctx a)) @(m (ctx a)) $
+        alg (coerce . hdl) sig ctx
+--     coerce @(m' a) @(m a)
+--     . fmap runIdentity
+--     . alg
+--     . injR @sig @sig'
+--     . thread (Identity ()) (fmap Identity . coerce . runIdentity)
 
 
 {-
