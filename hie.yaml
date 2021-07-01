@@ -1,0 +1,10 @@
+cradle:
+  stack:
+    - path: "./src/"
+      component: "vpf-tools:lib"
+    - path: "./app/mpi-test/"
+      component: "vpf-tools:exe:mpi-test"
+    - path: "./app/pipes-test/"
+      component: "vpf-tools:exe:pipes-test"
+    - path: "./app/vpf-vpf-class/"
+      component: "vpf-tools:exe:vpf-class"
