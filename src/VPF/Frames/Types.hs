@@ -87,6 +87,8 @@ type family InferFieldKind (ki :: Type) = (kr :: Type) where
 type MonoFieldSpec rs (i :: ki) (r :: kr) = (InferFieldKind ki ~ kr, ProjField ki kr rs i ~ r)
 
 
+type ProjName :: forall (ki :: Type) -> forall (kr :: Type) -> ki -> kr
+
 type family ProjName (ki :: Type) (kr :: Type) (i :: ki) :: kr where
     ProjName Symbol          Symbol s         = s
     ProjName (Symbol, Type)  Symbol '(s, a)   = s

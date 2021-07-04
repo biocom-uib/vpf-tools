@@ -17,7 +17,7 @@ module VPF.Ext.Prodigal
   , runProdigalT
   ) where
 
-import GHC.Generics (Generic, Generic1)
+import GHC.Generics (Generic)
 
 import qualified Data.ByteString.Lazy as BL (toStrict)
 import Data.Store (Store)
@@ -25,7 +25,7 @@ import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
 import Control.Algebra
-import Control.Carrier.MTL.TH (deriveMonadTrans, deriveAlgebra)
+import Control.Carrier.MTL.TH (deriveMonadTrans)
 
 import qualified Control.Monad.IO.Class      as MT
 import qualified Control.Monad.Morph         as MT
@@ -37,6 +37,8 @@ import qualified System.Process.Typed as Proc
 
 import VPF.Formats
 import VPF.Util.FS (resolveExecutable)
+import Control.Effect.Sum.Extra (injR)
+import Control.Algebra.Helpers (algUnwrapL)
 
 
 data ProdigalArgs = ProdigalArgs
@@ -49,20 +51,18 @@ data ProdigalArgs = ProdigalArgs
 instance Store ProdigalArgs
 
 
-data Prodigal m k where
-    Prodigal :: ProdigalArgs -> m k -> Prodigal m k
-    deriving (Generic1)
-
-instance Functor f => Threads f Prodigal
+data Prodigal m a where
+    Prodigal :: ProdigalArgs -> Prodigal m ()
 
 
-prodigal :: Has Prodigal sig m
-         => Path (FASTA Nucleotide)
-         -> Path (FASTA Aminoacid)
-         -> Maybe (Path GenBank)
-         -> m ()
+prodigal ::
+    Has Prodigal m
+    => Path (FASTA Nucleotide)
+    -> Path (FASTA Aminoacid)
+    -> Maybe (Path GenBank)
+    -> m ()
 prodigal inputFile outputAminoacidFile outputGenBankFile =
-    send (Prodigal ProdigalArgs{..} (pure ()))
+    send (Prodigal ProdigalArgs{..})
 
 
 data ProdigalConfig = ProdigalConfig
@@ -119,8 +119,8 @@ runProdigalT path defaultArgs m = MT.runExceptT $ do
     runProdigalTWith cfg m
 
 
-interpretProdigalT :: MT.MonadIO m => Prodigal (ProdigalT m) k -> ProdigalT m k
-interpretProdigalT (Prodigal args@ProdigalArgs{..} k) = do
+interpretProdigalT :: MT.MonadIO m => Prodigal n a -> ProdigalT m a
+interpretProdigalT (Prodigal args@ProdigalArgs{..}) = do
     cfg <- ProdigalT $ MT.lift MT.ask
 
     let cmdlineArgs =
@@ -131,14 +131,24 @@ interpretProdigalT (Prodigal args@ProdigalArgs{..} k) = do
           maybe [] (\path -> ["-o", untag path]) outputGenBankFile
 
     (exitCode, stderr) <- MT.liftIO $
+
         Proc.readProcessStderr $
         Proc.setStdout Proc.nullStream $
         Proc.proc (untag (prodigalPath cfg)) (prodigalDefaultArgs cfg ++ cmdlineArgs)
 
     case exitCode of
-      ExitSuccess    -> k
+      ExitSuccess    -> return ()
       ExitFailure ec ->
           ProdigalT $ MT.throwE $ ProdigalError args ec (decodeUtf8 (BL.toStrict stderr))
 
 
-deriveAlgebra 'interpretProdigalT
+instance
+    ( MT.MonadIO m
+    , ThreadAlgebra (Either ProdigalError) ctx m
+    )
+    => Algebra ctx (ProdigalT m) where
+
+    type Sig (ProdigalT m) = Prodigal :+: Sig m
+
+    alg = algUnwrapL injR ProdigalT \_hdl sig ctx ->
+        (<$ ctx) <$> interpretProdigalT sig

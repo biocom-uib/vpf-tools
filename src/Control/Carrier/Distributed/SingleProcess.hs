@@ -17,8 +17,9 @@ import Control.Carrier.MTL.TH (deriveMonadTrans)
 import Control.Distributed.SClosure
 import Control.Effect.Distributed
 
+import Control.Algebra.Helpers (algUnwrapL)
+
 import Data.Store (Store)
-import Control.Algebra.Helpers (relayAlgebraUnwrap)
 
 
 newtype SingleProcessT m a = SingleProcessT { runSingleProcessT :: m a }
@@ -38,20 +39,11 @@ instance SInstance (Serializable LocalWorker) where
     sinst = static Dict
 
 
-interpretSingleProcessT :: Monad m => Distributed m LocalWorker (SingleProcessT m) a -> SingleProcessT m a
-interpretSingleProcessT GetNumWorkers                   = return 1
-interpretSingleProcessT (WithWorkers block)             = pure <$> block LocalWorker
-interpretSingleProcessT (RunInWorker LocalWorker _ clo) = SingleProcessT $ seval clo
-
-
-instance (Monad m, Algebra ctx m) => Algebra ctx (SingleProcessT m) where
+instance Algebra ctx m => Algebra ctx (SingleProcessT m) where
     type Sig (SingleProcessT m) = Distributed m LocalWorker :+: Sig m
 
-    alg hdl sig ctx =
+    alg = algUnwrapL id SingleProcessT \hdl sig ctx ->
         case sig of
-            L GetNumWorkers                   -> SingleProcessT $ fmap (<$ ctx) $ return 1
-            L (WithWorkers block)             -> SingleProcessT $ runSingleProcessT $ fmap pure <$> hdl (block LocalWorker <$ ctx)
-            L (RunInWorker LocalWorker _ clo) -> SingleProcessT $ fmap (<$ ctx) $ (seval clo)
-            R (other :: (Sig m n a))          -> relayAlgebraUnwrap SingleProcessT hdl other ctx
-              -- alg (runSingleProcessT . hdl) other ctx
-
+            GetNumWorkers                 -> return (1 <$ ctx)
+            WithWorkers block             -> hdl (block LocalWorker <$ ctx)
+            RunInWorker LocalWorker _ clo -> SingleProcessT $ (<$ ctx) <$> seval clo

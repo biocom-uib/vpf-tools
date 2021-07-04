@@ -17,7 +17,7 @@
 #
 # resolver: ./custom-snapshot.yaml
 # resolver: https://example.com/snapshots/2018-01-01.yaml
-resolver: lts-17.12
+resolver: lts-18.0
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -40,7 +40,7 @@ extra-deps:
 - discrimination-0.4.1
 - name: fused-effects
   github: bielr/fused-effects
-  commit: 5b83e2d85360c8692ed01d35ac7fa9dee2d06b6e
+  commit: 8ceddb9f590d85eba33559f7024a97cf8e820765
 
 # - acme-missiles-0.3
 # - git: https://github.com/commercialhaskell/stack.git

@@ -16,8 +16,8 @@ import VPF.DataSource.GenericFTP
 
 refSeqVirusFtpSourceConfig :: FtpSourceConfig
 refSeqVirusFtpSourceConfig =
-    $$(ftpSourceConfigFromURI [uri|ftp://ftp.ncbi.nlm.nih.gov/refseq/release/|])
-        buildDownloadList
+    $$(ftpSourceConfigFromURI [uri|ftp://ftp.ncbi.nlm.nih.gov/refseq/release/|]) \h ->
+        buildDownloadList h "viral"
 
 
 refSeqFileRegex :: PCRE.Regex
@@ -27,7 +27,8 @@ refSeqFileRegex = PCRE.makeRegex
 
 data RefSeqFile
 
-matchRefSeqFile ::
+matchRefSeqFile :: a
+matchRefSeqFile = undefined
 
 
 buildDownloadList :: FTP.Handle -> String -> IO [FtpRelPath]

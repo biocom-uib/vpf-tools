@@ -20,7 +20,7 @@ module VPF.Ext.HMMER.Search
   , ProtSearchHit
   ) where
 
-import GHC.Generics (Generic, Generic1)
+import GHC.Generics (Generic)
 
 import qualified Data.ByteString.Lazy as BL (toStrict)
 import Data.Store (Store)
@@ -28,7 +28,7 @@ import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8)
 
 import Control.Algebra
-import Control.Carrier.MTL.TH (deriveMonadTrans, deriveAlgebra)
+import Control.Carrier.MTL.TH (deriveMonadTrans)
 
 import qualified Control.Monad.IO.Class      as MT
 import qualified Control.Monad.Morph         as MT
@@ -41,6 +41,8 @@ import qualified System.Process.Typed as Proc
 import VPF.Formats
 import VPF.Ext.HMMER (HMMERConfig, resolveHMMERTool)
 import VPF.Ext.HMMER.Search.Cols (ProtSearchHitCols, ProtSearchHit)
+import Control.Algebra.Helpers (algUnwrapL)
+import Control.Effect.Sum.Extra (injR)
 
 
 data HMMSearchArgs = HMMSearchArgs
@@ -54,20 +56,17 @@ instance Store HMMSearchArgs
 
 
 data HMMSearch m k where
-    HMMSearch :: HMMSearchArgs -> m k -> HMMSearch m k
-    deriving (Generic1)
-
-instance Functor f => Threads f HMMSearch
+    HMMSearch :: HMMSearchArgs -> HMMSearch m ()
 
 
 hmmsearch ::
-    Has HMMSearch sig m
+    Has HMMSearch m
     => Path HMMERModel
     -> Path (FASTA Aminoacid)
     -> Path (HMMERTable ProtSearchHitCols)
     -> m ()
 hmmsearch inputModelFile inputSeqsFile outputFile =
-    send (HMMSearch HMMSearchArgs {..} (pure ()))
+    send (HMMSearch HMMSearchArgs {..})
 
 
 data HMMSearchConfig = HMMSearchConfig
@@ -124,8 +123,8 @@ runHMMSearchT cfg defaultArgs m = MT.runExceptT $ do
     runHMMSearchTWith cfg m
 
 
-interpretHMMSearchT :: MT.MonadIO m => HMMSearch (HMMSearchT m) a -> HMMSearchT m a
-interpretHMMSearchT (HMMSearch args@HMMSearchArgs{..} k) = do
+interpretHMMSearchT :: MT.MonadIO m => HMMSearch n a -> HMMSearchT m a
+interpretHMMSearchT (HMMSearch args@HMMSearchArgs{..}) = do
     cfg <- HMMSearchT $ MT.lift MT.ask
 
     let cmdlineArgs =
@@ -142,7 +141,17 @@ interpretHMMSearchT (HMMSearch args@HMMSearchArgs{..} k) = do
         Proc.proc (hmmsearchPath cfg) (hmmsearchDefaultArgs cfg ++ cmdlineArgs)
 
     case exitCode of
-      ExitSuccess    -> k
+      ExitSuccess    -> return ()
       ExitFailure ec -> HMMSearchT $ MT.throwE $ HMMSearchError args ec (decodeUtf8 (BL.toStrict stderr))
 
-deriveAlgebra 'interpretHMMSearchT
+
+instance
+    ( MT.MonadIO m
+    , ThreadAlgebra (Either HMMSearchError) ctx m
+    )
+    => Algebra ctx (HMMSearchT m) where
+
+    type Sig (HMMSearchT m) = HMMSearch :+: Sig m
+
+    alg = algUnwrapL injR HMMSearchT \_hdl sig ctx ->
+        (<$ ctx) <$> interpretHMMSearchT sig

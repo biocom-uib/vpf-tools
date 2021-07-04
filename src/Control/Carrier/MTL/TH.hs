@@ -8,15 +8,10 @@ module Control.Carrier.MTL.TH
 import Data.Bifunctor (first)
 import Data.Profunctor.Unsafe ((#.), (.#))
 import Data.Coerce (Coercible, coerce)
-import Data.Functor.Identity
 import Data.List ((\\), foldl')
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe)
 import Data.Monoid (Ap(..))
-
-import Control.Algebra
-import Control.Algebra.Helpers
-import Control.Effect.Sum.Extra
 
 import qualified Control.Monad.Catch         as MT
 import qualified Control.Monad.IO.Class      as MT
@@ -31,12 +26,6 @@ import Language.Haskell.TH.Lens
 
 
 
-tyConName :: Type -> Q Name
-tyConName (ConT n)    = return n
-tyConName (AppT ty _) = tyConName ty
-tyConName ty          = fail $ "cannot find concrete type constructor of " ++ pprint ty
-
-
 decomposeTransStack :: Type -> ([Type], Type)
 decomposeTransStack = go
   where
@@ -47,10 +36,6 @@ decomposeTransStack = go
 
 applyTransStack :: [Type] -> Type -> Type
 applyTransStack ts m = foldr AppT m ts
-
-
-cxtType :: Cxt -> Type
-cxtType cxt = foldl' AppT (TupleT (length cxt)) cxt
 
 
 makeRenamer :: [Name] -> [Name] -> Map.Map Name Type
@@ -70,26 +55,6 @@ data CarrierInfo = CarrierInfo
 carrierTrans :: CarrierInfo -> Type
 carrierTrans c = foldl' AppT (ConT (carrierTypeName c)) (map VarT (carrierExtraTyVars c))
 
-
-
-data InterpInfo = InterpInfo
-    { interpCxt       :: [Pred]
-    , interpEffType   :: Type
-    , interpCarrierT  :: Type
-    , interpBaseM     :: Name
-    , interpBaseValue :: Name
-    }
-
-
-interpSatCarrier :: InterpInfo -> Type
-interpSatCarrier i =
-    interpCarrierT i
-        `AppT` VarT (interpBaseM i)
-        `AppT` VarT (interpBaseValue i)
-
-
-interpCarrierTyVars :: InterpInfo -> [Name]
-interpCarrierTyVars = L.toListOf typeVars . interpSatCarrier
 
 
 getCarrierInfo :: Maybe [Name] -> Name -> Q CarrierInfo
@@ -135,42 +100,6 @@ getCarrierInfo mayTyArgs carrierName = do
           Just renames -> \tyVars ->
             let renamer = makeRenamer (L.toListOf typeVars tyVars) renames
             in  substType renamer
-
-
-getInterpInfo :: Name -> Q InterpInfo
-getInterpInfo interpName = do
-    VarI _name interpType _rhs <- reify interpName
-
-    (interpCxt, satEffType, satCarrierType) <-
-        case interpType of
-          ForallT _tyVars cxt (AppT (AppT ArrowT effType) cType) ->
-              return (cxt, effType, cType)
-
-          _ -> fail $ "could not match interpreter type with forall <vars>. Cxt => Eff M a -> M a: "
-                        ++ pprint interpType
-
-    (effType, carrierM, a) <-
-        case satEffType of
-          AppT (AppT effType carrierM) (VarT a) ->
-              return (effType, carrierM, a)
-
-          _ -> fail $ "could not match saturated effect type with Eff M a: " ++ pprint satEffType
-
-    (carrierT, m) <-
-        case satCarrierType of
-          AppT carrierM' (VarT a')
-            | AppT carrierT (VarT m) <- carrierM'
-            , carrierM == carrierM' && a == a' ->
-                 return (carrierT, m)
-          _ -> fail "error inspecting carrier type"
-
-    return InterpInfo
-        { interpCxt       = interpCxt
-        , interpEffType   = effType
-        , interpCarrierT  = carrierT
-        , interpBaseM     = m
-        , interpBaseValue = a
-        }
 
 
 unwrap1 :: Coercible f f' => (f' a -> f a) -> f a -> f' a
@@ -369,74 +298,3 @@ deriveMonadTransExcept carrierName excluded = do
 deriveMonadTrans :: Name -> Q [Dec]
 deriveMonadTrans carrierName = deriveMonadTransExcept carrierName []
 
-
-{-
-deriveAlgebra :: Name -> Q [Dec]
-deriveAlgebra interpName = do
-    interp <- getInterpInfo interpName
-
-    carrierName <- tyConName (interpCarrierT interp)
-
-    carrier <- getCarrierInfo (Just (interpCarrierTyVars interp)) carrierName
-
-    sigName <- newName "sig"
-    innerSigName <- newName "innerSig"
-    effName <- newName "eff"
-
-    let sigQ = varT sigName
-        carrierTQ = return (interpCarrierT interp)
-        carrierConQ = conE (carrierConName carrier)
-        cxtQ = return (cxtType (interpCxt interp))
-
-        m = VarT (interpBaseM interp)
-
-        innerSigQ = varT innerSigName
-        innerMQ = return (applyTransStack (carrierInnerStack carrier) m)
-        mQ = return m
-
-        interpQ = varE interpName
-        effTQ = return (interpEffType interp)
-        effPQ = varP effName
-        effEQ = varE effName
-
-    -- FIXME: Ugly fix for newtype T m a = T (m a). `Subsumes` still fails if
-    -- the signature of innerM equals the signature of m (e.g. newtype T m a = T (IdentityT m a))
-    case carrierInnerStack carrier of
-      [] ->
-        [d|
-            instance
-                ( Algebra ctx $mQ
-                , $cxtQ
-                )
-                => Algebra ctx ($carrierTQ $mQ) where
-
-                type Sig ($carrierTQ $mQ) = $effTQ :+: Sig $mQ
-
-                alg hdl sig ctx = $carrierConQ $
-                    case sig of
-                        L $effPQ -> _
-                        R other  ->
-
-                alg
-
-                alg (L $effPQ) = $interpQ $effEQ
-                alg (R other)  = relayAlgebraUnwrap @($mQ) @($sigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
-                {-# inline alg #-}
-          |]
-
-      _ ->
-        [d|
-            instance
-                ( Algebra $sigQ $mQ
-                , Algebra $innerSigQ $innerMQ
-                , Subsumes $sigQ $innerSigQ
-                , Algebra Identity $m
-                , $cxtQ
-                )
-                => Algebra ($effTQ :+: $sigQ) ($carrierTQ $mQ) where
-
-                alg (L $effPQ) = $interpQ $effEQ
-                alg (R other)  = relayAlgebraUnwrap @($innerMQ) @($innerSigQ) @($carrierTQ $mQ) @($sigQ) $carrierConQ other
-                {-# inline alg #-}
-          |]
-            -}

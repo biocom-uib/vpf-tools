@@ -11,7 +11,7 @@ module VPF.Model.VirusClass where
 
 import GHC.Generics (Generic)
 
-import Control.Algebra (Has)
+import Control.Algebra
 import Control.Carrier.Error.Excepts (ExceptsT, runExceptsT, Errors, throwErrors)
 import Control.Distributed.SClosure
 import Control.Effect.Reader
@@ -102,7 +102,7 @@ data ModelConfig = ModelConfig
 type PredictedCols = '[M.VirusName, Cls.ClassName, M.MembershipRatio, M.VirusHitScore, M.ConfidenceScore]
 
 
-createGenomesSubdir :: (MonadIO m, Has (Reader WorkDir) sig m) => m (Path Directory)
+createGenomesSubdir :: (MonadIO m, Has (Reader WorkDir) m) => m (Path Directory)
 createGenomesSubdir = do
     WorkDir wd <- ask
     let fp = untag wd </> "genomes"
@@ -110,7 +110,7 @@ createGenomesSubdir = do
     return (Tagged fp)
 
 
-createProteinsSubdir :: (MonadIO m, Has (Reader WorkDir) sig m) => m (Path Directory)
+createProteinsSubdir :: (MonadIO m, Has (Reader WorkDir) m) => m (Path Directory)
 createProteinsSubdir = do
     WorkDir wd <- ask
     let fp = untag wd </> "proteins"
@@ -118,7 +118,7 @@ createProteinsSubdir = do
     return (Tagged fp)
 
 
-createHitsSubdir :: (MonadIO m, Has (Reader WorkDir) sig m) => m (Path Directory)
+createHitsSubdir :: (MonadIO m, Has (Reader WorkDir) m) => m (Path Directory)
 createHitsSubdir = do
     WorkDir wd <- ask
     let fp = untag wd </> "search"
@@ -126,7 +126,7 @@ createHitsSubdir = do
     return (Tagged fp)
 
 
-createProcessedHitsSubdir :: (MonadIO m, Has (Reader WorkDir) sig m) => m (Path Directory)
+createProcessedHitsSubdir :: (MonadIO m, Has (Reader WorkDir) m) => m (Path Directory)
 createProcessedHitsSubdir = do
     WorkDir wd <- ask
     let fp = untag wd </> "processed"
@@ -159,7 +159,7 @@ parseGenomesFileName (Tagged fp) =
 
 writeGenomesFile ::
     ( MonadIO m
-    , Has (Reader WorkDir) sig m
+    , Has (Reader WorkDir) m
     )
     => Producer (FA.FastaEntry Nucleotide) (SafeT IO) ()
     -> m (GenomeChunkKey, Path (FASTA Nucleotide))
@@ -207,9 +207,9 @@ processedHitsFileFor dir (GenomeChunkKey hash) =
 searchGenomeHits ::
     ( MonadBaseControl IO m
     , MonadIO m
-    , Has HMMSearch sig m
-    , Has Prodigal sig m
-    , Has (Reader WorkDir) sig m
+    , Has HMMSearch m
+    , Has Prodigal m
+    , Has (Reader WorkDir) m
     )
     => GenomeChunkKey
     -> Path (FASTA Nucleotide)
@@ -248,10 +248,10 @@ searchGenomeHits key genomesFile vpfsFile = do
     createEmptyHitsFile fp = IO.withFile (untag fp) IO.WriteMode $ \_ -> return ()
 
 
-aggregateHits :: forall sig m.
-    ( Has (Reader ModelConfig) sig m
-    , Has (Throw DSV.ParseError) sig m
-    , Has (Throw FA.ParseError) sig m
+aggregateHits :: forall m.
+    ( Has (Reader ModelConfig) m
+    , Has (Throw DSV.ParseError) m
+    , Has (Throw FA.ParseError) m
     , MonadIO m
     )
     => Path (FASTA Aminoacid)
@@ -315,10 +315,10 @@ aggregateHits aminoacidsFile hitsFile = do
 
 processHits ::
     ( MonadIO m
-    , Has (Reader ModelConfig) sig m
-    , Has (Reader WorkDir) sig m
-    , Has (Throw DSV.ParseError) sig m
-    , Has (Throw FA.ParseError) sig m
+    , Has (Reader ModelConfig) m
+    , Has (Reader WorkDir) m
+    , Has (Throw DSV.ParseError) m
+    , Has (Throw FA.ParseError) m
     )
     => GenomeChunkKey
     -> Path (FASTA Aminoacid)
@@ -397,12 +397,12 @@ data SearchHitsConcurrencyOpts = SearchHitsConcurrencyOpts
 instance Store SearchHitsConcurrencyOpts
 
 
-asyncSearchHits :: forall sig m.
+asyncSearchHits :: forall m.
     ( MonadBaseControl IO m
     , MonadIO m
-    , Has HMMSearch sig m
-    , Has Prodigal sig m
-    , Has (Reader WorkDir) sig m
+    , Has HMMSearch m
+    , Has Prodigal m
+    , Has (Reader WorkDir) m
     )
     => SearchHitsConcurrencyOpts
     -> Path HMMERModel
@@ -421,21 +421,21 @@ asyncSearchHits concOpts vpfsFile genomesFiles = do
         stimes nworkers PA.toListM
 
 
-distribSearchHits :: forall sigm m sign n w.
+distribSearchHits :: forall m n w.
     ( MonadBaseControl IO m
     , MonadIO m
-    , Has (Reader WorkDir) sigm m
-    , Has (Throw FA.ParseError) sigm m
-    , HasAny Distributed (Distributed n w) sigm m
-    , Typeable sign
+    , Has (Reader WorkDir) m
+    , Has (Throw FA.ParseError) m
+    , HasAny Distributed (Distributed n w) m
     , Typeable n
+    , Typeable (Sig n)
     )
     => SDict
         ( MonadBaseControl IO n
         , MonadIO n
-        , Has HMMSearch sign n
-        , Has Prodigal sign n
-        , Has (Reader WorkDir) sign n
+        , Has HMMSearch n
+        , Has Prodigal n
+        , Has (Reader WorkDir) n
         )
     -> SearchHitsConcurrencyOpts
     -> Path HMMERModel
@@ -467,7 +467,7 @@ distribSearchHits sdict concOpts vpfsFile genomes = do
           & PA.mapResultM (either throwError return)
 
     let asyncSearchHits' kps =
-          static (\Dict -> asyncSearchHits @sign @n)
+          static (\Dict -> asyncSearchHits @n)
             <:*> sdict
             <:*> spureWith (static Dict) concOpts
             <:*> spureWith (static Dict) vpfsFile
@@ -498,13 +498,13 @@ newtype ProcessHitsConcurrencyOpts = ProcessHitsConcurrencyOpts
     }
 
 
-asyncProcessHits :: forall sig m.
+asyncProcessHits :: forall m.
     ( MonadIO m
     , MonadBaseControl IO m
-    , Has (Reader ModelConfig) sig m
-    , Has (Reader WorkDir) sig m
-    , Has (Throw DSV.ParseError) sig m
-    , Has (Throw FA.ParseError) sig m
+    , Has (Reader ModelConfig) m
+    , Has (Reader WorkDir) m
+    , Has (Throw DSV.ParseError) m
+    , Has (Throw FA.ParseError) m
     )
     => ProcessHitsConcurrencyOpts
     -> [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
@@ -525,10 +525,10 @@ newtype PredictMembershipConcurrencyOpts = PredictMembershipConcurrencyOpts
     }
 
 
-asyncPredictMemberships :: forall sig m.
+asyncPredictMemberships :: forall m.
     ( MonadBaseControl IO m
     , MonadIO m
-    , Has (Throw DSV.ParseError) sig m
+    , Has (Throw DSV.ParseError) m
     )
     => PredictMembershipConcurrencyOpts
     -> Map (Field Cls.ClassKey) Cls.ClassificationFiles
@@ -634,21 +634,21 @@ newtype CheckpointLoadError = CheckpointJSONLoadError String
 
 data ClassificationStep
     = SearchHitsStep {
-        runSearchHitsStep :: forall sigm m sign n w.
+        runSearchHitsStep :: forall m n w.
             ( MonadBaseControl IO m
             , MonadIO m
-            , Has (Reader WorkDir) sigm m
-            , Has (Throw FA.ParseError) sigm m
-            , HasAny Distributed (Distributed n w) sigm m
-            , Typeable sign
+            , Has (Reader WorkDir) m
+            , Has (Throw FA.ParseError) m
+            , HasAny Distributed (Distributed n w) m
+            , Typeable (Sig n)
             , Typeable n
             )
             => SDict
                 ( MonadBaseControl IO n
                 , MonadIO n
-                , Has HMMSearch sign n
-                , Has Prodigal sign n
-                , Has (Reader WorkDir) sign n
+                , Has HMMSearch n
+                , Has Prodigal n
+                , Has (Reader WorkDir) n
                 )
             -> SearchHitsConcurrencyOpts
             -> Path HMMERModel
@@ -656,23 +656,23 @@ data ClassificationStep
             -> m Checkpoint
     }
     | ProcessHitsStep {
-        runProcessHitsStep :: forall sig m.
+        runProcessHitsStep :: forall m.
             ( MonadBaseControl IO m
             , MonadIO m
-            , Has (Reader ModelConfig) sig m
-            , Has (Reader WorkDir) sig m
-            , Has (Throw DSV.ParseError) sig m
-            , Has (Throw FA.ParseError) sig m
+            , Has (Reader ModelConfig) m
+            , Has (Reader WorkDir) m
+            , Has (Throw DSV.ParseError) m
+            , Has (Throw FA.ParseError) m
             )
             => ProcessHitsConcurrencyOpts
             -> m Checkpoint
     }
     | PredictMembershipStep {
-        runPredictMembershipStep :: forall sig m.
+        runPredictMembershipStep :: forall m.
             ( MonadBaseControl IO m
             , MonadIO m
-            , Has (Reader WorkDir) sig m
-            , Has (Throw DSV.ParseError) sig m
+            , Has (Reader WorkDir) m
+            , Has (Throw DSV.ParseError) m
             )
             => PredictMembershipConcurrencyOpts
             -> Map (Field Cls.ClassKey) Cls.ClassificationFiles
@@ -683,7 +683,7 @@ data ClassificationStep
 
 tryLoadCheckpoint ::
     ( MonadIO m
-    , Has (Throw CheckpointLoadError) sig m
+    , Has (Throw CheckpointLoadError) m
     )
     => Path (JSON Checkpoint)
     -> m (Maybe Checkpoint)
@@ -746,10 +746,10 @@ checkpointFileFor (WorkDir dir) (GenomeChunkKey hash) =
     name = "checkpoint-" ++ hash ++ ".json"
 
 
-runClassification :: forall sig m a.
+runClassification :: forall m a.
     ( MonadIO m
-    , Has (Reader WorkDir) sig m
-    , Has (Throw CheckpointLoadError) sig m
+    , Has (Reader WorkDir) m
+    , Has (Throw CheckpointLoadError) m
     )
     => Path (FASTA Nucleotide)
     -> ((Checkpoint -> m a) -> ClassificationStep -> m a)

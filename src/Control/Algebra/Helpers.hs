@@ -1,72 +1,85 @@
-{-# language DerivingVia #-}
+{-# language GeneralizedNewtypeDeriving #-}
 {-# language QuantifiedConstraints #-}
 {-# language Strict #-}
 {-# language UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
-module Control.Algebra.Helpers where
-  -- ( relayAlgebraIso
-  -- , relayAlgebraUnwrap
-  -- , relayAlgebraControl
-  -- , relayAlgebraControlYo
-  -- ) where
+module Control.Algebra.Helpers
+    ( relayAlgebraIso
+    , algUnwrapL
+    , relayAlgebraUnwrap
+    , StT
+    , algControlL
+    , relayAlgebraControl
+    , YoStT
+    , algControlYoL
+    , relayAlgebraControlYo
+    ) where
 
 import Control.Algebra
 import Control.Effect.Sum.Extra
 
 import Control.Monad (join)
-import qualified Control.Monad.Trans.Control as MTC
+import Control.Monad.Trans.Control qualified as MTC
 
 import Data.Coerce
-import Data.Functor.Identity
+import Data.Functor.Compose
 import Data.Functor.Yoneda
 import Data.Reflection (give, Given(given))
 
 
 -- relay the effect to an equivalent carrier
 
--- relayAlgebraIso :: forall t' t sig alg' ctx m n a.
---     ( Algebra ctx (t' m)
---     , Sig (t' m) ~ (alg' :+: sig)
---     , Algebra ctx (t m)
---     , Monad (t m)
---     )
---     => (forall x. t' m x -> t m x)
---     -> (forall x. t m x -> t' m x)
---     -> Handler ctx n (t m)
---     -> Sig m n a
---     -> ctx ()
---     -> t m (ctx a)
--- relayAlgebraIso t't tt' hdl sig ctx =
---     t't $ alg @ctx @(t' m) (tt' . hdl)
-    -- t't
-    -- . fmap runIdentity
-    -- . alg
-    -- . R
-    -- . thread (Identity ()) (fmap Identity . tt' . runIdentity)
+relayAlgebraIso ::
+    ( Sig m ~ Sig m'
+    , Algebra ctx m'
+    )
+    => (forall x. m' x -> m x)
+    -> (forall x. m x -> m' x)
+    -> Handler ctx n m
+    -> Sig m n a
+    -> ctx ()
+    -> m (ctx a)
+relayAlgebraIso m'm mm' hdl sig ctx =
+    m'm $ alg (mm' . hdl) sig ctx
 
 
 -- relay the effect to the inner type of a newtype
 
-relayAlgebraUnwrap :: forall m' m n ctx a.
-    ( Coercible m m'
-    , Algebra ctx m'
+algUnwrapL :: forall m m' n ctx sig1 sig2 a.
+    ( Algebra ctx m'
+    , Coercible m m'
+    , Sig m ~ (sig1 :+: sig2)
     )
-    => (forall x. m' x -> m x)
+    => (forall n0 x. sig2 n0 x -> Sig m' n0 x)
+    -> (forall x. m' x -> m x)
+    -> (Handler ctx n m -> sig1 n a -> ctx () -> m (ctx a))
     -> Handler ctx n m
-    -> Sig m' n a
+    -> Sig m n a
     -> ctx ()
     -> m (ctx a)
-relayAlgebraUnwrap _ hdl sig ctx =
-    coerce @(m' (ctx a)) @(m (ctx a)) $
-        alg (coerce . hdl) sig ctx
---     coerce @(m' a) @(m a)
---     . fmap runIdentity
---     . alg
---     . injR @sig @sig'
---     . thread (Identity ()) (fmap Identity . coerce . runIdentity)
+algUnwrapL inj m'm algL hdl sig ctx =
+    case sig of
+        L sigL -> algL hdl sigL ctx
+        R sigR -> relayAlgebraUnwrap inj m'm hdl sigR ctx
 
 
-{-
+relayAlgebraUnwrap :: forall m' m n sig ctx a.
+    ( Algebra ctx m'
+    , Coercible m m'
+    )
+    => (forall n0 x. sig n0 x -> Sig m' n0 x)
+    -> (forall x. m' x -> m x)
+    -> Handler ctx n m
+    -> sig n a
+    -> ctx ()
+    -> m (ctx a)
+relayAlgebraUnwrap inj m'm hdl sig ctx =
+    m'm $ alg (mm' . hdl) (inj sig) ctx
+  where
+    mm' :: forall x. m x -> m' x
+    mm' = coerce
+
+
 newtype StT t a = StT { unStT :: MTC.StT t a }
 
 newtype StFunctor t = StFunctor (forall x y. (x -> y) -> MTC.StT t x -> MTC.StT t y)
@@ -79,30 +92,47 @@ instance Given (StFunctor t) => Functor (StT t) where
 
 -- use StT as the state functor with a reflected instance
 
-relayAlgebraControl :: forall sig t m a.
+algControlL ::
     ( MTC.MonadTransControl t
-    , sig ~ Sig m
-    , forall f. Functor f => Algebra f m
-    , Monad m
+    , Algebra1 Functor m
+    , Functor ctx
+    , Monad (t m)
+    , Sig (t m) ~ (sig1 :+: Sig m)
+    )
+    => (forall x y. (x -> y) -> MTC.StT t x -> MTC.StT t y)
+    -> (Handler ctx n (t m) -> sig1 n a -> ctx () -> t m (ctx a))
+    -> Handler ctx n (t m)
+    -> Sig (t m) n a
+    -> ctx ()
+    -> t m (ctx a)
+algControlL fmap' algL hdl sig ctx =
+    case sig of
+        L sigL -> algL hdl sigL ctx
+        R sigR -> relayAlgebraControl fmap' hdl sigR ctx
+
+
+relayAlgebraControl :: forall t m n ctx a.
+    ( MTC.MonadTransControl t
+    , Algebra1 Functor m
+    , Functor ctx
     , Monad (t m)
     )
     => (forall x y. (x -> y) -> MTC.StT t x -> MTC.StT t y)
-    -> sig (t m) a
-    -> t m a
-relayAlgebraControl fmap' sig = give (StFunctor @t fmap') $ do
+    -> Handler ctx n (t m)
+    -> Sig m n a
+    -> ctx ()
+    -> t m (ctx a)
+relayAlgebraControl fmap' hdl sig ctx = give (StFunctor @t fmap') do
     state <- captureStT
 
     sta <- MTC.liftWith $ \runT -> do
         let runStT :: forall x. t m x -> m (StT t x)
             runStT = fmap StT . runT
 
-            handler :: forall x. StT t (t m x) -> m (StT t x)
-            handler = runStT . join . restoreStT
+            hdlT :: Handler (StT t) (t m) m
+            hdlT = runStT . join . restoreStT
 
-            handle' :: sig (t m) a -> sig m (StT t a)
-            handle' = thread state handler
-
-        alg (handle' sig)
+        thread (hdlT ~<~ hdl) sig (ctx <$ state)
 
     restoreStT sta
   where
@@ -113,37 +143,53 @@ relayAlgebraControl fmap' sig = give (StFunctor @t fmap') $ do
     restoreStT = MTC.restoreT . return . unStT
 
 
-
 -- same trick using Yoneda instead of reflection
 
 newtype YoStT t a = YoStT { unYoStT :: Yoneda (StT t) a }
-  deriving Functor via Yoneda (StT t)
+  deriving newtype Functor
 
 
-relayAlgebraControlYo :: forall sig t m a.
+algControlYoL ::
     ( MTC.MonadTransControl t
-    , sig ~ Sig m
-    , Algebra (YoStT t) m
+    , Algebra (Compose (YoStT t) ctx) m
+    , Monad m
+    , Monad (t m)
+    , Sig (t m) ~ (sig1 :+: Sig m)
+    )
+    => (forall x y. (x -> y) -> MTC.StT t x -> MTC.StT t y)
+    -> (Handler ctx n (t m) -> sig1 n a -> ctx () -> t m (ctx a))
+    -> Handler ctx n (t m)
+    -> Sig (t m) n a
+    -> ctx ()
+    -> t m (ctx a)
+algControlYoL fmap' algL hdl sig ctx =
+    case sig of
+        L sigL -> algL hdl sigL ctx
+        R sigR -> relayAlgebraControlYo fmap' hdl sigR ctx
+
+
+relayAlgebraControlYo :: forall t m n ctx a.
+    ( MTC.MonadTransControl t
+    , Algebra (Compose (YoStT t) ctx) m
     , Monad m
     , Monad (t m)
     )
     => (forall x y. (x -> y) -> MTC.StT t x -> MTC.StT t y)
-    -> sig (t m) a
-    -> t m a
-relayAlgebraControlYo fmap' sig = do
+    -> Handler ctx n (t m)
+    -> Sig m n a
+    -> ctx ()
+    -> t m (ctx a)
+relayAlgebraControlYo fmap' hdl sig ctx = do
     state <- captureYoT
 
     yosta <- MTC.liftWith $ \runT -> do
         let runTYo :: forall x. t m x -> m (YoStT t x)
             runTYo = fmap liftYo' . runT
 
-            handler :: forall x. YoStT t (t m x) -> m (YoStT t x)
-            handler = runTYo . join . restoreYoT
+            hdlY :: Handler (YoStT t) (t m) m
+            hdlY = runTYo . join . restoreYoT
 
-            handle' :: sig (t m) a -> sig m (YoStT t a)
-            handle' = thread state handler
-
-        alg (handle' sig)
+        thread (hdlY ~<~ hdl) sig (ctx <$ state)
 
     restoreYoT yosta
   where
@@ -158,4 +204,3 @@ relayAlgebraControlYo fmap' sig = do
 
     lowerYo' :: forall x. YoStT t x -> MTC.StT t x
     lowerYo' = unStT . lowerYoneda . unYoStT
--}

@@ -73,7 +73,10 @@ type HasAny sigF sig m = (FindMember sigF sig (Sig m), Has sig m)
 -- instance (Algebra sigs m, FindMember sigF sig sigs) => HasAny sigF sig sigs m
 
 
-class Subsumes (sub :: SigK) (sup :: SigK) where
+
+type Subsumes :: SigK -> SigK -> Constraint
+
+class Subsumes sub sup where
     injR :: sub m a -> sup m a
 
 instance Subsumes sub sub where

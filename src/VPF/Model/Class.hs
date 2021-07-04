@@ -44,7 +44,7 @@ classObjs = L.iso (F.groups %~ F.cat
 
 loadClassification ::
     ( MonadIO m
-    , Has (Throw DSV.ParseError) sig m
+    , Has (Throw DSV.ParseError) m
     )
     => Path (DSV "\t" ClassificationCols)
     -> m (GroupedFrameRec (Field ModelName) ModelClassCols)
@@ -55,7 +55,7 @@ loadClassification fp = F.setIndex @"model_name" <$> DSV.readFrame opts fp
 
 loadClassObjs ::
     ( MonadIO m
-    , Has (Throw DSV.ParseError) sig m
+    , Has (Throw DSV.ParseError) m
     )
     => Path (DSV "\t" ClassificationCols)
     -> m (GroupedFrameRec (Field ModelName) '[ClassObj])
@@ -64,7 +64,7 @@ loadClassObjs = fmap (L.view classObjs) . loadClassification
 
 loadScoreSamples ::
     ( MonadIO m
-    , Has (Throw DSV.ParseError) sig m
+    , Has (Throw DSV.ParseError) m
     )
     => Path (DSV "\t" '[M.VirusHitScore])
     -> m (Vector (Field M.VirusHitScore))
@@ -98,7 +98,7 @@ data ClassificationParams = ClassificationParams
 
 loadClassificationParams ::
     ( MonadIO m
-    , Has (Throw DSV.ParseError) sig m
+    , Has (Throw DSV.ParseError) m
     )
     => ClassificationFiles
     -> m ClassificationParams

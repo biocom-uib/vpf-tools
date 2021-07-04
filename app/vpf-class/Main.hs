@@ -65,7 +65,7 @@ putErrLn :: MonadIO m => String -> m ()
 putErrLn = liftIO . IO.hPutStrLn IO.stderr
 
 
-dieWith :: Has Die sig m => String -> m a
+dieWith :: Has Die m => String -> m a
 dieWith = throwError . DieMsg
 
 
@@ -150,7 +150,7 @@ mainClassify cfg = do
         return ()
 
 
-newModelCfg :: (MonadIO m, Has Die sig m) => Config -> m VC.ModelConfig
+newModelCfg :: (MonadIO m, Has Die m) => Config -> m VC.ModelConfig
 newModelCfg cfg = do
     virusNameExtractor <- compileRegex (Opts.virusNameRegex cfg)
 
@@ -163,7 +163,7 @@ newModelCfg cfg = do
         }
 
 
-compileRegex :: (MonadIO m, Has Die sig m) => Text -> m (Text -> Maybe Text)
+compileRegex :: (MonadIO m, Has Die m) => Text -> m (Text -> Maybe Text)
 compileRegex src = do
     erx <- liftIO $ PCRE.compile (PCRE.compUTF8 + PCRE.compAnchored)
                                  (PCRE.execAnchored + PCRE.execNoUTF8Check)
@@ -201,7 +201,7 @@ dyingWithExitCode ec m = do
           return (ExitFailure ec)
 
 
-loadDataFilesIndex :: (MonadIO m, Has Die sig m) => Config -> m Opts.DataFilesIndex
+loadDataFilesIndex :: (MonadIO m, Has Die m) => Config -> m Opts.DataFilesIndex
 loadDataFilesIndex cfg = do
     r <- liftIO $ Opts.loadDataFilesIndex (Opts.dataFilesIndexFile cfg)
 
@@ -213,7 +213,7 @@ loadDataFilesIndex cfg = do
           in  dieWith $ "error loading data file index:\n" ++ indentedPretty err
 
 
-withProdigalCfg :: (MonadIO m, Has Die sig m) => Config -> Pr.ProdigalT m a -> m a
+withProdigalCfg :: (MonadIO m, Has Die m) => Config -> Pr.ProdigalT m a -> m a
 withProdigalCfg cfg m = do
     res <- Pr.runProdigalT (Opts.prodigalPath cfg) ["-p", Opts.prodigalProcedure cfg] m
 
@@ -222,7 +222,7 @@ withProdigalCfg cfg m = do
       Left e  -> dieWith $ "prodigal error: " ++ show e
 
 
-withHMMSearchCfg :: (MonadIO m, Has Die sig m) => Config -> HMM.HMMSearchT m a -> m a
+withHMMSearchCfg :: (MonadIO m, Has Die m) => Config -> HMM.HMMSearchT m a -> m a
 withHMMSearchCfg cfg m = do
     let hmmerConfig = HMM.HMMERConfig (Opts.hmmerPrefix cfg)
 
@@ -235,7 +235,7 @@ withHMMSearchCfg cfg m = do
 
 handleCheckpointLoadError ::
     ( Monad m
-    , Has Die sig (ExceptsT es m)
+    , Has Die (ExceptsT es m)
     )
     => ExceptsT (VC.CheckpointLoadError ': es) m a
     -> ExceptsT es m a
@@ -248,7 +248,7 @@ handleCheckpointLoadError = handleErrorCase $ \case
 
 handleFastaParseErrors ::
     ( Monad m
-    , Has Die sig (ExceptsT es m)
+    , Has Die (ExceptsT es m)
     )
     => ExceptsT (FA.ParseError ': es) m a
     -> ExceptsT es m a
@@ -271,7 +271,7 @@ handleFastaParseErrors = handleErrorCase $ \case
 
 handleDSVParseErrors ::
     ( Monad m
-    , Has Die sig (ExceptsT es m)
+    , Has Die (ExceptsT es m)
     )
     => ExceptsT (DSV.ParseError ': es) m a
     -> ExceptsT es m a
