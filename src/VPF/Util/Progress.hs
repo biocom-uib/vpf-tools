@@ -12,8 +12,8 @@ import Prelude hiding (init)
 
 import qualified Control.Concurrent.MVar as MVar
 import Control.Monad
-import Control.Monad.IO.Class (liftIO)
-import Pipes.Safe (MonadSafe, bracket)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Catch (MonadMask, bracket)
 
 import Data.Maybe (fromMaybe)
 
@@ -58,6 +58,6 @@ finish (State var message _) last = do
     IO.hPutStrLn IO.stderr ""
 
 
-tracking :: (Eq a, MonadSafe m) => a -> (a -> String) -> (State a -> m b) -> m b
+tracking :: (Eq a, MonadIO m, MonadMask m) => a -> (a -> String) -> (State a -> m b) -> m b
 tracking start message =
     bracket (liftIO $ init start message) (\p -> liftIO $ finish p Nothing)

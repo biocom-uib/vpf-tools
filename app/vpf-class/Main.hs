@@ -258,15 +258,10 @@ handleFastaParseErrors = handleErrorCase $ \case
             fp ++ ":" ++ show linenum ++
                 ": FASTA parsing error: expected name line but found " ++ show found
 
-    FA.ExpectedSequenceLine fp linenum [] ->
+    FA.MissingSequenceLines fp linenum nameLine ->
         dieWith $
             fp ++ ":" ++ show linenum ++
-                ": FASTA parsing error: expected sequence but found EOF"
-
-    FA.ExpectedSequenceLine fp linenum (l:_) ->
-        dieWith $
-            fp ++ ":" ++ show linenum ++
-                ": FASTA parsing error: expected sequence but found " ++ show l
+                ": FASTA parsing error: no sequences found for " ++ show nameLine
 
 
 handleDSVParseErrors ::

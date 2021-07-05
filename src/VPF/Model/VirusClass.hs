@@ -12,7 +12,8 @@ module VPF.Model.VirusClass where
 import GHC.Generics (Generic)
 
 import Control.Algebra
-import Control.Carrier.Error.Excepts (ExceptsT, runExceptsT, Errors, throwErrors)
+import Control.Category ((>>>))
+import Control.Concurrent.STM qualified as STM
 import Control.Distributed.SClosure
 import Control.Effect.Reader
 import Control.Effect.Distributed
@@ -21,39 +22,36 @@ import Control.Effect.Throw
 import qualified Control.Foldl as Fold
 import qualified Control.Lens as L
 import Control.Monad
-import Control.Monad.IO.Class (MonadIO(..))
+import Control.Monad.Catch (MonadMask)
 import Control.Monad.Trans.Control (MonadBaseControl)
+import Control.Monad.Trans.Except (ExceptT, runExceptT)
 import Control.Monad.Trans.Reader (runReaderT)
+import Control.Monad.Trans.Resource (ResourceT, runResourceT)
+import Control.Monad.Trans.Resource qualified as ResourceT
 
 import qualified Data.Aeson as Aeson
-import Data.Bifunctor (first)
 import qualified Data.ByteString.Char8 as BC
-import Data.List (genericLength, isPrefixOf, isSuffixOf)
+import Data.List (isPrefixOf, isSuffixOf)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
-import Data.Monoid (Ap(..))
+import Data.Maybe (fromMaybe, isJust)
 import Data.Proxy (Proxy(..))
-import Data.Semigroup (stimes)
 import Data.Store (Store)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
 import Data.Vector (Vector)
 import qualified Data.Vector as Vec
 
 import qualified Data.Vinyl as V
 
-import Pipes (Producer, Pipe, (>->))
-import qualified Pipes         as P
-import qualified Pipes.Lift    as P
 import qualified Pipes.Prelude as P
-import Pipes.Safe (SafeT, runSafeT)
-import qualified Pipes.Safe as PS
+import Pipes.Safe (runSafeT)
 
-import Pipes.Concurrent.Async ((>||>), (>-|>))
-import qualified Pipes.Concurrent.Async       as PA
-import qualified Pipes.Concurrent.Synchronize as PA
+import Streaming
+import Streaming.Prelude qualified as S
+import Streaming.Concurrent qualified as SC
 
 import System.Directory as D
 import System.FilePath ((</>), takeFileName)
@@ -161,19 +159,21 @@ writeGenomesFile ::
     ( MonadIO m
     , Has (Reader WorkDir) m
     )
-    => Producer (FA.FastaEntry Nucleotide) (SafeT IO) ()
-    -> m (GenomeChunkKey, Path (FASTA Nucleotide))
+    => Stream (Of (FA.FastaEntry Nucleotide)) (ResourceT IO) r
+    -> m (Of (GenomeChunkKey, Path (FASTA Nucleotide)) r)
 writeGenomesFile genomes = do
     genomesDir <- createGenomesSubdir
 
     tmpGenomesFile <- FS.emptyTmpFile genomesDir "split-genomes.fna"
-    liftIO $ runSafeT $ P.runEffect $ genomes >-> FA.fastaFileWriter tmpGenomesFile
+
+    r <- liftIO $ runResourceT $
+        FA.writeFastaFile tmpGenomesFile genomes
 
     key <- liftIO $ getGenomeChunkKey tmpGenomesFile
     let genomesFile = genomesFileFor genomesDir key
     liftIO $ D.renameFile (untag tmpGenomesFile) (untag genomesFile)
 
-    return (key, genomesFile)
+    return ((key, genomesFile) :> r)
 
 
 genomesFileFor :: Path Directory -> GenomeChunkKey -> Path (FASTA Nucleotide)
@@ -236,13 +236,9 @@ searchGenomeHits key genomesFile vpfsFile = do
     return (protsFile, hitsFile)
   where
     isEmptyFAA :: Path (FASTA Aminoacid) -> IO Bool
-    isEmptyFAA fp = runSafeT $ do
-        firstItem <- P.next (FA.fastaFileReader fp)
-
-        case firstItem of
-          Left (Left _e)  -> return False
-          Left (Right ()) -> return True
-          Right (_, _)    -> return False
+    isEmptyFAA fp = runResourceT do
+        firstItem :> _ <- S.head (FA.readFastaFile fp)
+        return (isJust firstItem)
 
     createEmptyHitsFile :: Path (HMMERTable ProtSearchHitCols) -> IO ()
     createEmptyHitsFile fp = IO.withFile (untag fp) IO.WriteMode $ \_ -> return ()
@@ -277,16 +273,16 @@ aggregateHits aminoacidsFile hitsFile = do
     fastaEntryToRow :: FA.FastaEntry Aminoacid -> Record '[M.ProteinName, M.KBaseSize]
     fastaEntryToRow entry =
         V.fieldRec
-          ( #protein_name =: FA.removeNameComments (FA.entryName entry)
+          ( #protein_name =: T.decodeUtf8 (FA.removeNameComments (FA.entryName entry))
           , #k_base_size  =: fromIntegral (FA.entrySeqNumBases entry) / 1000
           )
 
     loadProteinSizes :: m (GroupedFrameRec (Field M.ProteinName) '[M.KBaseSize])
     loadProteinSizes = do
-        (colVecs, errs) <- liftIO $ runSafeT $
-            Fold.impurely P.foldM' (F.colVecsFoldM 128) $
-                FA.fastaFileReader aminoacidsFile
-                  >-> P.map fastaEntryToRow
+        colVecs :> errs <- liftIO $ runResourceT $
+            FA.readFastaFile aminoacidsFile
+                & S.map fastaEntryToRow
+                & Fold.impurely S.foldM (F.colVecsFoldM 128)
 
         either throwError return errs
         return $ F.setIndex @"protein_name" (F.fromColVecs colVecs)
@@ -332,8 +328,9 @@ processHits key protsFile hitsFile = do
     let processedHitsFile = processedHitsFileFor processedHitsDir key
         writerOpts = DSV.defWriterOptions '\t'
 
-    liftIO $ runSafeT $ FS.atomicCreateFile processedHitsFile $ \tmpFile ->
-        DSV.writeDSV writerOpts (FS.fileWriter (untag tmpFile)) aggregatedHits
+    liftIO $ runSafeT $
+        FS.atomicCreateFile processedHitsFile \tmpFile ->
+            DSV.writeDSV writerOpts (FS.fileWriter (untag tmpFile)) aggregatedHits
 
     return processedHitsFile
 
@@ -400,6 +397,7 @@ instance Store SearchHitsConcurrencyOpts
 asyncSearchHits :: forall m.
     ( MonadBaseControl IO m
     , MonadIO m
+    , MonadMask m
     , Has HMMSearch m
     , Has Prodigal m
     , Has (Reader WorkDir) m
@@ -411,19 +409,18 @@ asyncSearchHits :: forall m.
 asyncSearchHits concOpts vpfsFile genomesFiles = do
     let nworkers = numSearchingWorkers concOpts
 
-    genomesFilesProducer <- liftIO $ PA.stealingEach genomesFiles
-
-    PA.feedAsyncConsumer genomesFilesProducer $
-        P.mapM (\(key, genomesFile) -> do
+    SC.withStreamMapM (fromIntegral nworkers)
+        (\(key, genomesFile) -> do
             (protsFile, hitsFile) <- searchGenomeHits key genomesFile vpfsFile
             return (key, protsFile, hitsFile))
-        >-|>
-        stimes nworkers PA.toListM
+        (S.each genomesFiles)
+        S.toList_
 
 
 distribSearchHits :: forall m n w.
     ( MonadBaseControl IO m
     , MonadIO m
+    , MonadMask m
     , Has (Reader WorkDir) m
     , Has (Throw FA.ParseError) m
     , HasAny Distributed (Distributed n w) m
@@ -433,64 +430,135 @@ distribSearchHits :: forall m n w.
     => SDict
         ( MonadBaseControl IO n
         , MonadIO n
+        , MonadMask n
         , Has HMMSearch n
         , Has Prodigal n
         , Has (Reader WorkDir) n
         )
     -> SearchHitsConcurrencyOpts
     -> Path HMMERModel
-    -> Producer (FA.FastaEntry Nucleotide) (SafeT IO) (Either FA.ParseError ())
+    -> Stream (Of (FA.FastaEntry Nucleotide)) (ResourceT IO) (Either FA.ParseError ())
     -> m [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
 distribSearchHits sdict concOpts vpfsFile genomes = do
     nslaves <- getNumWorkers_
 
     wd <- ask @WorkDir
 
-    let genomesChunkWriter :: Pipe [FA.FastaEntry Nucleotide] (Integer, (GenomeChunkKey, Path _)) (SafeT IO) r
-        genomesChunkWriter = P.mapM $ \chunk -> do
-            kp <- liftIO $ runReaderT (writeGenomesFile (P.each chunk)) wd
-            return (genericLength chunk, kp)
+    -- producer: groups of numSearchingWorkers fasta files with fastaChunkSize sequences each
 
-        chunkGenomeCount :: Pipe [(Integer, a)] (Integer, [a]) (SafeT IO) r
-        chunkGenomeCount = P.map (first sum . unzip)
+    let writeGenomeChunk :: forall m a b x.
+            ( m ~ ResourceT IO
+            , a ~ FA.FastaEntry Nucleotide
+            , b ~ (GenomeChunkKey, Path (FASTA Nucleotide))
+            )
+            => Stream (Of a) m x
+            -> m (Of (Integer, b) x)
+        writeGenomeChunk chunk = do
+            let chunkWithCount :: Stream (Of a) m (Of Integer x)
+                chunkWithCount = Fold.purely S.fold Fold.genericLength (S.copy chunk)
 
-    genomesFilesProducer :: PA.AsyncProducer (Integer, [(_, _)]) (SafeT IO) () m () <- liftIO $
-        genomes
-          & PA.bufferedChunks (fromIntegral $ fastaChunkSize concOpts)
-          & (>-> genomesChunkWriter)
-          & PA.bufferedChunks (fromIntegral $ numSearchingWorkers concOpts)
-          & (>-> chunkGenomeCount)
-          & PA.stealingAsyncProducer (nslaves+1)
-          & fmap \ap -> ap
-          & PA.defaultOutput (Right ())
-          & PA.hoist (liftIO . runSafeT)
-          & PA.mapResultM (either throwError return)
+            kp :> (count :> x) <- liftIO $ runReaderT (writeGenomesFile chunkWithCount) wd
+            return ((count, kp) :> x)
 
-    let asyncSearchHits' kps =
-          static (\Dict -> asyncSearchHits @n)
-            <:*> sdict
-            <:*> spureWith (static Dict) concOpts
-            <:*> spureWith (static Dict) vpfsFile
-            <:*> spureWith (static Dict) kps
+        tallyChunkSize :: forall m a x.
+            Monad m
+            => Stream (Of (Integer, a)) m x
+            -> m (Of ([a], Integer) x)
+        tallyChunkSize stream = do
+            kp :> size :> x <- S.toList $ S.sum (S.unzip stream)
+            return ((kp, size) :> x)
 
-    progress <- liftIO $ Progress.init 0 (\nseqs -> "processsed " ++ show nseqs ++ " sequences")
-    let updateProgress n = liftIO $ Progress.update progress (+ n)
+        chunkedGenomeFiles :: forall m a r.
+            ( m ~ ResourceT IO
+            , a ~ (GenomeChunkKey, Path (FASTA Nucleotide))
+            , r ~ Either FA.ParseError ()
+            )
+            => Stream (Of ([a], Integer)) m r
+        chunkedGenomeFiles = genomes
+            & chunksOf (fromIntegral $ fastaChunkSize concOpts)
+            & S.mappedPost writeGenomeChunk
+            & chunksOf (fromIntegral $ numSearchingWorkers concOpts)
+            & S.mappedPost tallyChunkSize
 
-    rs <- withWorkers_ $ \w -> do
-        ((), r) <- PA.runAsyncEffect (nslaves+1) $
-            genomesFilesProducer
-            >||>
-            P.mapM (\(n, kps) -> runInWorker_ w (static Dict) (asyncSearchHits' kps) <* updateProgress n)
-            >-|>
-            P.concat
-            >-|>
-            PA.toListM
+        -- propagate the result of the stream as throwError (if reached)
+        sendWithErrors :: forall m a e.
+            (MonadIO m, Has (Throw e) m)
+            => SC.InBasket a
+            -> Stream (Of a) (ResourceT IO) (Either e ())
+            -> m ()
+        sendWithErrors (SC.InBasket send) =
+            liftIO . runResourceT . go >=> \case
+                Nothing -> return ()
+                Just (Left e) -> throwError e
+                Just (Right ()) -> return ()
+          where
+            go :: Stream (Of a) (ResourceT IO) r -> ResourceT IO (Maybe r)
+            go str = do
+                enext <- S.next str
 
-        return r
+                case enext of
+                    Left r -> return (Just r)
+                    Right (a, str') -> do
+                        continue <- liftIO $ STM.atomically (send a)
+                        if continue then
+                            go str'
+                        else
+                            return Nothing
 
-    liftIO $ Progress.finish progress Nothing
+    -- transformation:
+    -- - input: chunks of paths to genome fasta files
+    -- - output: chunks of paths to protein fasta files and their hmmsearch results
 
-    return rs
+    let processChunkedGenomes :: forall input output.
+            ( input ~ [(GenomeChunkKey, Path (FASTA 'Nucleotide))]
+            , output ~ [(GenomeChunkKey, Path (FASTA 'Aminoacid), Path (HMMERTable ProtSearchHitCols))]
+            )
+            => SC.OutBasket (input, Integer {- count -})
+            -> SC.InBasket (output, Integer {- count -})
+            -> m ()
+        processChunkedGenomes outBasket inBasket =
+            withWorkers_ \w ->
+                SC.joinBuffersM
+                    (\(kps, n) -> do
+                        kpps <- runInWorker_ w (static Dict) (asyncSearchHits' kps)
+                        return (kpps, n))
+                    outBasket
+                    inBasket
+          where
+            asyncSearchHits' :: [(GenomeChunkKey, Path (FASTA 'Nucleotide))] -> SClosure (n [(GenomeChunkKey, Path (FASTA 'Aminoacid), Path (HMMERTable ProtSearchHitCols))])
+            asyncSearchHits' kps =
+              static (\Dict -> asyncSearchHits @n)
+                <:*> sdict
+                <:*> spureWith (static Dict) concOpts
+                <:*> spureWith (static Dict) vpfsFile
+                <:*> spureWith (static Dict) kps
+
+
+    -- progress tracking
+
+    let trackProgressAndCollect :: SC.OutBasket ([a], Integer) -> m [a]
+        trackProgressAndCollect progressOut = liftIO do
+            let message nseqs = "processed " ++ show nseqs ++ " sequences"
+
+            Progress.tracking 0 message \progress ->
+                SC.withStreamBasket progressOut $
+                    S.chain (\(_kpps, n) -> Progress.update progress (+ n))
+                    >>> S.map fst
+                    >>> S.concat
+                    >>> S.toList_
+
+
+    -- pipeline
+
+    let transformBuffer = SC.bounded (fromIntegral nslaves + 1)
+        progressBuffer = SC.unbounded
+
+    SC.withBuffer progressBuffer
+        (\progressIn ->
+            SC.withBuffer transformBuffer
+                (flip sendWithErrors chunkedGenomeFiles)
+                (flip processChunkedGenomes progressIn))
+        trackProgressAndCollect
 
 
 newtype ProcessHitsConcurrencyOpts = ProcessHitsConcurrencyOpts
@@ -499,8 +567,9 @@ newtype ProcessHitsConcurrencyOpts = ProcessHitsConcurrencyOpts
 
 
 asyncProcessHits :: forall m.
-    ( MonadIO m
-    , MonadBaseControl IO m
+    ( MonadBaseControl IO m
+    , MonadIO m
+    , MonadMask m
     , Has (Reader ModelConfig) m
     , Has (Reader WorkDir) m
     , Has (Throw DSV.ParseError) m
@@ -512,12 +581,12 @@ asyncProcessHits :: forall m.
 asyncProcessHits concOpts hitsFiles = do
     let nworkers = numProcessingHitsWorkers concOpts
 
-    hitsFilesProducer <- liftIO $ PA.stealingEach hitsFiles
-
-    PA.feedAsyncConsumer hitsFilesProducer $
-        P.mapM (\(key, protsFile, hitsFile) -> (,) key <$> processHits key protsFile hitsFile)
-        >-|>
-        stimes nworkers PA.toListM
+    SC.withStreamMapM (fromIntegral nworkers)
+        (\(key, protsFile, hitsFile) ->  do
+            processedHitsFile <- processHits key protsFile hitsFile
+            return (key, processedHitsFile))
+        (S.each hitsFiles)
+        S.toList_
 
 
 newtype PredictMembershipConcurrencyOpts = PredictMembershipConcurrencyOpts
@@ -526,8 +595,7 @@ newtype PredictMembershipConcurrencyOpts = PredictMembershipConcurrencyOpts
 
 
 asyncPredictMemberships :: forall m.
-    ( MonadBaseControl IO m
-    , MonadIO m
+    ( MonadIO m
     , Has (Throw DSV.ParseError) m
     )
     => PredictMembershipConcurrencyOpts
@@ -544,7 +612,7 @@ asyncPredictMemberships concOpts classFiles aggHitsFiles outputDir = do
 
     classes <- mapM (L._2 %%~ Cls.loadClassificationParams) (Map.toAscList classFiles)
 
-    (Ap errors, paths) <- liftIO $ runSafeT $ do
+    eres <- liftIO $ runResourceT do
         let sep = T.singleton '\t'
             parserOpts = DSV.defParserOptions '\t'
 
@@ -552,10 +620,7 @@ asyncPredictMemberships concOpts classFiles aggHitsFiles outputDir = do
             forM classes \(classKey, classParams) -> do
                 let path = untag outputDir </> T.unpack (untag classKey) ++ ".tsv"
 
-                h <- PS.mask_ $ do
-                    hdl <- liftIO $ IO.openFile path IO.WriteMode
-                    PS.register (IO.hClose hdl)
-                    return hdl
+                (_closeKey, h) <- ResourceT.allocate (IO.openFile path IO.WriteMode) IO.hClose
 
                 liftIO $ T.hPutStrLn h (DSV.headerToDSV @PredictedCols Proxy sep)
 
@@ -565,55 +630,65 @@ asyncPredictMemberships concOpts classFiles aggHitsFiles outputDir = do
 
         liftIO $ IO.hPutStrLn IO.stderr $ "found " ++ show (length aggHitsFiles) ++ " aggregated hit files"
 
-        Progress.tracking 0 (\nchunks -> "predicted " ++ show nchunks ++ " units") $ \progress -> do
-            hitChunks <- liftIO $ PA.stealingEach aggHitsFiles
+        let message nchunks = "predicted " ++ show nchunks ++ " units"
 
-            let toBeWritten :: PA.AsyncProducer' (IO.Handle, Vec.Vector Text) IO (Ap (Either _) ())
-                toBeWritten = PA.duplicatingAsyncProducer $
-                    (pure () <$ hitChunks)
-                    >->
-                    runApExceptsP (P.mapM (DSV.readFrame parserOpts))
-                    >->
-                    scheduleForWriting classHandles sep
+        res <- liftIO $ Progress.tracking 0 message \progress -> runExceptT do
+            SC.withBufferedTransform nworkers
+                (\outAggHits inEncoded ->
+                    liftIO $
+                        SC.withStreamBasket outAggHits $
+                            predictAll classHandles
+                            >>> encodeRowsDSV sep
+                            >>> flip SC.writeStreamBasket inEncoded)
+                (SC.writeStreamBasket $
+                    loadAggHitsFiles parserOpts aggHitsFiles)
+                (\outEncoded ->
+                    liftIO $
+                        SC.withStreamBasket outEncoded (writeOutput progress))
 
-            liftIO $ PA.runAsyncEffect nworkers $
-                stimes nworkers (PA.defaultOutput (pure ()) toBeWritten)
-                >||>
-                -- we don't want concurrent writes
-                (paths <$ writeOutput progress)
+        return $ paths <$ res
 
-    case errors of
-      Left errs -> throwErrors @'[DSV.ParseError] errs
-      Right ()  -> return paths
+    case eres of
+        Left e -> throwError e
+        Right paths -> return paths
   where
-    runApExceptsP ::
-        Monad n
-        => P.Proxy a' a b' b (ExceptsT es n) r
-        -> P.Proxy a' a b' b n (Ap (Either (Errors es)) r)
-    runApExceptsP = fmap Ap . runExceptsT . P.distribute
+    loadAggHitsFiles ::
+        DSV.ParserOptions
+        -> [Path (DSV "\t" _)]
+        -> Stream (Of (FrameRec AggregatedHitsCols)) (ExceptT DSV.ParseError IO) ()
+    loadAggHitsFiles opts = S.mapM (DSV.readFrame opts) . S.each
 
-    scheduleForWriting ::
-        [(Cls.ClassificationParams, IO.Handle)]
-        -> Text
-        -> Pipe (FrameRec AggregatedHitsCols) (IO.Handle, Vec.Vector Text) IO r
-    scheduleForWriting classHandles sep =
-        P.for P.cat \aggHits -> do
+    predictAll :: forall m.
+        Monad m
+        => [(Cls.ClassificationParams, IO.Handle)]
+        -> Stream (Of (FrameRec AggregatedHitsCols)) m ()
+        -> Stream (Of (FrameRec PredictedCols, IO.Handle)) m ()
+    predictAll classHandles =
+        flip S.for \aggHits -> do
             let indexed = F.setIndex @"virus_name" aggHits
 
-            forM_ classHandles \(classParams, h) -> do
-                let predictedDSV = predictMembership classParams indexed
-                      & F.resetIndex
-                      & F.rows %~ DSV.rowToDSV sep
-                      & F.toRowsVec
+            S.each classHandles & S.map \(classParams, h) ->
+                let predicted = F.resetIndex $ predictMembership classParams indexed
+                in (predicted, h)
 
-                P.yield $! (h, predictedDSV)
+    encodeRowsDSV :: forall m.
+        Monad m
+        => Text
+        -> Stream (Of (FrameRec PredictedCols, IO.Handle)) m ()
+        -> Stream (Of (Vec.Vector Text, IO.Handle)) m ()
+    encodeRowsDSV sep =
+        S.map \(df, h) ->
+            let rows = F.toRowsVec $ F.rows %~ DSV.rowToDSV sep $ df
+            in (rows, h)
 
-    writeOutput :: Progress.State Int -> PA.AsyncConsumer' (IO.Handle, Vec.Vector Text) IO ()
+    writeOutput ::
+        Progress.State Int
+        -> Stream (Of (Vec.Vector Text, IO.Handle)) IO ()
+        -> IO ()
     writeOutput progress =
-        PA.duplicatingAsyncConsumer $
-            P.mapM_ \(h, rows) -> do
-              mapM_ (T.hPutStrLn h) rows
-              Progress.update progress (+1)
+        S.mapM_ \(rows, h) -> do
+            mapM_ (T.hPutStrLn h) rows
+            Progress.update progress (+1)
 
 
 -- stopping/resuming from checkpoints
@@ -637,6 +712,7 @@ data ClassificationStep
         runSearchHitsStep :: forall m n w.
             ( MonadBaseControl IO m
             , MonadIO m
+            , MonadMask m
             , Has (Reader WorkDir) m
             , Has (Throw FA.ParseError) m
             , HasAny Distributed (Distributed n w) m
@@ -646,6 +722,7 @@ data ClassificationStep
             => SDict
                 ( MonadBaseControl IO n
                 , MonadIO n
+                , MonadMask n
                 , Has HMMSearch n
                 , Has Prodigal n
                 , Has (Reader WorkDir) n
@@ -659,6 +736,7 @@ data ClassificationStep
         runProcessHitsStep :: forall m.
             ( MonadBaseControl IO m
             , MonadIO m
+            , MonadMask m
             , Has (Reader ModelConfig) m
             , Has (Reader WorkDir) m
             , Has (Throw DSV.ParseError) m
@@ -711,7 +789,7 @@ checkpointStep checkpoint =
     case checkpoint of
       ContinueSearchingHits ->
           SearchHitsStep $ \sdict concOpts vpfsFile genomesFile -> do
-              r <- distribSearchHits sdict concOpts vpfsFile (FA.fastaFileReader genomesFile)
+              r <- distribSearchHits sdict concOpts vpfsFile (FA.readFastaFile genomesFile)
               return $ ContinueFromHitsFiles (map (L.view L._1) r)
 
       ContinueFromHitsFiles keys ->

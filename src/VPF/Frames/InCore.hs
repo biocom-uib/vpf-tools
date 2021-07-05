@@ -104,12 +104,12 @@ instance (Store (f r), Store (VinylStore Rec f rs)) => Store (VinylStore Rec f (
 -- AoS
 
 toRowsVecN :: Foldable f => Int -> f row -> Vec.Vector row
-toRowsVecN n = Vec.fromListN n . toList
+toRowsVecN n = Vec.force . Vec.fromListN n . toList
 {-# inline toRowsVecN #-}
 
 
 toRowsVec :: Frame row -> Vec.Vector row
-toRowsVec df = Vec.generate (frameLength df) (frameRow df)
+toRowsVec df = Vec.force $ Vec.generate (frameLength df) (frameRow df)
 {-# inline toRowsVec #-}
 
 

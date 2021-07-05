@@ -1,4 +1,5 @@
 {-# language AllowAmbiguousTypes #-}
+{-# language DeriveFunctor #-}
 {-# language DeriveGeneric #-}
 {-# language OverloadedStrings #-}
 {-# language Strict #-}
@@ -8,66 +9,66 @@ module VPF.Util.Fasta
   , entryName
   , removeNameComments
   , entrySeqNumBases
-  , fastaFileReader
-  , fastaFileWriter
-  -- , parsedFastaEntries
-  -- , fastaLines
+  , readFastaFile
+  , writeFastaFile
   ) where
 
 import GHC.Generics (Generic)
 import GHC.Stack (HasCallStack)
 
-import Control.Lens (zoom)
-import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Except (runExceptT, throwE)
+import Control.Category ((>>>))
+import Control.Monad.Trans.Resource (MonadResource)
+
+import Data.ByteString (ByteString)
+import Data.ByteString.Char8 qualified as C8
 
 import Data.Char (isAlpha)
+import Data.Function ((&))
 import Data.Store (Store)
-import Data.Text (Text)
-import qualified Data.Text as T
 
-import Pipes (Consumer, Pipe, Producer, runEffect, (>->))
-import qualified Pipes.Parse   as P
-import qualified Pipes.Prelude as P
-import qualified Pipes.Safe    as P
+import Streaming
+import Streaming.Internal qualified as S
+import Streaming.Prelude qualified as S
+import Streaming.ByteString qualified as BSS
+import Streaming.ByteString.Char8 qualified as BSS8
+
 
 import VPF.Formats
-import VPF.Util.FS (fileReader, fileWriter)
 
 
-data FastaEntry acid = FastaEntry Text [Text]
+data FastaEntry acid = FastaEntry ByteString [ByteString]
   deriving (Eq, Ord, Show, Generic)
 
 instance Store (FastaEntry acid)
 
 data ParseError
-    = ExpectedNameLine     FilePath Int Text
-    | ExpectedSequenceLine FilePath Int [Text]
-  deriving (Show, Generic)
+    = ExpectedNameLine     FilePath Int {- what was found instead -}  ByteString
+    | MissingSequenceLines FilePath Int {- corresponding name line -} ByteString
+    deriving (Show, Generic)
 
 instance Store ParseError
 
 
-entryName :: HasCallStack => FastaEntry acid -> Text
+entryName :: HasCallStack => FastaEntry acid -> ByteString
 entryName (FastaEntry n _)
-  | T.isPrefixOf (T.pack ">") n = T.tail n
-  | otherwise                   = error "entryName: badly constructed FastaEntry"
+  | C8.isPrefixOf (C8.pack ">") n = C8.tail n
+  | otherwise                     = error "entryName: badly constructed FastaEntry"
 
 
-removeNameComments :: HasCallStack => Text -> Text
-removeNameComments nameText =
-    case T.splitOn (T.pack " #") nameText of
-      [name]          -> T.strip name
-      (name:_comment) -> T.strip name
-      []              -> error "removeNameComments: bad name line"
+breakNameAtComment :: ByteString -> (ByteString, ByteString)
+breakNameAtComment = C8.breakSubstring (C8.pack " #")
+
+
+removeNameComments :: HasCallStack => ByteString -> ByteString
+removeNameComments = C8.strip . fst . breakNameAtComment
 
 
 class AcidBaseLength acid where
-    seqNumBases :: Text -> Int
+    seqNumBases :: ByteString -> Int
 
 instance AcidBaseLength Aminoacid where
     seqNumBases =
-        T.foldl' (\acc c -> if knownAcid c then acc+1 else acc) 0
+        C8.foldl' (\acc c -> if knownAcid c then acc+1 else acc) 0
       where
         knownAcid 'X' = False
         knownAcid c
@@ -79,66 +80,63 @@ entrySeqNumBases :: forall acid. AcidBaseLength acid => FastaEntry acid -> Int
 entrySeqNumBases (FastaEntry _ seq) = sum (map (seqNumBases @acid) seq)
 
 
-fastaFileReader :: forall acid m. P.MonadSafe m
-                => Path (FASTA acid)
-                -> Producer (FastaEntry acid) m (Either ParseError ())
-fastaFileReader p = parsedFastaEntries p (fileReader (untag p))
+readFastaFile :: forall acid m.
+    MonadResource m
+    => Path (FASTA acid)
+    -> Stream  (Of (FastaEntry acid)) m (Either ParseError ())
+readFastaFile p =
+    BSS.readFile (untag p)
+        & fastaEntries p
 
 
-fastaFileWriter :: P.MonadSafe m => Path (FASTA acid) -> Consumer (FastaEntry acid) m ()
-fastaFileWriter p = fastaLines >-> fileWriter (untag p)
+writeFastaFile :: MonadResource m => Path (FASTA acid) -> Stream (Of (FastaEntry acid)) m r -> m r
+writeFastaFile p = BSS.writeFile (untag p) . fastaBytes
 
 
-fastaLines :: Monad m => Pipe (FastaEntry acid) Text m r
-fastaLines = P.map (\(FastaEntry name seq) -> name : seq) >-> P.concat
+fastaBytes :: Monad m => Stream (Of (FastaEntry acid)) m r -> BSS.ByteStream m r
+fastaBytes entries =
+    S.for entries (\(FastaEntry name seq) -> S.yield name >> S.each seq) -- Stream (Of ByteString)
+        & S.maps (\(a :> x) -> x <$ BSS.fromStrict a)
+        & BSS8.unlines                                                   -- ByteStream m r
 
 
-parsedFastaEntries :: forall m acid r.
+fastaEntries :: forall m acid r.
     Monad m
     => Path (FASTA acid)
-    -> Producer Text m r
-    -> Producer (FastaEntry acid) m (Either ParseError r)
-parsedFastaEntries fp producer = do
-    let linenums :: Producer Int m r
-        linenums = P.unfoldr (\i -> return (Right (i, i+1))) 1
-
-        enumerated :: Producer (Int, Text) m r
-        enumerated = P.zip linenums producer >-> P.filter (not . T.null . snd)
-
-    (r, p') <- P.parsed (fastaParser fp) enumerated
-
-    case r of
-      Nothing -> lift $ fmap Right $ runEffect (p' >-> P.drain)
-      Just e  -> return (Left e)
-
-
-fastaParser ::
-    Monad m
-    => Path (FASTA acid)
-    -> P.Parser (Int, Text) m (Either (Maybe ParseError) (FastaEntry acid))
-fastaParser fp = runExceptT $ do
-    (linenum, nameLine) <- parseNameLine
-    sequenceLines <- parseSequenceLines (linenum+1)
-
-    return (FastaEntry nameLine sequenceLines)
-
+    -> BSS.ByteStream m r
+    -> Stream (Of (FastaEntry acid)) m (Either ParseError r)
+fastaEntries p =
+    BSS8.lines
+    >>> S.mapped BSS.toStrict
+    >>> S.map C8.strip
+    >>> S.filter (not . C8.null)
+    >>> S.zip (S.enumFrom 1)
+    >>> S.unfoldr peekEntry
   where
-    parseNameLine = do
-      mline <- lift P.draw
+    peekEntry ::
+        Stream (Of (Int, ByteString)) m r
+        -> m (Either
+                (Either ParseError r)
+                (FastaEntry acid, Stream (Of (Int, ByteString)) m r))
+    peekEntry stream = do
+        e <- S.next stream
 
-      case mline of
-        Nothing -> throwE Nothing -- finished parsing
+        case e of
+            Left r -> return (Left (Right r))
+            Right ((linenum, nameLine), rest)
+              | not (isNameLine nameLine) ->
+                  return $ Left (Left (ExpectedNameLine (untag p) linenum nameLine))
+              | otherwise -> do
+                  seqLines :> rest' <- S.toList $ S.map snd $ S.span (isSequenceLine . snd) rest
 
-        Just (linenum, line)
-          | isNameLine line -> return (linenum, line)
-          | otherwise       -> throwE (Just (ExpectedNameLine (untag fp) linenum line))
+                  case seqLines of
+                      [] -> return $ Left (Left (MissingSequenceLines (untag p) linenum nameLine))
+                      _  -> return $ Right (FastaEntry nameLine seqLines, rest')
 
-    parseSequenceLines linenum = do
-      sequenceLines <- lift $ zoom (P.span (isSequenceLine . snd)) P.drawAll
 
-      case sequenceLines of
-        [] -> throwE (Just (ExpectedSequenceLine (untag fp) linenum []))
-        ls -> return (map snd ls)
+    isNameLine :: ByteString -> Bool
+    isNameLine = C8.isPrefixOf (C8.singleton '>')
 
-    isNameLine = T.isPrefixOf ">"
+    isSequenceLine :: ByteString -> Bool
     isSequenceLine = not . isNameLine
+

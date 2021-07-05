@@ -23,6 +23,7 @@ dependencies:
 - Frames
 - aeson
 - array
+- attoparsec
 - bytestring
 - conduit
 - constraints
@@ -48,17 +49,20 @@ dependencies:
 - pipes
 - pipes-concurrency
 - pipes-group
-- pipes-parse
 - pipes-safe
 - primitive
 - profunctors
 - reflection
 - regex-base
 - regex-pcre-builtin
+- resourcet
 - req
 - semigroupoids
 - stm
 - store
+- streaming
+- streaming-bytestring
+- streaming-concurrency
 - tagged
 - template-haskell
 - temporary
@@ -137,31 +141,31 @@ executables:
     dependencies:
     - vpf-tools
 
-  mpi-test:
-    main:                Main.hs
-    source-dirs:         app/mpi-test
-    ghc-options:
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
-    dependencies:
-    - vpf-tools
-    when:
-    - condition: flag(mpi)
-      then:
-        buildable: true
-      else:
-        buildable: false
+  #mpi-test:
+  #  main:                Main.hs
+  #  source-dirs:         app/mpi-test
+  #  ghc-options:
+  #  - -threaded
+  #  - -rtsopts
+  #  - -with-rtsopts=-N
+  #  dependencies:
+  #  - vpf-tools
+  #  when:
+  #  - condition: flag(mpi)
+  #    then:
+  #      buildable: true
+  #    else:
+  #      buildable: false
 
-  pipes-test:
-    main:                Main.hs
-    source-dirs:         app/pipes-test
-    ghc-options:
-      - -threaded
-      - -rtsopts
-      - -with-rtsopts=-N
-    dependencies:
-      - vpf-tools
+  #pipes-test:
+  #  main:                Main.hs
+  #  source-dirs:         app/pipes-test
+  #  ghc-options:
+  #    - -threaded
+  #    - -rtsopts
+  #    - -with-rtsopts=-N
+  #  dependencies:
+  #    - vpf-tools
 
 tests:
   vpf-test:

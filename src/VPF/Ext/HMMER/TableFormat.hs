@@ -16,9 +16,9 @@ import qualified Frames.CSV            as CSV
 import qualified Frames.ShowCSV        as CSV
 import Frames.InCore (VectorFor)
 
-import Pipes ((>->), Producer)
-import Pipes.Safe (MonadSafe)
+import Control.Monad.Trans.Resource (MonadResource)
 
+import Streaming (Stream, Of)
 
 import VPF.Formats
 import qualified VPF.Frames.DSV as DSV
@@ -76,25 +76,25 @@ tableAsDSV = coerce
 
 
 produceEitherRows :: forall rs m.
-                  ( MonadSafe m
-                  , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
-                  )
-                  => Path (HMMERTable rs)
-                  -> Producer (Either DSV.ParseError (Record rs)) m ()
+    ( MonadResource m
+    , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
+    )
+    => Path (HMMERTable rs)
+    -> Stream (Of (Either DSV.ParseError (Record rs))) m ()
 produceEitherRows fp =
-    DSV.produceEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
+    DSV.streamEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
   where
     maxCols = V.natToInt @(V.RLength rs)
 
 
 produceRows :: forall rs m.
-            ( MonadSafe m
-            , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
-            )
-            => Path (HMMERTable rs)
-            -> Producer (Record rs) m ()
+    ( MonadResource m
+    , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
+    )
+    => Path (HMMERTable rs)
+    -> Stream (Of (Record rs)) m ()
 produceRows fp =
-    DSV.produceEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
-    >-> DSV.throwLeftsM
+    DSV.throwLeftsM $
+        DSV.streamEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
   where
     maxCols = V.natToInt @(V.RLength rs)

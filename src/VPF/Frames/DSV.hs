@@ -10,8 +10,8 @@ module VPF.Frames.DSV
   , defRowTokenizer
   , defParserOptions
   , parseEitherRow
-  , pipeEitherRows
-  , produceEitherRows
+  , parseEitherRows
+  , streamEitherRows
   , throwLeftsM
   , inCoreAoSExc
   , readFrame
@@ -20,9 +20,9 @@ module VPF.Frames.DSV
   , defWriterOptions
   , headerToDSV
   , rowToDSV
-  , produceFromFrame
-  , pipeDSVLines
-  , produceDSVLinesFromFrame
+  , streamFromFrame
+  , streamDSVLines
+  , streamDSVLinesFromFrame
   , writeDSV
   ) where
 
@@ -52,10 +52,10 @@ import Frames.InCore (RecVec)
 import qualified Frames.CSV     as CSV
 import qualified Frames.ShowCSV as CSV
 
-import Pipes (Consumer, Pipe, Producer, (>->), runEffect)
-import qualified Pipes         as P
-import qualified Pipes.Prelude as P
-import Pipes.Safe (MonadSafe, SafeT)
+import Streaming (Stream, Of)
+import Streaming.Prelude qualified as S
+
+import Pipes qualified (next)
 
 import VPF.Formats (Path, DSV)
 
@@ -116,26 +116,30 @@ parseEitherRow tokenize row =
       Right rec -> Right rec
 
 
-pipeEitherRows :: (HasParseCtx, Monad m, CSV.ReadRec cols)
-               => ParserOptions
-               -> Pipe Text (Either ParseError (Record cols)) m ()
-pipeEitherRows opts =
+parseEitherRows ::
+    (HasParseCtx, Monad m, CSV.ReadRec cols)
+    => ParserOptions
+    -> Stream (Of Text) m ()
+    -> Stream (Of (Either ParseError (Record cols))) m ()
+parseEitherRows opts =
     (if hasHeader opts then P.drop 1 else P.cat)
     >-> P.filter (not . isComment opts)
     >-> P.map (parseEitherRow (rowTokenizer opts))
 
 
-produceEitherRows :: forall m sep cols.
+streamEitherRows :: forall m sep cols.
     ( KnownSymbol sep
     , ColumnHeaders cols
     , CSV.ReadRec cols
-    , MonadSafe m
+    , MonadResource m
     )
     => ParserOptions
     -> Path (DSV sep cols)
-    -> Producer (Either ParseError (Record cols)) m ()
-produceEitherRows opts fp =
-    CSV.produceTextLines (untag fp) >-> pipeEitherRows opts
+    -> Stream (Of (Either ParseError (Record cols))) m ()
+streamEitherRows opts fp =
+    CSV.produceTextLines (untag fp)
+        & S.unfoldr Pipes.next
+        & parseEitherRows opts
   where
     ?parseRowCtx =
         let sep      = symbolVal (Proxy @sep)
@@ -200,28 +204,31 @@ rowToDSV ::
 rowToDSV sep = T.intercalate sep . CSV.showFieldsCSV
 
 
-produceFromFrame :: (Foldable f, Monad m) => f (Record cols) -> Producer (Record cols) m ()
-produceFromFrame = P.each
+streamFromFrame :: (Foldable f, Monad m) => f (Record cols) -> Stream (Of (Record cols)) m ()
+streamFromFrame = S.each
 
 
-pipeDSVLines :: forall cols m.
+streamDSVLines :: forall cols m.
     ( RecMapMethod CSV.ShowCSV ElField cols
     , RecordToList cols
     , ColumnHeaders cols
     , Monad m
     )
     => WriterOptions
-    -> Pipe (Record cols) Text m ()
-pipeDSVLines opts = do
-    let sep = T.singleton (writeSeparator opts)
+    -> Stream (Of (Record cols)) m ()
+    -> Stream (Of Text) m ()
+streamDSVLines opts records =
+    if writeHeader opts then
+        S.cons (headerToDSV @cols Proxy sep) encodedRows
+    else
+        encodedRows
+  where
+    encodedRows = S.map (rowToDSV sep) records
 
-    when (writeHeader opts) $
-      P.yield (headerToDSV @cols Proxy sep)
-
-    P.map (rowToDSV sep)
+    sep = T.singleton (writeSeparator opts)
 
 
-produceDSVLinesFromFrame ::
+streamDSVLinesFromFrame ::
     ( RecMapMethod CSV.ShowCSV ElField cols
     , RecordToList cols
     , ColumnHeaders cols
@@ -230,9 +237,9 @@ produceDSVLinesFromFrame ::
     )
     => WriterOptions
     -> f (Record cols)
-    -> Producer Text m ()
-produceDSVLinesFromFrame opts frame =
-    produceFromFrame frame >-> pipeDSVLines opts
+    -> Stream (Of Text) m ()
+streamDSVLinesFromFrame opts =
+    streamDSVLines opts .  streamFromFrame
 
 
 writeDSV ::
@@ -243,11 +250,8 @@ writeDSV ::
     , Monad m
     )
     => WriterOptions
-    -> Consumer Text m ()
+    -> (Stream (Of Text) m () -> r)
     -> f (Record cols)
-    -> m ()
-writeDSV opts writer frame =
-    runEffect $
-        produceFromFrame frame
-        >-> pipeDSVLines opts
-        >-> writer
+    -> r
+writeDSV opts writer =
+    writer . streamDSVLines opts . streamFromFrame
