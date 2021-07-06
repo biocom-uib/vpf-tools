@@ -46,9 +46,6 @@ import qualified Data.Vector as Vec
 
 import qualified Data.Vinyl as V
 
-import qualified Pipes.Prelude as P
-import Pipes.Safe (runSafeT)
-
 import Streaming
 import Streaming.Prelude qualified as S
 import Streaming.Concurrent qualified as SC
@@ -77,6 +74,7 @@ import qualified VPF.Util.Hash     as Hash
 import qualified VPF.Util.Fasta    as FA
 import qualified VPF.Util.FS       as FS
 import qualified VPF.Util.Progress as Progress
+import Data.List.NonEmpty (NonEmpty)
 
 
 newtype GenomeChunkKey = GenomeChunkKey { getGenomeChunkHash :: String }
@@ -256,15 +254,13 @@ aggregateHits :: forall m.
 aggregateHits aminoacidsFile hitsFile = do
     proteinSizes <- loadProteinSizes
 
-    let hitRows = Tbl.produceRows hitsFile
-
     thr <- asks modelEValueThreshold
     getVirusName <- asks modelVirusNameExtractor
 
     hitsFrame <- DSV.inCoreAoSExc $
-        hitRows
-        >-> P.filter (\row -> row^.HMM.sequenceEValue <= thr)
-        >-> P.map V.rcast
+        Tbl.streamTableRows hitsFile
+            & S.filter (\row -> row^.HMM.sequenceEValue <= thr)
+            & S.map V.rcast
 
     return $ hitsFrame
         & F.mutate1 @"virus_name" (getVirusName . L.view HMM.targetName)
@@ -328,9 +324,9 @@ processHits key protsFile hitsFile = do
     let processedHitsFile = processedHitsFileFor processedHitsDir key
         writerOpts = DSV.defWriterOptions '\t'
 
-    liftIO $ runSafeT $
+    liftIO $
         FS.atomicCreateFile processedHitsFile \tmpFile ->
-            DSV.writeDSV writerOpts (FS.fileWriter (untag tmpFile)) aggregatedHits
+            DSV.writeDSV writerOpts (FS.writeTextLines (untag tmpFile)) aggregatedHits
 
     return processedHitsFile
 
@@ -515,7 +511,7 @@ distribSearchHits sdict concOpts vpfsFile genomes = do
             )
             => SC.OutBasket (input, Integer {- count -})
             -> SC.InBasket (output, Integer {- count -})
-            -> m ()
+            -> m (NonEmpty ())
         processChunkedGenomes outBasket inBasket =
             withWorkers_ \w ->
                 SC.joinBuffersM

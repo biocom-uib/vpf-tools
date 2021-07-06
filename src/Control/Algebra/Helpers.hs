@@ -16,7 +16,6 @@ module Control.Algebra.Helpers
     ) where
 
 import Control.Algebra
-import Control.Effect.Sum.Extra
 
 import Control.Monad (join)
 import Control.Monad.Trans.Control qualified as MTC

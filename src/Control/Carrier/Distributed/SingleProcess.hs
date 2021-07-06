@@ -20,6 +20,7 @@ import Control.Effect.Distributed
 import Control.Algebra.Helpers (algUnwrapL)
 
 import Data.Store (Store)
+import Data.List.NonEmpty (NonEmpty(..))
 
 
 newtype SingleProcessT m a = SingleProcessT { runSingleProcessT :: m a }
@@ -44,6 +45,12 @@ instance Algebra ctx m => Algebra ctx (SingleProcessT m) where
 
     alg = algUnwrapL id SingleProcessT \hdl sig ctx ->
         case sig of
-            GetNumWorkers                 -> return (1 <$ ctx)
-            WithWorkers block             -> hdl (block LocalWorker <$ ctx)
-            RunInWorker LocalWorker _ clo -> SingleProcessT $ (<$ ctx) <$> seval clo
+            GetNumWorkers ->
+                return (1 <$ ctx)
+
+            WithWorkers block -> do
+                ctx_a <- hdl $ block LocalWorker <$ ctx
+                return $ fmap (:| []) ctx_a
+
+            RunInWorker LocalWorker _ clo ->
+                SingleProcessT $ (<$ ctx) <$> seval clo

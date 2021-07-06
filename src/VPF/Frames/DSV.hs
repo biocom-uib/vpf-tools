@@ -30,11 +30,13 @@ import GHC.Generics (Generic)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 
 import Control.Algebra (Has)
+import Control.Category ((>>>))
 import Control.Effect.Throw (Throw, throwError)
-import Control.Monad (when, (>=>))
+import Control.Monad ((>=>))
 import Control.Exception (try)
 import Control.Monad.Catch (Exception, MonadThrow(throwM))
 import Control.Monad.IO.Class (MonadIO(liftIO))
+import Control.Monad.Trans.Resource (ResourceT, MonadResource, runResourceT)
 
 import Data.List (intercalate)
 import Data.Proxy (Proxy(..))
@@ -47,7 +49,7 @@ import Data.Typeable (Typeable)
 import Data.Vinyl (ElField, RecMapMethod, RecordToList, rtraverse)
 import Data.Vinyl.Functor (Compose(..))
 
-import Frames (ColumnHeaders(..), FrameRec, Record, inCoreAoS)
+import Frames (ColumnHeaders(..), FrameRec, Record)
 import Frames.InCore (RecVec)
 import qualified Frames.CSV     as CSV
 import qualified Frames.ShowCSV as CSV
@@ -55,9 +57,9 @@ import qualified Frames.ShowCSV as CSV
 import Streaming (Stream, Of)
 import Streaming.Prelude qualified as S
 
-import Pipes qualified (next)
-
+import VPF.Frames.InCore (fromRowStreamAoS)
 import VPF.Formats (Path, DSV)
+import VPF.Util.FS (streamTextLines)
 
 
 type RowTokenizer = Text -> [Text]
@@ -122,9 +124,9 @@ parseEitherRows ::
     -> Stream (Of Text) m ()
     -> Stream (Of (Either ParseError (Record cols))) m ()
 parseEitherRows opts =
-    (if hasHeader opts then P.drop 1 else P.cat)
-    >-> P.filter (not . isComment opts)
-    >-> P.map (parseEitherRow (rowTokenizer opts))
+    (if hasHeader opts then S.drop 1 else id)
+    >>> S.filter (not . isComment opts)
+    >>> S.map (parseEitherRow (rowTokenizer opts))
 
 
 streamEitherRows :: forall m sep cols.
@@ -137,9 +139,7 @@ streamEitherRows :: forall m sep cols.
     -> Path (DSV sep cols)
     -> Stream (Of (Either ParseError (Record cols))) m ()
 streamEitherRows opts fp =
-    CSV.produceTextLines (untag fp)
-        & S.unfoldr Pipes.next
-        & parseEitherRows opts
+    parseEitherRows opts $ streamTextLines (untag fp)
   where
     ?parseRowCtx =
         let sep      = symbolVal (Proxy @sep)
@@ -147,19 +147,23 @@ streamEitherRows opts fp =
         in  ParseCtx (untag fp) sep colNames
 
 
-throwLeftsM :: (Exception e, MonadThrow m) => Pipe (Either e a) a m ()
-throwLeftsM = P.mapM (either throwM return)
+throwLeftsM ::
+    (Exception e, MonadThrow m)
+    => Stream (Of (Either e a)) m ()
+    -> Stream (Of a) m ()
+throwLeftsM = S.mapM (either throwM return)
 
 
-inCoreAoSExc ::
+inCoreAoSExc :: forall m cols.
     ( RecVec cols
     , MonadIO m
     , Has (Throw ParseError) m
     )
-    => Producer (Record cols) (SafeT IO) ()
+    => Stream (Of (Record cols)) (ResourceT IO) ()
     -> m (FrameRec cols)
 inCoreAoSExc =
-    liftIO . try @ParseError . inCoreAoS >=> either throwError return
+    liftIO . try @ParseError . runResourceT . fromRowStreamAoS
+        >=> either throwError return
 
 
 readFrame ::
@@ -171,8 +175,8 @@ readFrame ::
     => ParserOptions
     -> Path (DSV sep cols)
     -> m (FrameRec cols)
-readFrame opts fp =
-    inCoreAoSExc (produceEitherRows opts fp >-> throwLeftsM)
+readFrame opts =
+    inCoreAoSExc . throwLeftsM . streamEitherRows opts
 
 
 data WriterOptions = WriterOptions

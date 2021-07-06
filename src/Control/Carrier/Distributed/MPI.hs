@@ -20,13 +20,17 @@ module Control.Carrier.Distributed.MPI
 
 import GHC.Generics (Generic)
 
+import Control.Algebra
+import Control.Algebra.Helpers (algUnwrapL)
+import Control.Effect.Sum.Extra (injR)
+
 import qualified Control.Concurrent.Async.Lifted as Async
 
 import qualified Control.Distributed.MPI           as CMPI
 import qualified Control.Distributed.MPI.Store     as MPI
 import qualified Control.Distributed.MPI.Streaming as SMPI
 
-import Control.Carrier.MTL.TH (deriveMonadTrans, deriveAlgebra)
+import Control.Carrier.MTL.TH (deriveMonadTrans)
 
 import Control.Lens (_2)
 import Control.Monad (when)
@@ -37,16 +41,16 @@ import qualified Control.Monad.Trans.Reader as MT
 
 import qualified Data.ByteString as BS
 import Data.Constraint
+import Data.Function ((&))
+import Data.Functor.Apply (Apply)
 import Data.IORef
 import Data.Kind (Type)
+import Data.Semigroup.Traversable (sequence1)
 import Data.Store (Store)
 import qualified Data.Store as Store
 import qualified Data.List.NonEmpty as NE
 
-import qualified Pipes         as P
-import qualified Pipes.Prelude as P
-
-import Type.Reflection (Typeable)
+import Streaming.Prelude qualified as S
 
 import Control.Distributed.SClosure
 import Control.Effect.Distributed
@@ -109,60 +113,122 @@ instance (MonadBaseControl b m, forall a. Store a => Store (StM' m a)) => MonadB
     instStoreBase = Sub Dict
 
 
-interpretMpiMasterT :: forall n m k.
-    ( MonadBaseControlStore IO m
+instance
+    ( Apply ctx
+    , Algebra ctx m
+    , MonadBaseControlStore IO m
     , MonadIO m
     , MC.MonadThrow m
     , Typeable m
     , m ~ n
     )
-    => Distributed n MPIWorker (MpiMasterT n m) k
-    -> MpiMasterT n m k
-interpretMpiMasterT (GetNumWorkers k) =
-    k =<< MpiMasterT (MT.asks (fromIntegral . length . slaveRanks))
+    => Algebra ctx (MpiMasterT n m) where
 
-interpretMpiMasterT (WithWorkers (block :: MPIWorker -> MpiMasterT n m a) k) = do
-    h <- MpiMasterT MT.ask
+    type Sig (MpiMasterT n m) = Distributed n MPIWorker :+: Sig m
 
-    let worker :: MPI.Rank -> MPI.Tag -> MpiMasterT n m a
-        worker rank tag = block (MPIWorker rank tag)
+    alg = algUnwrapL injR MpiMasterT \hdl sig ctx ->
+        case sig of
+            GetNumWorkers ->
+                MpiMasterT $ MT.asks ((<$ ctx) . fromIntegral . length . slaveRanks)
 
-    let ranks = slaveRanks h
+            WithWorkers (block :: MPIWorker -> n0 a) -> do
+                h <- MpiMasterT MT.ask
 
-    tags <-
-        let postIncr tag = (succ tag, tag)
-        in  liftIO $ mapM (\tagRef -> atomicModifyIORef' tagRef postIncr) (rankTags h)
+                let worker :: MPI.Rank -> MPI.Tag -> MpiMasterT n m (ctx a)
+                    worker rank tag = hdl $ block (MPIWorker rank tag) <$ ctx
 
-    results <- Async.mapConcurrently id (NE.zipWith worker ranks tags)
+                let ranks = slaveRanks h
 
-    k results
+                tags <-
+                    let postIncr tag = (succ tag, tag)
+                    in  liftIO $ mapM (\tagRef -> atomicModifyIORef' tagRef postIncr) (rankTags h)
 
-interpretMpiMasterT (RunInWorker (MPIWorker rank tag) sdict (clo :: SClosure (n a)) k) = do
-    withSDict sdict $ do
-        h <- MpiMasterT MT.ask
+                rs <- Async.mapConcurrently id (NE.zipWith worker ranks tags)
 
-        let reqClo :: SClosure (Request n a)
-            reqClo = slift2 (static Request) sdict clo
-
-            tdict :: SDict (Typeable a)
-            tdict = weakenSDict @(Typeable a) (static Impl) sdict
-
-            reqDynClo :: SDynClosure (Request n)
-            reqDynClo = reflectSDict tdict (makeSDynClosure reqClo)
-
-        response <- liftIO $ SMPI.sendrecvYielding_ (SMPI.StreamItem reqDynClo) rank tag rank tag (mpiComm h)
-
-        case response :: Response n of
-          ResponseException e -> MC.throwM (WorkerException e)
-          ResponseOk encoded  -> do
-              let Sub instStoreStM' = instStoreBase @IO @m @a
-
-              a <- restoreM $ unStM' $ withDict instStoreStM' $ Store.decodeEx @(StM' m a) encoded
-
-              k a
+                return (sequence1 rs)
 
 
-deriveAlgebra 'interpretMpiMasterT
+            RunInWorker (MPIWorker rank tag) sdict (clo :: SClosure (n a)) ->
+                withSDict sdict do
+                    h <- MpiMasterT MT.ask
+
+                    let reqClo :: SClosure (Request n a)
+                        reqClo = slift2 (static Request) sdict clo
+
+                        tdict :: SDict (Typeable a)
+                        tdict = weakenSDict @(Typeable a) (static Impl) sdict
+
+                        reqDynClo :: SDynClosure (Request n)
+                        reqDynClo = reflectSDict tdict (makeSDynClosure reqClo)
+
+                    response <- liftIO $ SMPI.sendrecvYielding_ (SMPI.StreamItem reqDynClo) rank tag rank tag (mpiComm h)
+
+                    case response :: Response n of
+                      ResponseException e ->
+                          MC.throwM (WorkerException e)
+
+                      ResponseOk encoded  -> do
+                          let Sub instStoreStM' = instStoreBase @IO @m @a
+
+                          a <- restoreM $
+                              unStM' $
+                                  withDict instStoreStM' $
+                                      Store.decodeEx @(StM' m a) encoded
+
+                          return (a <$ ctx)
+
+
+-- interpretMpiMasterT :: forall n m k.
+--     ( MonadBaseControlStore IO m
+--     , MonadIO m
+--     , MC.MonadThrow m
+--     , Typeable m
+--     , m ~ n
+--     )
+--     => Distributed n MPIWorker (MpiMasterT n m) k
+--     -> MpiMasterT n m k
+-- interpretMpiMasterT (GetNumWorkers k) =
+--     k =<< MpiMasterT (MT.asks (fromIntegral . length . slaveRanks))
+--
+-- interpretMpiMasterT (WithWorkers (block :: MPIWorker -> MpiMasterT n m a) k) = do
+--     h <- MpiMasterT MT.ask
+--
+--     let worker :: MPI.Rank -> MPI.Tag -> MpiMasterT n m a
+--         worker rank tag = block (MPIWorker rank tag)
+--
+--     let ranks = slaveRanks h
+--
+--     tags <-
+--         let postIncr tag = (succ tag, tag)
+--         in  liftIO $ mapM (\tagRef -> atomicModifyIORef' tagRef postIncr) (rankTags h)
+--
+--     results <- Async.mapConcurrently id (NE.zipWith worker ranks tags)
+--
+--     k results
+--
+-- interpretMpiMasterT (RunInWorker (MPIWorker rank tag) sdict (clo :: SClosure (n a)) k) = do
+--     withSDict sdict $ do
+--         h <- MpiMasterT MT.ask
+--
+--         let reqClo :: SClosure (Request n a)
+--             reqClo = slift2 (static Request) sdict clo
+--
+--             tdict :: SDict (Typeable a)
+--             tdict = weakenSDict @(Typeable a) (static Impl) sdict
+--
+--             reqDynClo :: SDynClosure (Request n)
+--             reqDynClo = reflectSDict tdict (makeSDynClosure reqClo)
+--
+--         response <- liftIO $ SMPI.sendrecvYielding_ (SMPI.StreamItem reqDynClo) rank tag rank tag (mpiComm h)
+--
+--         case response :: Response n of
+--           ResponseException e -> MC.throwM (WorkerException e)
+--           ResponseOk encoded  -> do
+--               let Sub instStoreStM' = instStoreBase @IO @m @a
+--
+--               a <- restoreM $ unStM' $ withDict instStoreStM' $ Store.decodeEx @(StM' m a) encoded
+--
+--               k a
 
 
 data ExitHandlers n = ExitHandlers
@@ -274,10 +340,9 @@ runMpi mpiComm exitHandlers runN (MpiMasterT e) = do
 
     workerProcess :: n ()
     workerProcess = do
-        P.runEffect $
-            SMPI.messagesFrom @(SDynClosure (Request n)) MPI.rootRank MPI.anyTag mpiComm
-            P.>-> P.mapM (_2 processRequest)
-            P.>-> SMPI.genericSender @(Response n) mpiComm
+        SMPI.messagesFrom @(SDynClosure (Request n)) MPI.rootRank MPI.anyTag mpiComm
+            & S.mapM (_2 processRequest)
+            & SMPI.genericSender @(Response n) mpiComm
 
 
 runMpiWorld :: forall m n b.

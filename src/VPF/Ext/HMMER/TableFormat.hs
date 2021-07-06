@@ -2,6 +2,12 @@
 {-# language Strict #-}
 module VPF.Ext.HMMER.TableFormat where
 
+import Control.Algebra (Has)
+import Control.Effect.Throw (Throw)
+import Control.Monad.Catch (MonadThrow)
+import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.Trans.Resource (MonadResource)
+
 import Data.Coerce (coerce)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -9,19 +15,17 @@ import Data.Vector (Vector)
 
 import qualified Data.Vinyl.TypeLevel as V
 
-import Frames (Record)
+import Frames (Record, FrameRec)
 import qualified Frames                as Fr
 import qualified Frames.ColumnTypeable as CSV
 import qualified Frames.CSV            as CSV
 import qualified Frames.ShowCSV        as CSV
-import Frames.InCore (VectorFor)
-
-import Control.Monad.Trans.Resource (MonadResource)
+import Frames.InCore (VectorFor, RecVec)
 
 import Streaming (Stream, Of)
 
 import VPF.Formats
-import qualified VPF.Frames.DSV as DSV
+import VPF.Frames.DSV qualified as DSV
 
 
 data Accession = NoAccession | Accession Text
@@ -87,14 +91,27 @@ produceEitherRows fp =
     maxCols = V.natToInt @(V.RLength rs)
 
 
-produceRows :: forall rs m.
+streamTableRows :: forall rs m.
     ( MonadResource m
+    , MonadThrow m
     , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
     )
     => Path (HMMERTable rs)
     -> Stream (Of (Record rs)) m ()
-produceRows fp =
+streamTableRows fp =
     DSV.throwLeftsM $
         DSV.streamEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
   where
     maxCols = V.natToInt @(V.RLength rs)
+
+
+readTable ::
+    ( Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
+    , Has (Throw DSV.ParseError) m
+    , MonadIO m
+    , RecVec rs
+    )
+    => Path (HMMERTable rs)
+    -> m (FrameRec rs)
+readTable =
+    DSV.inCoreAoSExc . streamTableRows

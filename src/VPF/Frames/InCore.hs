@@ -12,6 +12,7 @@ module VPF.Frames.InCore
   , toRowsVecN
   , toRowsVec
   , fromRowsVec
+  , fromRowStreamAoS
   , rowsVec
   , copyAoS
 
@@ -57,11 +58,17 @@ import Data.Proxy (Proxy(..))
 import Data.Store (Store, Size(..))
 import qualified Data.Store as Store
 import qualified Data.Vector as Vec
+import qualified Data.Vector.Generic as GVec
+import qualified Data.Vector.Generic.Mutable as GMVec
+import qualified Data.Vector.Fusion.Bundle.Monadic as MBundle
 
 import qualified Data.Vinyl           as V
 import qualified Data.Vinyl.TypeLevel as V
 
 import qualified Frames.InCore as IC
+
+import Streaming (Stream, Of)
+import Streaming.Prelude qualified as S
 
 import VPF.Frames.Types
 
@@ -115,8 +122,17 @@ toRowsVec df = Vec.force $ Vec.generate (frameLength df) (frameRow df)
 
 fromRowsVec :: Vec.Vector row -> Frame row
 fromRowsVec rows =
-    Frame { frameLength = Vec.length rows, frameRow = (rows Vec.!) }
+    Frame { frameLength = Vec.length rows, frameRow = Vec.unsafeIndex rows }
 {-# inline fromRowsVec #-}
+
+
+fromRowStreamAoS :: forall m row. PrimMonad m => Stream (Of row) m () -> m (Frame row)
+fromRowStreamAoS =
+    fmap fromRowsVec . unfoldrPrimM S.uncons
+  where
+    unfoldrPrimM :: (b -> m (Maybe (a, b))) -> b -> m (Vec.Vector a)
+    unfoldrPrimM uf b = GVec.unsafeFreeze =<< GMVec.munstream (MBundle.unfoldrM uf b)
+{-# inline fromRowStreamAoS #-}
 
 
 rowsVec :: Iso (Frame row) (Frame row') (Vec.Vector row) (Vec.Vector row')

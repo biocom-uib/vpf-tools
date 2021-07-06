@@ -46,10 +46,6 @@ dependencies:
 - monad-control
 - mtl
 - optparse-applicative
-- pipes
-- pipes-concurrency
-- pipes-group
-- pipes-safe
 - primitive
 - profunctors
 - reflection
@@ -183,7 +179,7 @@ flags:
   mpi:
     description: Enable MPI support (OpenMPI with mpi-hs)
     manual: true
-    default: false
+    default: true
 
   static:
     description: Build static executables

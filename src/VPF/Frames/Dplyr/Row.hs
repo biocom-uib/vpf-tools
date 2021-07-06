@@ -48,7 +48,7 @@ import qualified Control.Lens as L
 import Data.Kind (Type)
 import qualified Data.Type.Equality as E
 
-import Data.Vinyl (ElField(..), Rec(..))
+import Data.Vinyl (ElField(..))
 import Data.Vinyl.Derived (rfield)
 import Data.Vinyl.Lens (rlens', rcast)
 

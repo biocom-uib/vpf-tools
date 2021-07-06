@@ -1,27 +1,32 @@
 {-# language Strict #-}
 module VPF.Util.FS where
 
-import Control.Monad (forever, when)
-import Control.Monad.Catch (MonadCatch, MonadMask, try)
+import Control.Category ((>>>))
+import Control.Exception (throwIO)
+import Control.Monad (when)
+import Control.Monad.Catch qualified as MC
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Base (liftBase)
 import Control.Monad.Trans.Control (MonadBaseControl(..), liftBaseOp)
+import Control.Monad.Trans.Resource (MonadResource)
 
+import Data.ByteString (ByteString)
 import Data.Tagged (Tagged(..), untag)
 import Data.Text (Text)
+import Data.Text.Encoding qualified as Text
 import qualified Data.Text.IO as TIO
 
-import Pipes (Producer, Consumer)
-import qualified Pipes              as P
-import qualified Pipes.Prelude      as P
-import qualified Pipes.Safe         as P
-import qualified Pipes.Safe.Prelude as P
+import Streaming (Stream, Of)
+import Streaming.Prelude qualified as S
 
 import qualified System.Directory as D
 import qualified System.FilePath  as FP
 import qualified System.IO        as IO
 import qualified System.IO.Error  as IO
 import qualified System.IO.Temp   as Temp
+
+import Streaming.ByteString qualified as BSS
+import Streaming.ByteString.Char8 qualified as BSS8
 
 import VPF.Formats (Path, Directory)
 
@@ -61,7 +66,7 @@ whenNotExists fp m = do
     when (not exists) m
 
 
-withTmpDir :: forall m n a. (MonadIO m, MonadMask m, MonadBaseControl m n)
+withTmpDir :: forall m n a. (MonadIO m, MC.MonadMask m, MonadBaseControl m n)
            => Path Directory
            -> String
            -> (Path Directory -> n a)
@@ -71,7 +76,7 @@ withTmpDir workdir template f =
         (f . Tagged)
 
 
-withTmpFile :: forall tag m n a. (MonadIO m, MonadMask m, MonadBaseControl m n)
+withTmpFile :: forall tag m n a. (MonadIO m, MC.MonadMask m, MonadBaseControl m n)
             => Path Directory
             -> String
             -> (Path tag -> n a)
@@ -81,13 +86,13 @@ withTmpFile workdir template = liftBaseOp op
     hCloseM :: IO.Handle -> m ()
     hCloseM = liftIO . IO.hClose
 
-    op :: (MonadIO m, MonadMask m) => (Path tag -> m b) -> m b
+    op :: (MonadIO m, MC.MonadMask m) => (Path tag -> m b) -> m b
     op f = Temp.withTempFile (untag workdir) template $ \fp h -> do
         hCloseM h
         f (Tagged fp)
 
 
-atomicCreateFile :: forall tag m n a. (MonadIO m, MonadMask m, MonadBaseControl m n)
+atomicCreateFile :: forall tag m n a. (MonadIO m, MC.MonadMask m, MonadBaseControl m n)
                  => Path tag
                  -> (Path tag -> n a)
                  -> n a
@@ -108,40 +113,39 @@ emptyTmpFile workdir =
 
 
 
-lineReader :: (MonadIO m, MonadCatch m) => IO Text -> Producer Text m ()
+lineReader :: MonadIO m => IO Text -> Stream (Of Text) m ()
 lineReader get = loop
   where
     loop = do
-      line <- liftIO (try get)
+      line <- liftIO (MC.try get)
 
       case line of
         Right t -> do
-          P.yield t
+          S.yield t
           loop
 
         Left e | IO.isEOFError e -> return ()
-               | otherwise       -> P.throwM e
+               | otherwise       -> liftIO $ throwIO e
 
 
-stdinReader :: (MonadIO m, MonadCatch m) => Producer Text m ()
-stdinReader = lineReader TIO.getLine
+streamLines :: MonadResource m => FilePath -> Stream (Of ByteString) m ()
+streamLines =
+    BSS.readFile
+    >>> BSS8.lines
+    >>> S.mapped BSS.toStrict
 
 
-fileReader :: P.MonadSafe m => FilePath -> Producer Text m ()
-fileReader fp =
-    P.withFile fp IO.ReadMode $
-        lineReader . TIO.hGetLine
+streamTextLines :: MonadResource m => FilePath -> Stream (Of Text) m ()
+streamTextLines = streamLines >>> S.map Text.decodeUtf8
 
 
-stdoutWriter :: MonadIO m => Consumer Text m r
-stdoutWriter = P.mapM_ (liftIO . TIO.putStrLn)
+putTextLines :: MonadIO m => Stream (Of Text) m r -> m r
+putTextLines = S.mapM_ (liftIO . TIO.putStrLn)
 
 
-fileWriter :: P.MonadSafe m => FilePath -> Consumer Text m r
-fileWriter fp =
-    P.withFile fp IO.WriteMode $ \h ->
-        forever $ do
-          line <- P.await
-          liftIO (TIO.hPutStrLn h line)
-
-
+writeTextLines :: (MonadIO m, MC.MonadMask m) => FilePath -> Stream (Of Text) m r -> m r
+writeTextLines fp stream =
+    MC.bracket
+        (liftIO $ IO.openFile fp IO.WriteMode)
+        (liftIO . IO.hClose)
+        (\h -> S.mapM_ (liftIO . TIO.hPutStrLn h) stream)

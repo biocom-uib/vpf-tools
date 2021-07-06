@@ -18,13 +18,14 @@ import Control.Effect.Sum.Extra
 import Numeric.Natural (Natural)
 
 import Data.Kind
+import Data.List.NonEmpty (NonEmpty)
 
 
 type Distributed :: (Type -> Type) -> Type -> (Type -> Type) -> Type -> Type
 
 data Distributed n w m a where
     GetNumWorkers :: forall n w m. Distributed n w m Natural
-    WithWorkers :: forall n w m a. Semigroup a => (w -> m a) -> Distributed n w m a
+    WithWorkers :: forall n w m a. (w -> m a) -> Distributed n w m (NonEmpty a)
     RunInWorker :: forall n w m a. w -> SDict (Serializable a) -> SClosure (n a) -> Distributed n w m a
 
 
@@ -36,16 +37,14 @@ getNumWorkers_ :: forall n w m. HasAny Distributed (Distributed n w) m => m Natu
 getNumWorkers_ = send (GetNumWorkers @n @w)
 
 
-withWorkers :: forall n w m a. (Has (Distributed n w) m, Semigroup a) => (w -> m a) -> m a
+withWorkers :: forall n w m a. (Has (Distributed n w) m, Semigroup a) => (w -> m a) -> m (NonEmpty a)
 withWorkers block = send (WithWorkers @n @w block)
 
 
 withWorkers_ :: forall n w m a.
-    ( HasAny Distributed (Distributed n w) m
-    , Semigroup a
-    )
+    HasAny Distributed (Distributed n w) m
     => (w -> m a)
-    -> m a
+    -> m (NonEmpty a)
 withWorkers_ block = send (WithWorkers @n @w block)
 
 
