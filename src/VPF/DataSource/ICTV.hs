@@ -1,3 +1,5 @@
+{-# language OverloadedLabels #-}
+{-# language OverloadedStrings #-}
 {-# language QuasiQuotes #-}
 {-# language RecordWildCards #-}
 {-# language Strict #-}
@@ -5,8 +7,10 @@
 module VPF.DataSource.ICTV where
 
 import Prelude hiding (last)
+import GHC.TypeLits (KnownSymbol)
 
 import Control.Lens
+import Control.Monad (when)
 
 import Codec.Xlsx qualified as Xlsx
 
@@ -16,7 +20,7 @@ import Data.Foldable (foldl', forM_)
 import Data.Function
 import Data.List (sortBy)
 import Data.List.NonEmpty (NonEmpty(..), nonEmpty, last)
-import Data.Map qualified as Map
+import Data.Map.Strict qualified as Map
 import Data.Maybe
 import Data.Proxy
 import Data.Text (Text)
@@ -29,10 +33,17 @@ import Data.Vector.Mutable qualified as MVector
 
 import Network.HTTP.Req qualified as Req
 
+import Frames (FrameRec)
+import Frames.RecF (rtraverse)
+import Data.Vinyl.Functor
+import Frames.InCore (toAoS)
+
 import Text.Feed.Import (parseFeedSource)
 import Text.Feed.Types (Feed(..))
 import Text.RSS.Syntax qualified as RSS
 import Text.URI (mkURI)
+
+import VPF.Frames.Types (FieldK, Rec(..), type (++))
 
 
 ictvVmrFeedUrl :: Req.Url 'Req.Https
@@ -57,14 +68,14 @@ instance Show VmrRevisionMeta where
           ++ "}"
 
 
-getFeed :: Req.HttpResponse response => Req.Req response
-getFeed =
+getVmrFeed :: Req.HttpResponse response => Req.Req response
+getVmrFeed =
     Req.req Req.GET ictvVmrFeedUrl Req.NoReqBody Proxy ictvVmrFeedScheme
 
 
 -- sorted by date (ascending)
-parseFeed :: LBS.ByteString -> Maybe (NonEmpty VmrRevisionMeta)
-parseFeed xml = do
+parseVmrFeed :: LBS.ByteString -> Maybe (NonEmpty VmrRevisionMeta)
+parseVmrFeed xml = do
     RSSFeed rss <- parseFeedSource xml
 
     let items :: [RSS.RSSItem]
@@ -93,8 +104,8 @@ findLatestVmrRevision :: NonEmpty VmrRevisionMeta -> VmrRevisionMeta
 findLatestVmrRevision = last
 
 
-getVmr :: VmrRevisionMeta -> Req.Req Req.LbsResponse
-getVmr (VmrRevisionMeta {..}) = do
+getVmrRevision :: VmrRevisionMeta -> Req.Req Req.LbsResponse
+getVmrRevision (VmrRevisionMeta {..}) = do
     let downloadUrl = revisionUrl Req./: Text.pack "download"
 
     Req.req Req.GET downloadUrl Req.NoReqBody Proxy revisionSchemeOpt
@@ -169,5 +180,100 @@ parseVmrRevision meta xlsxData = do
       | otherwise = (j, a) : fillGaps (i:is) fillValue jas
 
 
-vmrColumnTitles :: VmrRevision -> [Text]
-vmrColumnTitles = map vmrColumnTitle . vmrColumns
+type TaxonomyCols :: [FieldK]
+type TaxonomyCols =
+    [ '("realm",      Text)
+    , '("subrealm",   Text)
+    , '("kingdom",    Text)
+    , '("subkingdom", Text)
+    , '("phylum",     Text)
+    , '("subphylum",  Text)
+    , '("class",      Text)
+    , '("subclass",   Text)
+    , '("order",      Text)
+    , '("suborder",   Text)
+    , '("family",     Text)
+    , '("subfamily",  Text)
+    , '("genus",      Text)
+    , '("subgenus",   Text)
+    , '("species",    Text)
+    ]
+
+type VmrAnnotationCols :: [FieldK]
+type VmrAnnotationCols =
+    [ '("virus_name",        Text)
+    , '("genbank_accession", Text)
+    , '("refseq_accession",  Text)
+    , '("coverage",          Text)
+    , '("composition",       Text)
+    , '("host_source",       Text)
+    ]
+
+
+type VmrRevisionCols :: [FieldK]
+type VmrRevisionCols = TaxonomyCols ++ VmrAnnotationCols
+
+
+attemptRevisionToFrame :: VmrRevision -> Either Text (FrameRec VmrRevisionCols)
+attemptRevisionToFrame revision = do
+    nrows <- commonLength
+
+    colsFrame <- rtraverse getCompose $
+           findColAndIndex @"realm"             "realm"
+        :& findColAndIndex @"subrealm"          "subrealm"
+        :& findColAndIndex @"kingdom"           "kingdom"
+        :& findColAndIndex @"subkingdom"        "subkingdom"
+        :& findColAndIndex @"phylum"            "phylum"
+        :& findColAndIndex @"subphylum"         "subphylum"
+        :& findColAndIndex @"class"             "class"
+        :& findColAndIndex @"subclass"          "subclass"
+        :& findColAndIndex @"order"             "order"
+        :& findColAndIndex @"suborder"          "suborder"
+        :& findColAndIndex @"family"            "family"
+        :& findColAndIndex @"subfamily"         "subfamily"
+        :& findColAndIndex @"genus"             "genus"
+        :& findColAndIndex @"subgenus"          "subgenus"
+        :& findColAndIndex @"species"           "species"
+        :& findColAndIndex @"virus_name"        "virus name(s)"
+        :& findColAndIndex @"genbank_accession" "virus genbank accession"
+        :& findColAndIndex @"refseq_accession"  "virus refseq accession"
+        :& findColAndIndex @"coverage"          "genome coverage"
+        :& findColAndIndex @"composition"       "genome composition"
+        :& findColAndIndex @"host_source"       "host source"
+        :& RNil
+
+    return (toAoS nrows colsFrame)
+  where
+    commonLength :: Either Text Int
+    commonLength =
+        case vmrColumns revision of
+            []       -> Left "no columns found"
+            col:cols -> do
+                let l = Vector.length (vmrColumnValues col)
+
+                forM_ cols \col' -> do
+                    let l' = Vector.length (vmrColumnValues col')
+
+                    when (l /= l') $
+                        Left $
+                            "column length mismatch: column " <> vmrColumnTitle col
+                                <> " has " <> Text.pack (show l)
+                            <> " entries, but column " <> vmrColumnTitle col'
+                                <> " has " <> Text.pack (show l') <> " entries"
+                Right l
+
+    findColAndIndex :: forall s.
+        KnownSymbol s
+        => Text
+        -> (Either Text :. ((->) Int) :. ElField) '(s, Text)
+    findColAndIndex name =
+        Compose $ fmap (\values -> Compose $ Field . Vector.unsafeIndex values) (findCol name)
+
+    findCol :: Text -> Either Text (Vector Text)
+    findCol name = maybe (Left ("column not found: " <> name)) Right (Map.lookup name colMap)
+
+    colMap :: Map.Map Text (Vector Text)
+    colMap = Map.fromList
+        [ (Text.toLower (vmrColumnTitle col), vmrColumnValues col)
+        | col <- vmrColumns revision
+        ]
