@@ -70,7 +70,7 @@ hmmsearch inputModelFile inputSeqsFile outputFile =
 
 
 data HMMSearchConfig = HMMSearchConfig
-    { hmmsearchPath        :: FilePath
+    { hmmsearchPath        :: Path Executable
     , hmmsearchDefaultArgs :: [String]
     }
     deriving (Eq, Ord, Show, Generic)
@@ -138,7 +138,7 @@ interpretHMMSearchT (HMMSearch args@HMMSearchArgs{..}) = do
     (exitCode, stderr) <- MT.liftIO $
         Proc.readProcessStderr $
         Proc.setStdout Proc.nullStream $
-        Proc.proc (hmmsearchPath cfg) (hmmsearchDefaultArgs cfg ++ cmdlineArgs)
+        Proc.proc (untag (hmmsearchPath cfg)) (hmmsearchDefaultArgs cfg ++ cmdlineArgs)
 
     case exitCode of
       ExitSuccess    -> return ()

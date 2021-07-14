@@ -2,14 +2,21 @@
 {-# language OverloadedStrings #-}
 {-# language QuasiQuotes #-}
 {-# language TemplateHaskell #-}
+{-# LANGUAGE ViewPatterns #-}
 module VPF.DataSource.VirusHostDB where
 
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS
 
+import Frames (FrameRec)
+
+import System.FilePath ((</>))
 import Text.URI.QQ (uri)
 
 import VPF.DataSource.GenericFTP
+import VPF.Formats
+import VPF.Frames.DSV qualified as DSV
+import Control.Carrier.Error.Excepts (ExceptsT)
 
 
 virusHostDbFtpSourceConfig :: FtpSourceConfig
@@ -41,5 +48,16 @@ parseFormattedFastaName formatted =
         _ -> Nothing
 
 
-syncVirusHostDB :: (String -> IO ()) -> FilePath -> IO ()
-syncVirusHostDB = syncGenericFTP virusHostDbFtpSourceConfig
+syncVirusHostDb :: (String -> IO ()) -> Path Directory -> IO ()
+syncVirusHostDb = syncGenericFTP virusHostDbFtpSourceConfig
+
+
+type VirusHostDbCols = '[]
+
+tryLoadVirusHostDb :: Path Directory -> ExceptsT '[DSV.ParseError, String] IO (FrameRec VirusHostDbCols)
+tryLoadVirusHostDb (untag -> downloadDir) = do
+    let tsvPath = downloadDir </> "virushostdb.tsv"
+        tsvConfig = (DSV.defParserOptions '\t') { DSV.hasHeader = False }
+
+    withFileRead tsvPath \h -> do
+        undefined

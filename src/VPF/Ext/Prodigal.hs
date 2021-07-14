@@ -76,7 +76,7 @@ instance Store ProdigalConfig
 
 data ProdigalError
     = ProdigalError    { cmd :: ProdigalArgs, exitCode :: !Int, stderr :: !Text }
-    | ProdigalNotFound { search :: Path Executable }
+    | ProdigalNotFound { search :: String }
     deriving (Eq, Ord, Show, Generic)
 
 instance Store ProdigalError
@@ -89,15 +89,15 @@ deriveMonadTrans ''ProdigalT
 
 newProdigalConfig ::
     MT.MonadIO m
-    => Path Executable
+    => String
     -> [String]
     -> MT.ExceptT ProdigalError m ProdigalConfig
 newProdigalConfig path defaultArgs = do
-    mpath' <- MT.liftIO $ resolveExecutable (untag path)
+    mpath' <- MT.liftIO $ resolveExecutable path
 
     case mpath' of
       Nothing    -> MT.throwE $ ProdigalNotFound path
-      Just path' -> return $ ProdigalConfig (Tagged path') defaultArgs
+      Just path' -> return $ ProdigalConfig path' defaultArgs
 
 
 runProdigalTWith ::
@@ -110,7 +110,7 @@ runProdigalTWith cfg (ProdigalT m) = MT.hoist (\rm -> MT.runReaderT rm cfg) m
 
 runProdigalT ::
     MT.MonadIO m
-    => Path Executable
+    => String
     -> [String]
     -> ProdigalT m a
     -> m (Either ProdigalError a)

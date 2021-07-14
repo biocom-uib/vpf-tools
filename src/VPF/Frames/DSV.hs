@@ -43,8 +43,9 @@ import Data.Proxy (Proxy(..))
 import Data.Store (Store)
 import Data.Tagged (untag)
 import Data.Text (Text)
-import qualified Data.Text    as T
+import Data.Text qualified as T
 import Data.Typeable (Typeable)
+import Data.Vector (Vector)
 
 import Data.Vinyl (ElField, RecMapMethod, RecordToList, rtraverse)
 import Data.Vinyl.Functor (Compose(..))
@@ -139,7 +140,7 @@ streamEitherRows :: forall m sep cols.
     -> Path (DSV sep cols)
     -> Stream (Of (Either ParseError (Record cols))) m ()
 streamEitherRows opts fp =
-    parseEitherRows opts $ streamTextLines (untag fp)
+    parseEitherRows opts $ streamTextLines fp
   where
     ?parseRowCtx =
         let sep      = symbolVal (Proxy @sep)
@@ -164,6 +165,79 @@ inCoreAoSExc :: forall m cols.
 inCoreAoSExc =
     liftIO . try @ParseError . runResourceT . fromRowStreamAoS
         >=> either throwError return
+
+
+readColumnMap :: forall sep cols m.
+    ( KnownSymbol sep
+    , MonadIO m
+    , Has (Throw ParseError) m
+    )
+    => ParserOptions
+    -> Path (DSV sep cols)
+    -> m [(Text, Vector Text)]
+readColumnMap opts fp = liftIO $ runResourceT do
+    er <- S.next $ streamTextLines fp
+
+    case er of
+      Left () -> return []
+      Right (headerRow, stream) -> do
+          let header = rowTokenizer opts headerRow
+
+          mmvecs <- MVector.replicateM (length header) (MVector.new 0)
+          res <- go mmvecs 0 0 stream
+
+          case res of
+              Nothing -> _
+              Just badRow -> _
+  where
+    go ::
+        MVector.IOVector (MVector.IOVector Text)
+        -> Int
+        -> Int
+        -> Stream (Of Text) IO ()
+        -> IO (Maybe Text)
+    go !mvecs = loop
+      where
+        loop :: Int -> Int -> Stream (Of Text) IO () -> IO (Maybe Text)
+        loop !capacity !n stream =
+            enext <- S.next stream
+
+            case enext of
+                Left () ->
+                    return Nothing
+
+                Right (row, stream') -> do
+                    let tokenized = rowTokenizer opts row
+
+                    let needsGrow = capacity >= n
+
+                        capacity'
+                          | needsGrow = capacity*2
+                          | otherwise = capacity
+
+                        updatedMVec
+                          | needsGrow = \i -> do
+                              mvec <- MVector.unsafeRead mvecs i
+                              mvec' <- MVector.unsafeGrow mvecs capacity
+                              MVector.unsafeWrite mvecs i mvec'
+                              return mvec'
+                          | otherwise = MVector.unsafeRead mvecs
+
+                    status <- buildZipWith
+                        (>>)
+                        (\case
+                            Nothing -> return Nothing
+                            Left  _ -> return (Just row)
+                            Right _ -> return (Just row))
+                        (\i value ->
+                            mvec <- updatedMVec i
+                            MVector.unsafeWrite mvec n value)
+                        [0 .. MVector.length mmvecs - 1]
+                        tokenized
+
+                    case status of
+                        Nothing -> loop (capacity*2) (n+1) stream
+                        Just _  -> return status
 
 
 readFrame ::

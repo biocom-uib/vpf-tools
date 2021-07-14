@@ -1,6 +1,7 @@
 {-# language GeneralizedNewtypeDeriving #-}
 {-# language Strict #-}
 {-# language TemplateHaskell #-}
+{-# LANGUAGE ViewPatterns #-}
 module VPF.DataSource.GenericFTP where
 
 import GHC.Exts (IsString)
@@ -30,6 +31,8 @@ import System.FilePath ((</>), joinPath)
 
 import Text.URI qualified as URI
 import Text.Read (readMaybe)
+
+import VPF.Formats
 
 
 newtype FtpRelPath = FtpRelPath { ftpRelPath :: FilePath }
@@ -148,8 +151,8 @@ writeMetadata :: FtpFileInfos -> FilePath -> IO ()
 writeMetadata infos path = Y.encodeFile path infos
 
 
-syncGenericFTP :: FtpSourceConfig -> (String -> IO ()) -> FilePath -> IO ()
-syncGenericFTP cfg log downloadDir =
+syncGenericFTP :: FtpSourceConfig -> (String -> IO ()) -> Path Directory -> IO ()
+syncGenericFTP cfg log (untag -> downloadDir) =
     withFTP \h _welcome -> do
         loginResp <- FTP.login h "anonymous" "anonymous"
         log $ "Logged into " ++ ftpHost cfg ++ ": " ++ show loginResp

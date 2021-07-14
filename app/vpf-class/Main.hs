@@ -11,7 +11,7 @@ import Control.Carrier.Error.Excepts (Throw, ExceptsT, handleErrorCase, runLastE
 
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Control.Monad.Morph (hoist)
-import Control.Monad.Trans.Control (MonadBaseControl)
+import Control.Monad.Catch (MonadMask)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 
 import qualified Data.ByteString as BS
@@ -180,7 +180,7 @@ compileRegex src = do
           return (T.decodeUtf8 (BS.drop off (BS.take len btext)))
 
 
-withCfgWorkDir :: (MonadIO m, MonadBaseControl IO m) => Config -> ReaderT VC.WorkDir m a -> m a
+withCfgWorkDir :: (MonadIO m, MonadMask m) => Config -> ReaderT VC.WorkDir m a -> m a
 withCfgWorkDir cfg fm =
     case Opts.workDir cfg of
       Nothing ->

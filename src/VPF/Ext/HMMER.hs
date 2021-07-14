@@ -17,7 +17,7 @@ newtype HMMERConfig = HMMERConfig { hmmerPrefix :: Maybe (Path Directory) }
 instance Store HMMERConfig
 
 
-resolveHMMERTool :: HMMERConfig -> String -> IO (Maybe FilePath)
+resolveHMMERTool :: HMMERConfig -> String -> IO (Maybe (Path Executable))
 resolveHMMERTool (HMMERConfig mpref) toolCmd =
     case mpref of
       Nothing   -> resolveExecutable toolCmd

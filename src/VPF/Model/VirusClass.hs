@@ -203,8 +203,8 @@ processedHitsFileFor dir (GenomeChunkKey hash) =
 
 
 searchGenomeHits ::
-    ( MonadBaseControl IO m
-    , MonadIO m
+    ( MonadIO m
+    , MonadMask m
     , Has HMMSearch m
     , Has Prodigal m
     , Has (Reader WorkDir) m
@@ -326,7 +326,7 @@ processHits key protsFile hitsFile = do
 
     liftIO $
         FS.atomicCreateFile processedHitsFile \tmpFile ->
-            DSV.writeDSV writerOpts (FS.writeTextLines (untag tmpFile)) aggregatedHits
+            DSV.writeDSV writerOpts (FS.writeTextLines tmpFile) aggregatedHits
 
     return processedHitsFile
 
@@ -604,7 +604,7 @@ asyncPredictMemberships concOpts classFiles aggHitsFiles outputDir = do
 
     liftIO $ D.createDirectoryIfMissing True (untag outputDir)
 
-    liftIO $ IO.hPutStrLn IO.stderr $ "loading VPF classifications"
+    liftIO $ IO.hPutStrLn IO.stderr "loading VPF classifications"
 
     classes <- mapM (L._2 %%~ Cls.loadClassificationParams) (Map.toAscList classFiles)
 
