@@ -38,9 +38,11 @@ extra-deps:
 - Frames-0.7.1
 - mpi-hs-store-0.1.0.0
 - discrimination-0.4.1
+- json-stream-0.4.2.4
 - streaming-bytestring-0.1.7
 - streaming-concurrency-0.3.1.3
 - streaming-with-0.2.2.1
+- streaming-utils-0.2.0.0
 - name: fused-effects
   github: bielr/fused-effects
   commit: 8ceddb9f590d85eba33559f7024a97cf8e820765
@@ -72,6 +74,10 @@ flags:
 #
 # Extra directories used by stack for building
 # extra-include-dirs: [/path/to/dir]
+extra-include-dirs:
+- /usr/include/openmpi
+extra-lib-dirs:
+- /usr/lib/openmpi
 #extra-lib-dirs: []
 #
 # Allow a newer minor version of GHC than the snapshot specifies
