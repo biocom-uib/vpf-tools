@@ -13,10 +13,11 @@ import Frames (FrameRec)
 import System.FilePath ((</>))
 import Text.URI.QQ (uri)
 
+import Control.Carrier.Error.Excepts (ExceptsT)
 import VPF.DataSource.GenericFTP
 import VPF.Formats
 import VPF.Frames.DSV qualified as DSV
-import Control.Carrier.Error.Excepts (ExceptsT)
+import VPF.Util.FS (withFileRead)
 
 
 virusHostDbFtpSourceConfig :: FtpSourceConfig
@@ -59,5 +60,5 @@ tryLoadVirusHostDb (untag -> downloadDir) = do
     let tsvPath = downloadDir </> "virushostdb.tsv"
         tsvConfig = (DSV.defParserOptions '\t') { DSV.hasHeader = False }
 
-    withFileRead tsvPath \h -> do
+    withFileRead (Tagged tsvPath) \h -> do
         undefined

@@ -64,6 +64,18 @@ whenNotExists fp m = do
     when (not exists) m
 
 
+withBinaryFile :: forall m a r.
+    (MonadIO m, MC.MonadMask m)
+    => Path a
+    -> IO.IOMode
+    -> (IO.Handle -> m r)
+    -> m r
+withBinaryFile p mode =
+    MC.bracket
+        (liftIO $ IO.openBinaryFile (untag p) mode)
+        (liftIO . IO.hClose)
+
+
 withFile :: forall m a r.
     (MonadIO m, MC.MonadMask m)
     => Path a

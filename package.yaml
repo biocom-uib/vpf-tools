@@ -57,8 +57,10 @@ dependencies:
 - stm
 - store
 - streaming
+- streaming-attoparsec
 - streaming-bytestring
 - streaming-concurrency
+- streaming-utils
 - tagged
 - template-haskell
 - temporary

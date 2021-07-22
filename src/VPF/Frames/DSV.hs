@@ -46,6 +46,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Typeable (Typeable)
 import Data.Vector (Vector)
+import Data.Vector.Mutable qualified as MVector
 
 import Data.Vinyl (ElField, RecMapMethod, RecordToList, rtraverse)
 import Data.Vinyl.Functor (Compose(..))
@@ -167,6 +168,7 @@ inCoreAoSExc =
         >=> either throwError return
 
 
+{-
 readColumnMap :: forall sep cols m.
     ( KnownSymbol sep
     , MonadIO m
@@ -199,7 +201,7 @@ readColumnMap opts fp = liftIO $ runResourceT do
     go !mvecs = loop
       where
         loop :: Int -> Int -> Stream (Of Text) IO () -> IO (Maybe Text)
-        loop !capacity !n stream =
+        loop !capacity !n stream = do
             enext <- S.next stream
 
             case enext of
@@ -229,7 +231,7 @@ readColumnMap opts fp = liftIO $ runResourceT do
                             Nothing -> return Nothing
                             Left  _ -> return (Just row)
                             Right _ -> return (Just row))
-                        (\i value ->
+                        (\i value -> do
                             mvec <- updatedMVec i
                             MVector.unsafeWrite mvec n value)
                         [0 .. MVector.length mmvecs - 1]
@@ -238,6 +240,7 @@ readColumnMap opts fp = liftIO $ runResourceT do
                     case status of
                         Nothing -> loop (capacity*2) (n+1) stream
                         Just _  -> return status
+-}
 
 
 readFrame ::

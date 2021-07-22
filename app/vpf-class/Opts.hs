@@ -67,7 +67,7 @@ data ConcurrencyOpts = ConcurrencyOpts
 
 data Config = Config
     { hmmerPrefix        :: Maybe (Path Directory)
-    , prodigalPath       :: Path Executable
+    , prodigalPath       :: String
     , prodigalProcedure  :: String
     , evalueThreshold    :: Double
     , genomesFile        :: Path (FASTA Nucleotide)
@@ -115,7 +115,7 @@ defaultConcurrencyOpts = do
 
 configParser :: ConcurrencyOpts -> Parser Config
 configParser defConcOpts = do
-    prodigalPath <- fmap Tagged $ strOption $
+    prodigalPath <- strOption $
         long "prodigal"
         <> metavar "PRODIGAL"
         <> hidden
