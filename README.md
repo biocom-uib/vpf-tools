@@ -13,32 +13,32 @@ Usage example: Given a `.fna` file, obtain the proteins of each virus with
 `prodigal`, then perform a `hmmsearch` against the given `hmms` (VPFs) file to
 obtain a classification.
 ```sh
-stack exec -- vpf-class --data-index ../data/data-index.yaml -i ../data/test.fna -o test-classified
+stack exec -- vpf-class --data-index ../data/index.yaml -i ../data/test.fna -o test-classified
 ```
 
 This will output a directory with a `.tsv` file for each given classification
-type. For instance, if the contents of `../data/data-index.yaml` are
+type. For instance, if the contents of `../data/index.yaml` are
 
 ```yaml
 classificationFiles:
   baltimore:
-    modelClassesFile: ./vpf-classification/baltimore.tsv
-    scoreSamplesFile: ./score-samples/baltimore.tsv
+    modelClassesFile: ./vpf_classification/baltimore.tsv
+    scoreSamplesFile: ./uvigs_scores/baltimore.tsv
   family:
-    modelClassesFile: ./vpf-classification/family.tsv
-    scoreSamplesFile: ./score-samples/family.tsv
+    modelClassesFile: ./vpf_classification/family.tsv
+    scoreSamplesFile: ./uvigs_scores/family.tsv
   genus:
-    modelClassesFile: ./vpf-classification/genus.tsv
-    scoreSamplesFile: ./score-samples/genus.tsv
+    modelClassesFile: ./vpf_classification/genus.tsv
+    scoreSamplesFile: ./uvigs_scores/genus.tsv
   host_domain:
-    modelClassesFile: ./vpf-classification/domain.tsv
-    scoreSamplesFile: ./score-samples/host_domain.tsv
+    modelClassesFile: ./vpf_classification/domain.tsv
+    scoreSamplesFile: ./uvigs_scores/host_domain.tsv
   host_family:
-    modelClassesFile: ./vpf-classification/family.tsv
-    scoreSamplesFile: ./score-samples/host_family.tsv
+    modelClassesFile: ./vpf_classification/family.tsv
+    scoreSamplesFile: ./uvigs_scores/host_family.tsv
   host_genus:
-    modelClassesFile: ./vpf-classification/genus.tsv
-    scoreSamplesFile: ./score-samples/host_genus.tsv
+    modelClassesFile: ./vpf_classification/genus.tsv
+    scoreSamplesFile: ./uvigs_scores/host_genus.tsv
 
 vpfsFile: final_list.hmms
 ```
@@ -52,6 +52,7 @@ then `vpf-class` produces the following files:
 - `test-classified/host_family.tsv`
 - `test-classified/host_genus.tsv`
 
+Please read to the end to find out where to obtain all the required data files.
 
 Concurrency options can be specified with `--workers` (number of
 parallel workers running `prodigal` or `hmmsearch`) and `--chunk-size` (max
