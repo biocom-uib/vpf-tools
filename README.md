@@ -16,34 +16,8 @@ obtain a classification.
 stack exec -- vpf-class --data-index ../data/index.yaml -i ../data/test.fna -o test-classified
 ```
 
-This will output a directory with a `.tsv` file for each given classification
-type. For instance, if the contents of `../data/index.yaml` are
-
-```yaml
-classificationFiles:
-  baltimore:
-    modelClassesFile: ./vpf_classification/baltimore.tsv
-    scoreSamplesFile: ./uvigs_scores/baltimore.tsv
-  family:
-    modelClassesFile: ./vpf_classification/family.tsv
-    scoreSamplesFile: ./uvigs_scores/family.tsv
-  genus:
-    modelClassesFile: ./vpf_classification/genus.tsv
-    scoreSamplesFile: ./uvigs_scores/genus.tsv
-  host_domain:
-    modelClassesFile: ./vpf_classification/domain.tsv
-    scoreSamplesFile: ./uvigs_scores/host_domain.tsv
-  host_family:
-    modelClassesFile: ./vpf_classification/family.tsv
-    scoreSamplesFile: ./uvigs_scores/host_family.tsv
-  host_genus:
-    modelClassesFile: ./vpf_classification/genus.tsv
-    scoreSamplesFile: ./uvigs_scores/host_genus.tsv
-
-vpfsFile: final_list.hmms
-```
-
-then `vpf-class` produces the following files:
+This will output a directory with a `.tsv` file for each specified classification
+level in the `index.yaml` file. Using the provided files, one thus obtains:
 
 - `test-classified/baltimore.tsv`
 - `test-classified/family.tsv`
@@ -99,3 +73,22 @@ The data files that `vpf-class` needs are in the rows "Full data" (`modelClasses
 Score samples" (`scoreSamplesFile`). This VPF classification has been obtained
 as described in the paper, but the tool is designed to work with any
 user-provided classification files.
+
+## Troubleshooting
+
+_NOTE: To work around these issues and for user convenience, we plan to provide a
+Dockerfile in future releases._
+
+- **The first step (`curl -sSL https://get.haskellstack.org/ | sh`) requires
+root access**: The default configuration in the Stack installer uses
+`/usr/local/` as the default prefix. Stack can also be installed in
+`$HOME/.local/` following their manual installation method.
+
+- **Stack build reports errors either while installing GHC or downloading package
+indices**: If you have any issues during the installation, please check out the [Stack
+documentation](https://docs.haskellstack.org/en/stable/install_and_upgrade/) to
+verify that all dependencies are satisfied.
+
+- **I have issues with conda**: Some users have reported issues with Stack and
+Conda. Thus, installing it in a Conda-polluted environment is discouraged and
+unsupported.
