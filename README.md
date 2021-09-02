@@ -63,16 +63,21 @@ building and then run the tool normally as any other program with `mpirun`.
 
 ## Supplementary material
 
+You can find our classification of VPFs either as a
+compressed package (including `index.yaml`)
+[here](http://bioinfo.uib.es/~recerca/VPF-Class/vpf-class-data.tar.gz).
+
+Alternatively, you can download individual data files [here](http://bioinfo.uib.es/~recerca/VPF-Class/), at the "VPF
+classification" tab. The data files that `vpf-class` requires are in the rows
+"Full data" (`modelClassesFile`) and "UViG Score samples" (`scoreSamplesFile`).
+This VPF classification has been obtained as described in the paper, but the
+tool is designed to work with any user-provided classification files.
+
 The most recent `hmms` file containing the HMMER models of VPFs (`vpfsFile` in
 `data-index.yml`) can be downloaded from
-[IMG/VR](https://img.jgi.doe.gov//docs/final_list.hmms.gz)
-
-You can find our classification of VPFs
-[here](http://bioinfo.uib.es/~recerca/VPF-Class/), at the "VPF classification" tab.
-The data files that `vpf-class` needs are in the rows "Full data" (`modelClassesFile`) and "UViG
-Score samples" (`scoreSamplesFile`). This VPF classification has been obtained
-as described in the paper, but the tool is designed to work with any
-user-provided classification files.
+[IMG/VR](https://img.jgi.doe.gov//docs/final_list.hmms.gz). To use it with the
+provided `index.yaml`, extract `final_list.hmms` into the `data` directory,
+next to `index.yaml`.
 
 ## Troubleshooting
 
