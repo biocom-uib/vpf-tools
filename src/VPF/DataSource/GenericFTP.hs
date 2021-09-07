@@ -8,6 +8,8 @@ import GHC.Exts (IsString)
 
 import Conduit
 
+import Control.Lens (iforM_)
+import Control.Monad.Trans.Except (ExceptT(ExceptT), runExceptT, withExceptT)
 import Control.Monad.Trans.Writer.Strict (execWriterT, tell)
 
 import Data.Foldable
@@ -27,7 +29,7 @@ import Network.FTP.Client.Conduit qualified as FTPConduit
 
 import System.Directory qualified as Dir
 import System.FilePath.Posix qualified as Posix
-import System.FilePath ((</>), joinPath)
+import System.FilePath ((</>), joinPath, takeDirectory)
 
 import Text.URI qualified as URI
 import Text.Read (readMaybe)
@@ -49,11 +51,11 @@ data FtpSourceConfig = FtpSourceConfig
     , ftpPort :: Int
     , ftpLogin :: (String, String)
     , ftpBasePath :: FilePath
-    , ftpDownloadList :: FTP.Handle -> IO [FtpRelPath]
+    , ftpDownloadList :: FTP.Handle -> IO (Either String [FtpRelPath])
     }
 
 
-ftpSourceConfigFromURI :: URI.URI -> TExpQ ((FTP.Handle -> IO [FtpRelPath]) -> FtpSourceConfig)
+ftpSourceConfigFromURI :: URI.URI -> TExpQ ((FTP.Handle -> IO (Either String [FtpRelPath])) -> FtpSourceConfig)
 ftpSourceConfigFromURI uri = do
     let secure =
           case URI.unRText <$> URI.uriScheme uri of
@@ -124,11 +126,12 @@ metadataFilename :: String
 metadataFilename = "vpf-metadata.yaml"
 
 
-retrieveMetadata :: FtpSourceConfig -> FTP.Handle -> IO FtpFileInfos
-retrieveMetadata cfg h = do
-    paths <- ftpDownloadList cfg h
+retrieveMetadata :: FtpSourceConfig -> FTP.Handle -> IO (Either String FtpFileInfos)
+retrieveMetadata cfg h = runExceptT do
+    paths <- withExceptT ("error preparing file list: " ++) $
+        ExceptT $ ftpDownloadList cfg h
 
-    infos <- sourceToList $
+    infos <- lift $ sourceToList $
         forM_ paths \path -> do
             resp <- liftIO $ FTP.mlst h (ftpRelPath path)
             yield (path, FtpFileInfo (FTP.mrFacts resp))
@@ -151,17 +154,21 @@ writeMetadata :: FtpFileInfos -> FilePath -> IO ()
 writeMetadata infos path = Y.encodeFile path infos
 
 
-syncGenericFTP :: FtpSourceConfig -> (String -> IO ()) -> Path Directory -> IO ()
-syncGenericFTP cfg log (untag -> downloadDir) =
-    withFTP \h _welcome -> do
-        loginResp <- FTP.login h "anonymous" "anonymous"
-        log $ "Logged into " ++ ftpHost cfg ++ ": " ++ show loginResp
+type LogAction a = a -> IO ()
 
-        _ <- FTP.cwd h (ftpBasePath cfg)
+
+syncGenericFTP :: FtpSourceConfig -> LogAction String -> Path Directory -> IO (Either String ())
+syncGenericFTP cfg log (untag -> downloadDir) =
+    withFTP \h _welcome -> runExceptT do
+        lift do
+            loginResp <- FTP.login h "anonymous" "anonymous"
+            log $ "Logged into " ++ ftpHost cfg ++ ": " ++ show loginResp
+            _ <- FTP.cwd h (ftpBasePath cfg)
+            return ()
 
         let metadataPath = downloadDir </> metadataFilename
 
-        oldMetadata <- do
+        oldMetadata <- lift do
             existsOld <- Dir.doesFileExist metadataPath
 
             if existsOld then
@@ -176,9 +183,9 @@ syncGenericFTP cfg log (untag -> downloadDir) =
             else
                 return (FtpFileInfos Map.empty)
 
-        Dir.createDirectoryIfMissing True downloadDir
+        lift $ Dir.createDirectoryIfMissing True downloadDir
 
-        newMetadata <- retrieveMetadata cfg h
+        newMetadata <- ExceptT $ retrieveMetadata cfg h
 
         let changes :: Map FtpRelPath (These FtpFileInfo FtpFileInfo)
             changes = Map.merge
@@ -188,8 +195,8 @@ syncGenericFTP cfg log (untag -> downloadDir) =
                 (getFtpFileInfos oldMetadata)
                 (getFtpFileInfos newMetadata)
 
-        dirty <- execWriterT $
-            forM_  (Map.toAscList changes) \(relPath, change) -> do
+        dirty <- lift . execWriterT $
+            iforM_ changes \relPath change -> do
                 let remotePath = ftpRelPath relPath
                     localPath = downloadDir </> toLocalRelPath relPath
 
@@ -203,6 +210,7 @@ syncGenericFTP cfg log (untag -> downloadDir) =
                     That _new -> do
                         liftIO do
                             log $ "Retrieving file " ++ remotePath
+                            Dir.createDirectoryIfMissing True (takeDirectory localPath)
                             streamRetrToFile h remotePath localPath
                         tell (Any True)
 
@@ -220,11 +228,12 @@ syncGenericFTP cfg log (untag -> downloadDir) =
                             streamRetrToFile h remotePath localPath
                         tell (Any True)
 
-        if getAny dirty then do
-            writeMetadata newMetadata metadataPath
-            log "Update finished."
-        else
-            log "Already up to date."
+        lift
+            if getAny dirty then do
+                writeMetadata newMetadata metadataPath
+                log "Update finished."
+            else
+                log "Already up to date."
   where
     withFTP
         | ftpSecure cfg = FTP.withFTPS (ftpHost cfg) (ftpPort cfg)

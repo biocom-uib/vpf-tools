@@ -21,17 +21,18 @@ import Control.Lens.Type
 
 import Data.Vector (Vector)
 
-import qualified VPF.Frames.Dplyr as F
-import qualified VPF.Frames.InCore as F
-import qualified VPF.Frames.TaggedField as F
+import VPF.Frames.Dplyr qualified as F
+import VPF.Frames.InCore qualified as F
+import VPF.Frames.TaggedField qualified as F
 import VPF.Frames.Dplyr.Ops
 import VPF.Frames.Types
 
-import qualified VPF.Model.Cols as M
+import VPF.Model.Cols qualified as M
 import VPF.Model.Class.Cols
 
 import VPF.Formats
-import qualified VPF.Frames.DSV as DSV
+import VPF.Frames.DSV qualified as DSV
+import VPF.Util.Lift
 
 
 classObjs :: Iso' (GroupedFrameRec (Field ModelName) ModelClassCols)
@@ -48,7 +49,8 @@ loadClassification ::
     )
     => Path (DSV "\t" ClassificationCols)
     -> m (GroupedFrameRec (Field ModelName) ModelClassCols)
-loadClassification fp = F.setIndex @"model_name" <$> DSV.readFrame opts fp
+loadClassification fp =
+    F.setIndex @"model_name" <$> liftEitherIO (DSV.readFrame opts fp)
   where
     opts = (DSV.defParserOptions '\t') { DSV.hasHeader = True }
 
@@ -68,9 +70,8 @@ loadScoreSamples ::
     )
     => Path (DSV "\t" '[M.VirusHitScore])
     -> m (Vector (Field M.VirusHitScore))
-loadScoreSamples fp = do
-    df <- DSV.readFrame opts fp
-    return $ F.toRowsVec (fmap unRec df)
+loadScoreSamples fp =
+    F.toRowsVec . fmap unRec <$> liftEitherIO (DSV.readFrame opts fp)
   where
     unRec :: Record '[M.VirusHitScore] -> Field M.VirusHitScore
     unRec = L.review F.untagged . L.view F.rsingleton

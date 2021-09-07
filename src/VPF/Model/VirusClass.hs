@@ -19,8 +19,8 @@ import Control.Effect.Reader
 import Control.Effect.Distributed
 import Control.Effect.Sum.Extra (HasAny)
 import Control.Effect.Throw
-import qualified Control.Foldl as Fold
-import qualified Control.Lens as L
+import Control.Foldl qualified as Fold
+import Control.Lens qualified as L
 import Control.Monad
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.Trans.Control (MonadBaseControl)
@@ -29,22 +29,22 @@ import Control.Monad.Trans.Reader (runReaderT)
 import Control.Monad.Trans.Resource (ResourceT, runResourceT)
 import Control.Monad.Trans.Resource qualified as ResourceT
 
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Char8 as BC
+import Data.Aeson qualified as Aeson
+import Data.ByteString.Char8 qualified as BC
 import Data.List (isPrefixOf, isSuffixOf)
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Proxy (Proxy(..))
 import Data.Store (Store)
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
-import qualified Data.Text.IO as T
+import Data.Text          qualified as T
+import Data.Text.Encoding qualified as T
+import Data.Text.IO       qualified as T
 import Data.Vector (Vector)
-import qualified Data.Vector as Vec
+import Data.Vector qualified as Vec
 
-import qualified Data.Vinyl as V
+import Data.Vinyl qualified as V
 
 import Streaming
 import Streaming.Prelude qualified as S
@@ -56,24 +56,25 @@ import System.IO as IO
 
 import VPF.Ext.Prodigal (Prodigal, prodigal)
 import VPF.Ext.HMMER.Search (HMMSearch, ProtSearchHitCols, hmmsearch)
-import qualified VPF.Ext.HMMER.Search.Cols as HMM
-import qualified VPF.Ext.HMMER.TableFormat as Tbl
+import VPF.Ext.HMMER.Search.Cols qualified as HMM
+import VPF.Ext.HMMER.TableFormat qualified as Tbl
 
 import VPF.Formats
 import VPF.Frames.Dplyr.Ops
 import VPF.Frames.Types
-import qualified VPF.Frames.Dplyr  as F
-import qualified VPF.Frames.DSV    as DSV
-import qualified VPF.Frames.InCore as F
+import VPF.Frames.Dplyr  qualified as F
+import VPF.Frames.DSV    qualified as DSV
+import VPF.Frames.InCore qualified as F
 
-import qualified VPF.Model.Cols       as M
-import qualified VPF.Model.Class      as Cls
-import qualified VPF.Model.Class.Cols as Cls
+import VPF.Model.Cols       qualified as M
+import VPF.Model.Class      qualified as Cls
+import VPF.Model.Class.Cols qualified as Cls
 
-import qualified VPF.Util.Hash     as Hash
-import qualified VPF.Util.Fasta    as FA
-import qualified VPF.Util.FS       as FS
-import qualified VPF.Util.Progress as Progress
+import VPF.Util.Hash     qualified as Hash
+import VPF.Util.Lift
+import VPF.Util.Fasta    qualified as FA
+import VPF.Util.FS       qualified as FS
+import VPF.Util.Progress qualified as Progress
 import Data.List.NonEmpty (NonEmpty)
 
 
@@ -257,10 +258,9 @@ aggregateHits aminoacidsFile hitsFile = do
     thr <- asks modelEValueThreshold
     getVirusName <- asks modelVirusNameExtractor
 
-    hitsFrame <- DSV.inCoreAoSExc $
-        Tbl.streamTableRows hitsFile
-            & S.filter (\row -> row^.HMM.sequenceEValue <= thr)
-            & S.map V.rcast
+    hitsFrame <- liftEitherIO $ flip Tbl.readTableWith hitsFile $
+        S.filter (either (const True) \row -> row^.HMM.sequenceEValue <= thr)
+        >>> S.map (fmap V.rcast)
 
     return $ hitsFrame
         & F.mutate1 @"virus_name" (getVirusName . L.view HMM.targetName)
@@ -652,7 +652,7 @@ asyncPredictMemberships concOpts classFiles aggHitsFiles outputDir = do
         DSV.ParserOptions
         -> [Path (DSV "\t" _)]
         -> Stream (Of (FrameRec AggregatedHitsCols)) (ExceptT DSV.ParseError IO) ()
-    loadAggHitsFiles opts = S.mapM (DSV.readFrame opts) . S.each
+    loadAggHitsFiles opts = S.mapM (liftEitherIO . DSV.readFrame opts) . S.each
 
     predictAll :: forall m.
         Monad m

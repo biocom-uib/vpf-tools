@@ -40,6 +40,12 @@ newtype GenBankHeader = GenBankHeader RawLines
     deriving Show
 
 
+data GenBankRecord = GenBankRecord
+    { genBankFields :: [GenBankField]
+    , genBankRecordSource :: ByteString
+    }
+
+
 data GenBankField
     = LocusField      RawLine
     | DefinitionField RawLines
@@ -114,7 +120,7 @@ parseGenBankStream ::
     -> ByteStream m r
     -> m (Either (ParseError m r)
             ( GenBankHeader
-            , Stream (Of (ByteString, [GenBankField])) m (Either (ParseError m r) r)
+            , Stream (Of GenBankRecord) m (Either (ParseError m r) r)
             ))
 parseGenBankStream filename stream = do
     (headerRes, stream') <- SA.parse headerP stream
@@ -126,9 +132,12 @@ parseGenBankStream filename stream = do
         Right header ->
             Right
                 ( header
-                , ignoringLeftovers <$> SA.parsed (A.match entryP) stream'
+                , ignoringLeftovers <$> SA.parsed (toRecord <$> A.match entryP) stream'
                 )
   where
+    toRecord :: (ByteString, [GenBankField]) -> GenBankRecord
+    toRecord = uncurry (flip GenBankRecord)
+
     ignoringLeftovers :: Either (SA.Errors, ByteStream m r) r -> Either (ParseError m r) r
     ignoringLeftovers (Left ((ctx, e), l)) = Left (ParseError filename ctx e l)
     ignoringLeftovers (Right r)            = Right r
@@ -139,7 +148,7 @@ parseGenBankStream_ ::
     Monad m
     => FilePath
     -> ByteStream m r
-    -> Stream (Of (ByteString, [GenBankField])) m (Either (ParseError m r) r)
+    -> Stream (Of GenBankRecord) m (Either (ParseError m r) r)
 parseGenBankStream_ filename stream = effect do
     headerRes <- parseGenBankStream filename stream
 

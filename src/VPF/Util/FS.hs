@@ -1,7 +1,6 @@
 {-# language Strict #-}
 module VPF.Util.FS where
 
-import Control.Category ((>>>))
 import Control.Exception (throwIO)
 import Control.Monad (when)
 import Control.Monad.Catch qualified as MC
@@ -12,7 +11,8 @@ import Data.ByteString (ByteString)
 import Data.Tagged (Tagged(..), untag)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as Text
-import qualified Data.Text.IO as TIO
+import Data.Text qualified as Text
+import Data.Text.IO qualified as TIO
 
 import Streaming (Stream, Of)
 import Streaming.Prelude qualified as S
@@ -23,6 +23,7 @@ import qualified System.IO        as IO
 import qualified System.IO.Error  as IO
 import qualified System.IO.Temp   as Temp
 
+import Streaming.ByteString (ByteStream)
 import Streaming.ByteString qualified as BSS
 import Streaming.ByteString.Char8 qualified as BSS8
 
@@ -161,15 +162,23 @@ lineReader get = loop
 
 
 streamLines :: MonadResource m => Path a -> Stream (Of ByteString) m ()
-streamLines =
-    untag
-    >>> BSS.readFile
-    >>> BSS8.lines
-    >>> S.mapped BSS.toStrict
+streamLines = S.mapped BSS.toStrict . BSS8.lines . BSS.readFile . untag
+
+
+hStreamLines :: MonadIO m => IO.Handle -> Stream (Of ByteString) m ()
+hStreamLines = S.mapped BSS.toStrict . BSS8.lines . BSS.fromHandle
+
+
+toTextLines :: Monad m => ByteStream m r -> Stream (Of Text) m r
+toTextLines = S.map Text.decodeUtf8 . S.mapped BSS.toStrict . BSS8.lines
 
 
 streamTextLines :: MonadResource m => Path a -> Stream (Of Text) m ()
-streamTextLines = streamLines >>> S.map Text.decodeUtf8
+streamTextLines = S.map Text.decodeUtf8 . streamLines
+
+
+hStreamTextLines :: MonadIO m => IO.Handle -> Stream (Of Text) m ()
+hStreamTextLines = S.map Text.decodeUtf8 . hStreamLines
 
 
 putTextLines :: MonadIO m => Stream (Of Text) m r -> m r

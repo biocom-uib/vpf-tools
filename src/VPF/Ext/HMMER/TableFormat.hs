@@ -2,11 +2,7 @@
 {-# language Strict #-}
 module VPF.Ext.HMMER.TableFormat where
 
-import Control.Algebra (Has)
-import Control.Effect.Throw (Throw)
-import Control.Monad.Catch (MonadThrow)
-import Control.Monad.IO.Class (MonadIO)
-import Control.Monad.Trans.Resource (MonadResource)
+import Control.Category ((>>>))
 
 import Data.Coerce (coerce)
 import Data.Text (Text)
@@ -26,6 +22,7 @@ import Streaming (Stream, Of)
 
 import VPF.Formats
 import VPF.Frames.DSV qualified as DSV
+import VPF.Util.FS qualified as FS
 
 
 data Accession = NoAccession | Accession Text
@@ -79,39 +76,45 @@ tableAsDSV :: Path (HMMERTable rs) -> Path (DSV " " rs)
 tableAsDSV = coerce
 
 
-produceEitherRows :: forall rs m.
-    ( MonadResource m
-    , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
+parseEitherRows :: forall rs m.
+    ( Monad m
+    , CSV.ReadRec rs
+    , Fr.ColumnHeaders rs
+    , V.NatToInt (V.RLength rs)
     )
     => Path (HMMERTable rs)
+    -> Stream (Of Text) m ()
     -> Stream (Of (Either DSV.ParseError (Record rs))) m ()
-produceEitherRows fp =
-    DSV.streamEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
+parseEitherRows fp =
+    DSV.parseEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
   where
     maxCols = V.natToInt @(V.RLength rs)
 
 
-streamTableRows :: forall rs m.
-    ( MonadResource m
-    , MonadThrow m
-    , Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
+readTableWith ::
+    ( Fr.ColumnHeaders cols
+    , CSV.ReadRec cols
+    , V.NatToInt (V.RLength cols)
+    , RecVec cols'
     )
-    => Path (HMMERTable rs)
-    -> Stream (Of (Record rs)) m ()
-streamTableRows fp =
-    DSV.throwLeftsM $
-        DSV.streamEitherRows (tblParserOptions maxCols) (tableAsDSV fp)
-  where
-    maxCols = V.natToInt @(V.RLength rs)
+    => (Stream (Of (Either DSV.ParseError (Record cols))) IO ()
+        -> Stream (Of (Either DSV.ParseError (Record cols'))) IO ())
+    -> Path (HMMERTable cols)
+    -> IO (Either DSV.ParseError (FrameRec cols'))
+readTableWith f fp =
+    FS.withFileRead fp $
+        FS.hStreamTextLines
+            >>> parseEitherRows fp
+            >>> f
+            >>> DSV.fromEitherRowStreamAoS
 
 
 readTable ::
-    ( Fr.ColumnHeaders rs, CSV.ReadRec rs, V.NatToInt (V.RLength rs)
-    , Has (Throw DSV.ParseError) m
-    , MonadIO m
-    , RecVec rs
+    ( Fr.ColumnHeaders cols
+    , CSV.ReadRec cols
+    , V.NatToInt (V.RLength cols)
+    , RecVec cols
     )
-    => Path (HMMERTable rs)
-    -> m (FrameRec rs)
-readTable =
-    DSV.inCoreAoSExc . streamTableRows
+    => Path (HMMERTable cols)
+    -> IO (Either DSV.ParseError (FrameRec cols))
+readTable = readTableWith id

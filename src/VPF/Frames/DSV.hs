@@ -11,10 +11,9 @@ module VPF.Frames.DSV
   , defParserOptions
   , parseEitherRow
   , parseEitherRows
-  , streamEitherRows
-  , throwLeftsM
-  , inCoreAoSExc
+  , fromEitherRowStreamAoS
   , readFrame
+  , readFrameWith
 
   , WriterOptions(..)
   , defWriterOptions
@@ -29,14 +28,9 @@ module VPF.Frames.DSV
 import GHC.Generics (Generic)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 
-import Control.Algebra (Has)
 import Control.Category ((>>>))
-import Control.Effect.Throw (Throw, throwError)
-import Control.Monad ((>=>))
-import Control.Exception (try)
-import Control.Monad.Catch (Exception, MonadThrow(throwM))
-import Control.Monad.IO.Class (MonadIO(liftIO))
-import Control.Monad.Trans.Resource (ResourceT, MonadResource, runResourceT)
+import Control.Monad.Catch (Exception, MonadThrow(throwM), MonadCatch, try)
+import Control.Monad.Primitive (PrimMonad)
 
 import Data.List (intercalate)
 import Data.Proxy (Proxy(..))
@@ -45,23 +39,21 @@ import Data.Tagged (untag)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Typeable (Typeable)
-import Data.Vector (Vector)
-import Data.Vector.Mutable qualified as MVector
 
 import Data.Vinyl (ElField, RecMapMethod, RecordToList, rtraverse)
 import Data.Vinyl.Functor (Compose(..))
 
 import Frames (ColumnHeaders(..), FrameRec, Record)
 import Frames.InCore (RecVec)
-import qualified Frames.CSV     as CSV
-import qualified Frames.ShowCSV as CSV
+import Frames.CSV     qualified as CSV
+import Frames.ShowCSV qualified as CSV
 
 import Streaming (Stream, Of)
 import Streaming.Prelude qualified as S
 
 import VPF.Frames.InCore (fromRowStreamAoS)
 import VPF.Formats (Path, DSV)
-import VPF.Util.FS (streamTextLines)
+import VPF.Util.FS qualified as FS
 
 
 type RowTokenizer = Text -> [Text]
@@ -120,28 +112,20 @@ parseEitherRow tokenize row =
       Right rec -> Right rec
 
 
-parseEitherRows ::
-    (HasParseCtx, Monad m, CSV.ReadRec cols)
-    => ParserOptions
-    -> Stream (Of Text) m ()
-    -> Stream (Of (Either ParseError (Record cols))) m ()
-parseEitherRows opts =
-    (if hasHeader opts then S.drop 1 else id)
-    >>> S.filter (not . isComment opts)
-    >>> S.map (parseEitherRow (rowTokenizer opts))
-
-
-streamEitherRows :: forall m sep cols.
+parseEitherRows :: forall m sep cols.
     ( KnownSymbol sep
     , ColumnHeaders cols
     , CSV.ReadRec cols
-    , MonadResource m
+    , Monad m
     )
     => ParserOptions
     -> Path (DSV sep cols)
+    -> Stream (Of Text) m ()
     -> Stream (Of (Either ParseError (Record cols))) m ()
-streamEitherRows opts fp =
-    parseEitherRows opts $ streamTextLines fp
+parseEitherRows opts fp =
+    (if hasHeader opts then S.drop 1 else id)
+    >>> S.filter (not . isComment opts)
+    >>> S.map (parseEitherRow (rowTokenizer opts))
   where
     ?parseRowCtx =
         let sep      = symbolVal (Proxy @sep)
@@ -156,16 +140,15 @@ throwLeftsM ::
 throwLeftsM = S.mapM (either throwM return)
 
 
-inCoreAoSExc :: forall m cols.
+fromEitherRowStreamAoS ::
     ( RecVec cols
-    , MonadIO m
-    , Has (Throw ParseError) m
+    , MonadCatch m
+    , PrimMonad m
     )
-    => Stream (Of (Record cols)) (ResourceT IO) ()
-    -> m (FrameRec cols)
-inCoreAoSExc =
-    liftIO . try @ParseError . runResourceT . fromRowStreamAoS
-        >=> either throwError return
+    => Stream (Of (Either ParseError (Record cols))) m ()
+    -> m (Either ParseError (FrameRec cols))
+fromEitherRowStreamAoS =
+    try . fromRowStreamAoS . throwLeftsM
 
 
 {-
@@ -243,17 +226,31 @@ readColumnMap opts fp = liftIO $ runResourceT do
 -}
 
 
+readFrameWith ::
+    ( KnownSymbol sep, ColumnHeaders cols
+    , CSV.ReadRec cols, RecVec cols'
+    )
+    => ParserOptions
+    -> (Stream (Of (Either ParseError (Record cols))) IO ()
+        -> Stream (Of (Either ParseError (Record cols'))) IO ())
+    -> Path (DSV sep cols)
+    -> IO (Either ParseError (FrameRec cols'))
+readFrameWith opts f fp =
+    FS.withFileRead fp $
+        FS.hStreamTextLines
+            >>> parseEitherRows opts fp
+            >>> f
+            >>> fromEitherRowStreamAoS
+
+
 readFrame ::
     ( KnownSymbol sep, ColumnHeaders cols
     , CSV.ReadRec cols, RecVec cols
-    , MonadIO m
-    , Has (Throw ParseError) m
     )
     => ParserOptions
     -> Path (DSV sep cols)
-    -> m (FrameRec cols)
-readFrame opts =
-    inCoreAoSExc . throwLeftsM . streamEitherRows opts
+    -> IO (Either ParseError (FrameRec cols))
+readFrame opts = readFrameWith opts id
 
 
 data WriterOptions = WriterOptions
