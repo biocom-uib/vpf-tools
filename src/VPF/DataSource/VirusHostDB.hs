@@ -7,6 +7,7 @@ module VPF.DataSource.VirusHostDB where
 
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS
+import Data.Semigroup (Any)
 import Data.Text (Text)
 
 import Frames (FrameRec, Rec, rcast)
@@ -52,7 +53,7 @@ parseFormattedFastaName formatted =
         _ -> Nothing
 
 
-syncVirusHostDb :: LogAction String -> Path Directory -> IO (Either String ())
+syncVirusHostDb :: LogAction String -> Path Directory -> IO (Either String Any)
 syncVirusHostDb = syncGenericFTP virusHostDbFtpSourceConfig
 
 

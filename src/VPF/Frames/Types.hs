@@ -14,6 +14,9 @@ module VPF.Frames.Types
 
   -- type-level polymorphic field indexers
   , FieldSpec
+  , FieldsOf
+  , FieldOf
+
   , MonoFieldSpec
   , NameSpec
 
@@ -78,6 +81,8 @@ type family ProjField ki kr rs i where
     ProjField [ki]           [kr]            rs  (i ': is) = ProjField ki kr rs i ': ProjField [ki] [kr] rs is
 
 type FieldSpec rs (i :: ki) (r :: kr) = ProjField ki kr rs i ~ r
+type FieldsOf (rs :: FieldsK) (i :: ki) = ProjField ki FieldsK rs i
+type FieldOf (rs :: FieldsK) (i :: ki) = ProjField ki FieldK rs i
 
 
 type family InferFieldKind (ki :: Type) = (kr :: Type) where

@@ -11,7 +11,6 @@ import Data.ByteString (ByteString)
 import Data.Tagged (Tagged(..), untag)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as Text
-import Data.Text qualified as Text
 import Data.Text.IO qualified as TIO
 
 import Streaming (Stream, Of)

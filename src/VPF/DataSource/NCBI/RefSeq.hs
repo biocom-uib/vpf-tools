@@ -3,14 +3,13 @@
 {-# language TemplateHaskell #-}
 {-# language TupleSections #-}
 {-# language ViewPatterns #-}
-module VPF.DataSource.RefSeq where
+module VPF.DataSource.NCBI.RefSeq where
 
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Except (runExceptT, throwE, ExceptT(ExceptT))
 import Control.Monad.Trans.Resource (MonadResource)
-import Control.Monad.Trans.Resource qualified as ResourceT
 
 import Data.Bits ((.|.))
 import Data.ByteString (ByteString)
@@ -18,6 +17,7 @@ import Data.ByteString.Char8 qualified as BS
 import Data.Function ((&))
 import Data.Maybe (isJust)
 import Data.List (isInfixOf)
+import Data.Semigroup (Any)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Vinyl (rcast)
@@ -45,8 +45,8 @@ import VPF.Frames.Dplyr qualified as F
 import VPF.Frames.DSV qualified as DSV
 import VPF.Frames.Types (FieldSubset)
 import VPF.Formats
-import VPF.Util.GenBank (GenBankRecord, parseGenBankStream_, ParseError)
 import VPF.Util.FS qualified as FS
+import VPF.Util.GBFF (GenBankRecord, ParseError, parseGenBankFile)
 
 
 data RefSeqSourceConfig = RefSeqSourceConfig
@@ -122,7 +122,7 @@ buildDownloadList h cfg = runExceptT do
     return (catalogPath : fileList)
 
 
-syncRefSeq :: RefSeqSourceConfig -> LogAction String -> Path Directory -> IO (Either String ())
+syncRefSeq :: RefSeqSourceConfig -> LogAction String -> Path Directory -> IO (Either String Any)
 syncRefSeq = syncGenericFTP . refSeqFtpSourceConfig
 
 
@@ -179,21 +179,15 @@ loadRefSeqGb ::
     -> Stream (Of GenBankRecord) m (Either (ParseError m ()) ())
 loadRefSeqGb cfg (untag -> downloadDir) = runExceptT do
     forM_ (refSeqDirectories cfg) \dir -> do
-        let isGbff f =
-                (isInfixOf ".gbff." f || isInfixOf ".gpff." f)
-                    && fileMatchesCfg cfg (BS.pack f)
-
-        files <- liftIO $ filter isGbff <$> Dir.listDirectory dir
+        let parentDir = downloadDir </> dir
+        files <- liftIO $ Dir.listDirectory parentDir
 
         forM_ files \file -> do
-            let filePath = downloadDir </> dir </> file
+            when (isGbff file) $
+                ExceptT $ parseGenBankFile True (parentDir </> file)
+  where
+    isGbff :: String -> Bool
+    isGbff f =
+        (isInfixOf ".gbff." f || isInfixOf ".gpff." f)
+            && fileMatchesCfg cfg (BS.pack f)
 
-            (releaseKey, h) <- lift . lift $
-                ResourceT.allocate
-                    (IO.openBinaryFile filePath IO.ReadMode)
-                    IO.hClose
-
-            ExceptT $
-                parseGenBankStream_ filePath (SZ.gunzip (BSS.fromHandle h))
-
-            ResourceT.release releaseKey

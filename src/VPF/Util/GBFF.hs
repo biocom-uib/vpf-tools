@@ -2,10 +2,14 @@
 {-# language OverloadedStrings #-}
 {-# language PackageImports #-}
 {-# language TupleSections #-}
-module VPF.Util.GenBank where
+module VPF.Util.GBFF where
 
 import Control.Applicative
 import Control.Monad (guard, replicateM)
+import Control.Monad.Trans (lift)
+import Control.Monad.Trans.Except (runExceptT, ExceptT(ExceptT))
+import Control.Monad.Trans.Resource (MonadResource)
+import Control.Monad.Trans.Resource qualified as ResourceT
 
 import Data.Attoparsec.ByteString (Parser)
 import Data.Attoparsec.ByteString qualified as A
@@ -18,7 +22,11 @@ import Data.ByteString.Internal qualified as BS8 (c2w)
 
 import Streaming (Stream, Of, effect)
 import Streaming.ByteString (ByteStream)
+import Streaming.ByteString qualified as BSS
+import Streaming.Zip qualified as SZ
 import "streaming-attoparsec" Data.Attoparsec.ByteString.Streaming qualified as SA
+
+import System.IO qualified as IO
 
 import Data.Maybe
 
@@ -97,21 +105,33 @@ newtype SequenceLines = SequenceLines RawLines
 
 -- USAGE
 
---- withBinaryFile (Tagged "/home/biel/documents/UIB/Doc/research/jgi/genbank_gbvrl1.seq.gz") ReadMode $
----     BSS.fromHandle
----     >>> SZ.gunzip
----     >>> AS.parse headerP
----     >>> fmap snd
----     >>> BSS.mwrap
----     >>> AS.parsed entryP
-
-
 data ParseError m r = ParseError
     { parseErrorFilename :: FilePath
     , parseErrorContexts :: [String]
     , parseErrorMessage  :: String
     , parseLeftovers     :: ByteStream m r
     }
+
+
+parseGenBankFile ::
+    MonadResource m
+    => Bool
+    -> FilePath
+    -> Stream (Of GenBankRecord) m (Either (ParseError m ()) ())
+parseGenBankFile gzipped filePath = runExceptT do
+    (releaseKey, h) <- lift . lift $
+        ResourceT.allocate
+            (IO.openBinaryFile filePath IO.ReadMode)
+            IO.hClose
+
+    ExceptT $
+        parseGenBankStream_ filePath (fromHandle h)
+
+    ResourceT.release releaseKey
+  where
+    fromHandle
+      | gzipped   = SZ.gunzip . BSS.fromHandle
+      | otherwise = BSS.fromHandle
 
 
 parseGenBankStream ::

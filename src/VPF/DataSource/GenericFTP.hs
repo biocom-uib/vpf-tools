@@ -157,7 +157,7 @@ writeMetadata infos path = Y.encodeFile path infos
 type LogAction a = a -> IO ()
 
 
-syncGenericFTP :: FtpSourceConfig -> LogAction String -> Path Directory -> IO (Either String ())
+syncGenericFTP :: FtpSourceConfig -> LogAction String -> Path Directory -> IO (Either String Any)
 syncGenericFTP cfg log (untag -> downloadDir) =
     withFTP \h _welcome -> runExceptT do
         lift do
@@ -234,7 +234,10 @@ syncGenericFTP cfg log (untag -> downloadDir) =
                 log "Update finished."
             else
                 log "Already up to date."
+
+        return dirty
   where
+    withFTP :: (FTP.Handle -> FTP.FTPResponse -> IO a) -> IO a
     withFTP
         | ftpSecure cfg = FTP.withFTPS (ftpHost cfg) (ftpPort cfg)
         | otherwise     = FTP.withFTP (ftpHost cfg) (ftpPort cfg)

@@ -62,6 +62,7 @@ dependencies:
 - streaming-concurrency
 - streaming-utils
 - tagged
+- tar
 - template-haskell
 - temporary
 - text
@@ -75,6 +76,7 @@ dependencies:
 - vinyl
 - xlsx
 - yaml
+- zlib
 
 when:
 - condition: flag(mpi)
