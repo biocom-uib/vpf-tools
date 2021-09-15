@@ -32,7 +32,7 @@ import VPF.DataSource.GenericFTP
 import VPF.Formats
 import VPF.Frames.DSV qualified as DSV
 import VPF.Frames.Dplyr.Row qualified as F
-import VPF.Frames.Types (FieldSpec, FieldSubset, FieldsOf)
+import VPF.Frames.Types (FieldSubset, FieldsOf)
 
 
 taxonomySourceConfig :: FtpSourceConfig
