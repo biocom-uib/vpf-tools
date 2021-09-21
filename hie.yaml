@@ -2,9 +2,11 @@ cradle:
   stack:
     - path: "./src/"
       component: "vpf-tools:lib"
+    - path: "./app/genbank-test/"
+      component: "vpf-tools:exe:genbank-test"
     #- path: "./app/mpi-test/"
     #  component: "vpf-tools:exe:mpi-test"
     #- path: "./app/pipes-test/"
     #  component: "vpf-tools:exe:pipes-test"
-    - path: "./app/vpf-vpf-class/"
+    - path: "./app/vpf-class/"
       component: "vpf-tools:exe:vpf-class"

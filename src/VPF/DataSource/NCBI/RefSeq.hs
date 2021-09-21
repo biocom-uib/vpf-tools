@@ -16,7 +16,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS
 import Data.Function ((&))
 import Data.Maybe (isJust)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, sort)
 import Data.Semigroup (Any)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -27,7 +27,7 @@ import Frames.InCore (RecVec)
 
 import Network.FTP.Client qualified as FTP
 
-import Streaming (Stream, Of)
+import Streaming (Stream)
 import Streaming.ByteString qualified as BSS
 import Streaming.Prelude qualified as S
 import Streaming.Zip qualified as SZ
@@ -46,7 +46,7 @@ import VPF.Frames.DSV qualified as DSV
 import VPF.Frames.Types (FieldSubset)
 import VPF.Formats
 import VPF.Util.FS qualified as FS
-import VPF.Util.GBFF (GenBankRecord, ParseError, parseGenBankFile)
+import VPF.Util.GBFF (parseGenBankFileWith)
 
 
 data RefSeqSourceConfig = RefSeqSourceConfig
@@ -59,6 +59,10 @@ refSeqFtpSourceConfig :: RefSeqSourceConfig -> FtpSourceConfig
 refSeqFtpSourceConfig cfg =
     $$(ftpSourceConfigFromURI [uri|ftp://ftp.ncbi.nlm.nih.gov/refseq/release/|]) \h ->
         buildDownloadList h cfg
+
+
+refSeqViralConfig :: RefSeqSourceConfig
+refSeqViralConfig = RefSeqSourceConfig ["viral"] [BS.pack "genomic.gbff"]
 
 
 refSeqFileRegex :: PCRE.Regex
@@ -172,19 +176,22 @@ loadRefSeqCatalog cfg (untag -> downloadDir) = do
         in any (`Text.isInfixOf` releaseDirs) cfgReleaseDirsText
 
 
-loadRefSeqGb ::
-    MonadResource m
+loadRefSeqGbWith ::
+    ( Functor f
+    , MonadResource m
+    )
     => RefSeqSourceConfig
     -> Path Directory
-    -> Stream (Of GenBankRecord) m (Either (ParseError m ()) ())
-loadRefSeqGb cfg (untag -> downloadDir) = runExceptT do
+    -> (FilePath -> BSS.ByteStream m () -> Stream f m (Either e ()))
+    -> Stream f m (Either e ())
+loadRefSeqGbWith cfg (untag -> downloadDir) parseGbStream = runExceptT do
     forM_ (refSeqDirectories cfg) \dir -> do
         let parentDir = downloadDir </> dir
         files <- liftIO $ Dir.listDirectory parentDir
 
-        forM_ files \file -> do
+        forM_ (sort files) \file ->
             when (isGbff file) $
-                ExceptT $ parseGenBankFile True (parentDir </> file)
+                ExceptT $ parseGenBankFileWith True (parentDir </> file) parseGbStream
   where
     isGbff :: String -> Bool
     isGbff f =

@@ -214,7 +214,7 @@ type VmrRevisionCols :: [FieldK]
 type VmrRevisionCols = TaxonomyCols ++ VmrAnnotationCols
 
 
-attemptRevisionToFrame :: VmrRevision -> Either Text (FrameRec VmrRevisionCols)
+attemptRevisionToFrame :: VmrRevision -> Either String (FrameRec VmrRevisionCols)
 attemptRevisionToFrame revision = do
     nrows <- commonLength
 
@@ -244,7 +244,7 @@ attemptRevisionToFrame revision = do
 
     return (toAoS nrows colsFrame)
   where
-    commonLength :: Either Text Int
+    commonLength :: Either String Int
     commonLength =
         case vmrColumns revision of
             []       -> Left "no columns found"
@@ -256,21 +256,21 @@ attemptRevisionToFrame revision = do
 
                     when (l /= l') $
                         Left $
-                            "column length mismatch: column " <> vmrColumnTitle col
-                                <> " has " <> Text.pack (show l)
-                            <> " entries, but column " <> vmrColumnTitle col'
-                                <> " has " <> Text.pack (show l') <> " entries"
+                            "column length mismatch: column " <> Text.unpack (vmrColumnTitle col)
+                                <> " has " <> show l
+                            <> " entries, but column " <> Text.unpack (vmrColumnTitle col')
+                                <> " has " <> show l' <> " entries"
                 Right l
 
     findColAndIndex :: forall s.
         KnownSymbol s
         => Text
-        -> (Either Text :. ((->) Int) :. ElField) '(s, Text)
+        -> (Either String :. ((->) Int) :. ElField) '(s, Text)
     findColAndIndex name =
         Compose $ fmap (\values -> Compose $ Field . Vector.unsafeIndex values) (findCol name)
 
-    findCol :: Text -> Either Text (Vector Text)
-    findCol name = maybe (Left ("column not found: " <> name)) Right (Map.lookup name colMap)
+    findCol :: Text -> Either String (Vector Text)
+    findCol name = maybe (Left ("column not found: " <> Text.unpack name)) Right (Map.lookup name colMap)
 
     colMap :: Map.Map Text (Vector Text)
     colMap = Map.fromList

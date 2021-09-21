@@ -10,12 +10,13 @@ import Control.Monad.Trans.Except (runExceptT, ExceptT(ExceptT))
 import Control.Monad.Trans.Resource (MonadResource)
 
 import Data.Coerce (coerce)
-import Data.List (union, isPrefixOf, isSuffixOf)
+import Data.List (sort, union, isPrefixOf, isSuffixOf)
 import Data.Semigroup (Any)
 
 import Network.FTP.Client qualified as FTP
 
-import Streaming (Stream, Of)
+import Streaming (Stream)
+import Streaming.ByteString (ByteStream)
 
 import System.Directory qualified as Dir
 import System.FilePath ((</>))
@@ -24,7 +25,7 @@ import Text.URI.QQ (uri)
 
 import VPF.DataSource.GenericFTP
 import VPF.Formats
-import VPF.Util.GBFF (GenBankRecord, ParseError, parseGenBankFile)
+import VPF.Util.GBFF (parseGenBankFileWith)
 
 
 newtype GenBankSourceConfig = GenBankSourceConfig
@@ -57,14 +58,17 @@ syncGenBank :: GenBankSourceConfig -> LogAction String -> Path Directory -> IO (
 syncGenBank = syncGenericFTP . genBankSourceConfig
 
 
-loadGenBankGb ::
-    MonadResource m
-      => GenBankSourceConfig
-      -> Path Directory
-      -> Stream (Of GenBankRecord) m (Either (ParseError m ()) ())
-loadGenBankGb cfg (untag -> downloadDir) = runExceptT do
+loadGenBankGbWith ::
+    ( Functor f
+    , MonadResource m
+    )
+    => GenBankSourceConfig
+    -> Path Directory
+    -> (FilePath -> ByteStream m () -> Stream f m (Either e ()))
+    -> Stream f m (Either e ())
+loadGenBankGbWith cfg (untag -> downloadDir) parseGbStream = runExceptT do
     files <- liftIO $ Dir.listDirectory downloadDir
 
-    forM_ files \file ->
+    forM_ (sort files) \file ->
         when (genBankFileMatch cfg file) $
-            ExceptT $ parseGenBankFile True (downloadDir </> file)
+            ExceptT $ parseGenBankFileWith True (downloadDir </> file) parseGbStream

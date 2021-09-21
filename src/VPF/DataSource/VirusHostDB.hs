@@ -65,7 +65,8 @@ type VirusHostDbCols =
     ,  '("KEGG_GENOME",     Text)
     ,  '("KEGG_DISEASE",    Text)
     ,  '("DISEASE",         Text)
-    ,  '("host_tax_id",     Int)
+    ,  '("host_tax_id",     Text) -- Int, but nullable
+    ,  '("host_name",       Text)
     ,  '("host_lineage",    Text)
     ,  '("pmid",            Text)
     ,  '("evidence",        Text)
@@ -85,6 +86,6 @@ tryLoadVirusHostDb (untag -> downloadDir) = do
         tsvPath = Tagged $ downloadDir </> "virushostdb.tsv"
 
         tsvOpts :: DSV.ParserOptions
-        tsvOpts = (DSV.defParserOptions '\t') { DSV.hasHeader = False }
+        tsvOpts = (DSV.defParserOptions '\t') { DSV.hasHeader = True }
 
     DSV.readFrameWith tsvOpts (S.map (fmap rcast)) tsvPath

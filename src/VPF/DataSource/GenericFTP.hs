@@ -8,6 +8,7 @@ import GHC.Exts (IsString)
 
 import Conduit
 
+import Control.Exception qualified as Exception
 import Control.Lens (iforM_)
 import Control.Monad.Trans.Except (ExceptT(ExceptT), runExceptT, withExceptT)
 import Control.Monad.Trans.Writer.Strict (execWriterT, tell)
@@ -17,6 +18,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
 import Data.Monoid (Any(..))
+import Data.Set qualified as Set
 import Data.These
 import Data.Text qualified as Text
 
@@ -195,7 +197,7 @@ syncGenericFTP cfg log (untag -> downloadDir) =
                 (getFtpFileInfos oldMetadata)
                 (getFtpFileInfos newMetadata)
 
-        dirty <- lift . execWriterT $
+        (dirty, excs) <- lift . execWriterT $
             iforM_ changes \relPath change -> do
                 let remotePath = ftpRelPath relPath
                     localPath = downloadDir </> toLocalRelPath relPath
@@ -205,14 +207,19 @@ syncGenericFTP cfg log (untag -> downloadDir) =
                         liftIO do
                             log $ "Deleting file " ++ localPath
                             Dir.removeFile localPath
-                        tell (Any True)
+                        tell (Any True, [])
 
                     That _new -> do
-                        liftIO do
+                        result <- liftIO do
                             log $ "Retrieving file " ++ remotePath
                             Dir.createDirectoryIfMissing True (takeDirectory localPath)
-                            streamRetrToFile h remotePath localPath
-                        tell (Any True)
+
+                            Exception.try @Exception.IOException $
+                                streamRetrToFile h remotePath localPath
+
+                        case result of
+                            Left e   -> tell (Any True, [(relPath, e)])
+                            Right () -> tell (Any True, [])
 
                     These (FtpFileInfo old) (FtpFileInfo new)
                         | Just oldMod <- readMaybe @Int =<< Map.lookup "modify" old
@@ -222,16 +229,30 @@ syncGenericFTP cfg log (untag -> downloadDir) =
                             return ()
 
                     _ -> do
-                        liftIO do
+                        result <- liftIO do
                             log $ "Updating " ++ remotePath
                             Dir.removeFile localPath
-                            streamRetrToFile h remotePath localPath
-                        tell (Any True)
+
+                            Exception.try @Exception.IOException $
+                                streamRetrToFile h remotePath localPath
+
+                        case result of
+                            Right () -> tell (Any True, [])
+                            Left e   -> tell (Any True, [(relPath, e)])
 
         lift
             if getAny dirty then do
-                writeMetadata newMetadata metadataPath
-                log "Update finished."
+                writeMetadata (deleteFileInfos (map fst excs) newMetadata)
+                    metadataPath
+
+                case excs of
+                    [] -> log "Update finished."
+                    ((_ ,exc1) : _) -> do
+                        forM_ excs \(path,exc) ->
+                            log $ "Exception caught retrieving " ++ ftpRelPath path ++ ": " ++ show exc
+
+                        log "Update finished with errors."
+                        Exception.throwIO exc1
             else
                 log "Already up to date."
 
@@ -241,3 +262,7 @@ syncGenericFTP cfg log (untag -> downloadDir) =
     withFTP
         | ftpSecure cfg = FTP.withFTPS (ftpHost cfg) (ftpPort cfg)
         | otherwise     = FTP.withFTP (ftpHost cfg) (ftpPort cfg)
+
+    deleteFileInfos :: [FtpRelPath] -> FtpFileInfos -> FtpFileInfos
+    deleteFileInfos paths (FtpFileInfos infos) =
+        FtpFileInfos $ Map.withoutKeys infos (Set.fromList paths)

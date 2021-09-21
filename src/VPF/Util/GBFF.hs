@@ -20,6 +20,8 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Internal qualified as BS8 (c2w)
 
+import Data.Hashable (Hashable)
+
 import Streaming (Stream, Of, effect)
 import Streaming.ByteString (ByteStream)
 import Streaming.ByteString qualified as BSS
@@ -27,8 +29,6 @@ import Streaming.Zip qualified as SZ
 import "streaming-attoparsec" Data.Attoparsec.ByteString.Streaming qualified as SA
 
 import System.IO qualified as IO
-
-import Data.Maybe
 
 
 newtype RawLine = RawLine ByteString
@@ -38,10 +38,10 @@ newtype RawLines = RawLines [ByteString]
     deriving newtype Show
 
 newtype Accession = Accession ByteString
-    deriving newtype Show
+    deriving newtype (Eq, Ord, Hashable, Show)
 
 newtype VersionedAccession = VersionedAccession ByteString
-    deriving newtype Show
+    deriving newtype (Eq, Ord, Hashable, Show)
 
 
 newtype GenBankHeader = GenBankHeader RawLines
@@ -64,6 +64,7 @@ data GenBankField
     | SourceField     RawLines [OrganismSubfield]
     | ReferenceField  RawLines [ReferenceSubfield]
     | CommentField    RawLines
+    | PrimaryField    RawLines
     | FeaturesField   [Feature]
     | ContigField     RawLines
     | OriginField     SequenceLines
@@ -83,6 +84,7 @@ data ReferenceSubfield
     | ReferenceJournal    RawLines
     | ReferencePubMed     RawLines
     | ReferenceRemark     RawLines
+    | ReferenceMedline    RawLines
     deriving Show
 
 
@@ -103,6 +105,63 @@ newtype SequenceLines = SequenceLines RawLines
     deriving Show
 
 
+copyGenBankField :: GenBankField -> GenBankField
+copyGenBankField field =
+    case field of
+        LocusField rl         -> LocusField (copyLine rl)
+        DefinitionField rl    -> DefinitionField (copyLines (copyLines rl))
+        AccessionField acs    -> AccessionField (map copyAccession acs)
+        VersionField va       -> VersionField (copyVersionedAccession va)
+        DbLinkField rl        -> DbLinkField (copyLines rl)
+        KeywordsField rl      -> KeywordsField (copyLines rl)
+        SourceField rl oss    -> SourceField (copyLines rl) (map copyOrgSubfield oss)
+        ReferenceField rl rss -> ReferenceField (copyLines rl) (map copyRefField rss)
+        CommentField rl       -> CommentField (copyLines rl)
+        PrimaryField rl       -> PrimaryField (copyLines rl)
+        FeaturesField feas    -> FeaturesField (map copyFeature feas)
+        ContigField rl        -> ContigField (copyLines rl)
+        OriginField sl        -> OriginField (copySequenceLines sl)
+        UnknownField bs rl    -> UnknownField (BS.copy bs) (copyLines rl)
+  where
+    copyLine :: RawLine -> RawLine
+    copyLine (RawLine bs) = RawLine (BS.copy bs)
+
+    copyLines :: RawLines -> RawLines
+    copyLines (RawLines bss) = RawLines (map BS.copy bss)
+
+    copyAccession :: Accession -> Accession
+    copyAccession (Accession bs) = Accession (BS.copy bs)
+
+    copyVersionedAccession :: VersionedAccession -> VersionedAccession
+    copyVersionedAccession (VersionedAccession bs) = VersionedAccession (BS.copy bs)
+
+    copyOrgSubfield :: OrganismSubfield -> OrganismSubfield
+    copyOrgSubfield (OrganismSubfield rl) = OrganismSubfield (copyLines rl)
+
+    copyRefField :: ReferenceSubfield -> ReferenceSubfield
+    copyRefField (ReferenceAuthors rl)    = ReferenceAuthors (copyLines rl)
+    copyRefField (ReferenceConsortium rl) = ReferenceConsortium (copyLines rl)
+    copyRefField (ReferenceTitle rl)      = ReferenceTitle (copyLines rl)
+    copyRefField (ReferenceJournal rl)    = ReferenceJournal (copyLines rl)
+    copyRefField (ReferencePubMed rl)     = ReferencePubMed (copyLines rl)
+    copyRefField (ReferenceRemark rl)     = ReferenceRemark (copyLines rl)
+    copyRefField (ReferenceMedline rl)    = ReferenceMedline (copyLines rl)
+
+    copyFeature :: Feature -> Feature
+    copyFeature (Feature name loc quals) =
+        Feature (BS.copy name) (copyLine loc) (map copyQual quals)
+
+    copyQual :: FeatureQualifier -> FeatureQualifier
+    copyQual (FeatureQualifier qual val) = FeatureQualifier (BS.copy qual) (fmap copyQualVal val)
+
+    copyQualVal :: QualifierValue -> QualifierValue
+    copyQualVal (FreeText bss)   = FreeText (map BS.copy bss)
+    copyQualVal (LiteralText bs) = LiteralText (BS.copy bs)
+    copyQualVal n@(Numeral _)    = n
+
+    copySequenceLines :: SequenceLines -> SequenceLines
+    copySequenceLines (SequenceLines rl) = SequenceLines (copyLines rl)
+
 -- USAGE
 
 data ParseError m r = ParseError
@@ -113,19 +172,29 @@ data ParseError m r = ParseError
     }
 
 
-parseGenBankFile ::
-    MonadResource m
+instance Show (ParseError m r) where
+    show err = unlines $
+        [ "Parse error at file " ++ parseErrorFilename err ++ ": " ++ parseErrorMessage err
+        , "Context:"
+        ]
+        ++ parseErrorContexts err
+
+
+parseGenBankFileWith ::
+    ( Functor f
+    , MonadResource m
+    )
     => Bool
     -> FilePath
-    -> Stream (Of GenBankRecord) m (Either (ParseError m ()) ())
-parseGenBankFile gzipped filePath = runExceptT do
+    -> (FilePath -> ByteStream m () -> Stream f m (Either e ()))
+    -> Stream f m (Either e ())
+parseGenBankFileWith gzipped filePath parse = runExceptT do
     (releaseKey, h) <- lift . lift $
         ResourceT.allocate
             (IO.openBinaryFile filePath IO.ReadMode)
             IO.hClose
 
-    ExceptT $
-        parseGenBankStream_ filePath (fromHandle h)
+    ExceptT $ parse filePath (fromHandle h)
 
     ResourceT.release releaseKey
   where
@@ -134,16 +203,16 @@ parseGenBankFile gzipped filePath = runExceptT do
       | otherwise = BSS.fromHandle
 
 
-parseGenBankStream ::
+parseGenBankStreamWithSource ::
     Monad m
     => FilePath
     -> ByteStream m r
     -> m (Either (ParseError m r)
-            ( GenBankHeader
+            ( Maybe GenBankHeader
             , Stream (Of GenBankRecord) m (Either (ParseError m r) r)
             ))
-parseGenBankStream filename stream = do
-    (headerRes, stream') <- SA.parse headerP stream
+parseGenBankStreamWithSource filename stream = do
+    (headerRes, stream') <- SA.parse (A.option Nothing (Just <$> headerP)) stream
 
     return $ case headerRes of
         Left (ctx, e) ->
@@ -152,25 +221,20 @@ parseGenBankStream filename stream = do
         Right header ->
             Right
                 ( header
-                , ignoringLeftovers <$> SA.parsed (toRecord <$> A.match entryP) stream'
+                , leftoversToError filename <$> SA.parsed (toRecord <$> A.match entryP) stream'
                 )
   where
     toRecord :: (ByteString, [GenBankField]) -> GenBankRecord
     toRecord = uncurry (flip GenBankRecord)
 
-    ignoringLeftovers :: Either (SA.Errors, ByteStream m r) r -> Either (ParseError m r) r
-    ignoringLeftovers (Left ((ctx, e), l)) = Left (ParseError filename ctx e l)
-    ignoringLeftovers (Right r)            = Right r
 
-
-
-parseGenBankStream_ ::
+parseGenBankStreamBodyWithSource ::
     Monad m
     => FilePath
     -> ByteStream m r
     -> Stream (Of GenBankRecord) m (Either (ParseError m r) r)
-parseGenBankStream_ filename stream = effect do
-    headerRes <- parseGenBankStream filename stream
+parseGenBankStreamBodyWithSource filename stream = effect do
+    headerRes <- parseGenBankStreamWithSource filename stream
 
     case headerRes of
         Left e ->
@@ -180,21 +244,55 @@ parseGenBankStream_ filename stream = effect do
             return stream'
 
 
+parseGenBankStream ::
+    Monad m
+    => FilePath
+    -> ByteStream m r
+    -> Stream (Of [GenBankField]) m (Either (ParseError m r) r)
+parseGenBankStream filename stream = effect do
+    (headerRes, stream') <- SA.parse (A.option Nothing (Just <$> headerP)) stream
+
+    case headerRes of
+        Left (ctx, e) ->
+            return $ pure (Left (ParseError filename ctx e stream'))
+
+        Right _header ->
+            return $ leftoversToError filename <$> SA.parsed entryP stream'
+
+
+leftoversToError :: FilePath -> Either (SA.Errors, ByteStream m r) r -> Either (ParseError m r) r
+leftoversToError filename (Left ((ctx, e), l)) = Left (ParseError filename ctx e l)
+leftoversToError _        (Right r)            = Right r
+
+
 headerP :: Parser GenBankHeader
-headerP =
-    GenBankHeader <$> RawLines <$> replicateM 10 restOfLine
+headerP = (A.<?> "header") do
+    ls <- replicateM 10 intactRestOfLine
+
+    let statLine = ls !! 7
+    guard $ BS8.length statLine >= 66
+    guard $ BS8.pack "loci," `BS8.isPrefixOf` BS8.drop 9 statLine
+    guard $ BS8.pack "bases," `BS8.isPrefixOf` BS8.drop 27 statLine
+    guard $ BS8.pack "reported sequences" `BS8.isPrefixOf` BS8.drop 48 statLine
+
+    return (GenBankHeader (RawLines ls))
+
 
 
 entryP :: Parser [GenBankField]
 entryP = do
     fields <- A.many1 fieldP
-    entrySeparatorP
+
+    entrySeparatorP <|> do
+        line <- intactRestOfLine
+        fail ("Cannot parse field line: " ++ show line)
+
     return fields
 
 
 entrySeparatorP :: Parser ()
-entrySeparatorP = (A.<?> "entry separator" ) do
-    _ <- A8.string "//" A.<?> "entry separator (//)"
+entrySeparatorP = (A.<?> "entry separator (//)" ) do
+    _ <- A8.string "//"
     _ <- restOfLine
     return ()
 
@@ -216,10 +314,11 @@ fieldP = do
         "SOURCE"     -> sourceP
         "REFERENCE"  -> referenceP
         "COMMENT"    -> commentP
+        "PRIMARY"    -> primaryP
         "FEATURES"   -> featuresP
         "CONTIG"     -> contigP
         "ORIGIN"     -> originP
-        kw           -> unknownP kw
+        kw           -> fail ("Unknown field: " ++ show kw)
 
 
 locusP :: A.Parser GenBankField
@@ -234,13 +333,23 @@ definitionP = DefinitionField <$> restOfField
 
 accessionP :: A.Parser GenBankField
 accessionP = (A.<?> "ACCESSION field") do
-    A8.skipSpace
+    firstLine <- accessionLineP
 
-    accessions <- accessionNumberP `A.sepBy1` A8.char ' '
-    _ <- restOfLine
+    otherLines <- A.many' do
+        _ <- A8.string (BS8.replicate 10 ' ')
+        accessionLineP
 
-    return $ AccessionField (concatMap splitAccessionRange accessions)
+    return (AccessionField (firstLine ++ concat otherLines))
   where
+    accessionLineP :: A.Parser [Accession]
+    accessionLineP = do
+        A8.skipSpace
+
+        accessions <- accessionNumberP `A.sepBy1` A8.char ' '
+        _ <- restOfLine
+
+        return $ concatMap splitAccessionRange accessions
+
     accessionNumberP :: A.Parser ByteString
     accessionNumberP = A8.takeWhile1 (not . A8.isSpace)
         A.<?> "accession"
@@ -301,7 +410,7 @@ referenceP :: A.Parser GenBankField
 referenceP = (A.<?> "REFERENCE field") do
     refLines <- restOfField
 
-    subfields <- catMaybes <$> A.many1 subfieldsP
+    subfields <- A.many1 subfieldsP
 
     return (ReferenceField refLines subfields)
   where
@@ -310,18 +419,24 @@ referenceP = (A.<?> "REFERENCE field") do
         subkw <- BS8.strip <$> A.take 10
 
         case subkw of
-            "AUTHORS" -> Just . ReferenceAuthors    <$> restOfField
-            "CONSRTM" -> Just . ReferenceConsortium <$> restOfField
-            "TITLE"   -> Just . ReferenceTitle      <$> restOfField
-            "JOURNAL" -> Just . ReferenceJournal    <$> restOfField
-            "PUBMED"  -> Just . ReferencePubMed     <$> restOfField
-            "REMARK"  -> Just . ReferenceRemark     <$> restOfField
-            _         -> return Nothing
+            "AUTHORS" -> ReferenceAuthors    <$> restOfField
+            "CONSRTM" -> ReferenceConsortium <$> restOfField
+            "TITLE"   -> ReferenceTitle      <$> restOfField
+            "JOURNAL" -> ReferenceJournal    <$> restOfField
+            "PUBMED"  -> ReferencePubMed     <$> restOfField
+            "REMARK"  -> ReferenceRemark     <$> restOfField
+            "MEDLINE" -> ReferenceMedline    <$> restOfField
+            _         -> fail $ "Unknown reference subfield: " ++ show subkw
 
 
 commentP :: A.Parser GenBankField
 commentP = CommentField <$> restOfField
     A.<?> "COMMENT field"
+
+
+primaryP :: A.Parser GenBankField
+primaryP = PrimaryField <$> restOfField
+    A.<?> "PRIMARY field"
 
 
 featuresP :: A.Parser GenBankField
@@ -389,14 +504,14 @@ contigP = ContigField <$> restOfField
 originP :: A.Parser GenBankField
 originP = (A.<?> "ORIGIN field") do
     _ <- restOfLine
-    seqLines <- A.many' $ A.string "   " *> restOfLine
+    seqLines <- A.many' $ A8.char ' ' *> restOfLine
 
     return (OriginField (SequenceLines (RawLines seqLines)))
 
 
-unknownP :: ByteString -> A.Parser GenBankField
-unknownP kw = UnknownField kw <$> restOfField
-    A.<?> ("unknown field " ++ show kw)
+-- unknownP :: ByteString -> A.Parser GenBankField
+-- unknownP kw = UnknownField kw <$> restOfField
+--     A.<?> ("unknown field " ++ show kw)
 
 
 restOfField :: A.Parser RawLines
@@ -404,7 +519,10 @@ restOfField = RawLines <$> liftA2 (:) restOfLine continuationLines
 
 
 restOfLine :: A.Parser ByteString
-restOfLine = BS8.strip <$> A.takeWhile (not . A8.isEndOfLine) <* A8.endOfLine
+restOfLine = BS8.strip <$> intactRestOfLine
+
+intactRestOfLine :: A.Parser ByteString
+intactRestOfLine = A.takeWhile (not . A8.isEndOfLine) <* A8.endOfLine
 
 
 continuationLines :: A.Parser [ByteString]
