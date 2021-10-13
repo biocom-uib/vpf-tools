@@ -38,7 +38,7 @@ module VPF.Frames.Types
   , ReplFields
   ) where
 
-import GHC.TypeLits (Symbol)
+import GHC.TypeLits (Nat, Symbol, type (-))
 
 import Data.Kind (Type)
 import Data.Map.Strict (Map)
@@ -46,7 +46,7 @@ import Data.Map.Strict (Map)
 import Data.Vinyl           as Vinyl (Rec(..))
 import Data.Vinyl.ARec      as Vinyl (ARec)
 import Data.Vinyl.Derived   as Vinyl (type (:::), FieldType)
-import Data.Vinyl.TypeLevel as Vinyl (type (++), RIndex, RImage)
+import Data.Vinyl.TypeLevel as Vinyl (type (++), RIndex, RImage, Fst)
 
 import qualified Data.Vinyl as V
 
@@ -67,11 +67,18 @@ type RecK = (FieldK -> Type) -> FieldsK -> Type
 
 -- type-level polymorphic field indexers
 
+type (!!) :: forall (k :: Type). [k] -> Nat -> k
+
+type family as !! i where
+    (a ': _)  !! 0 = a
+    (_ ': as) !! n = as !! (n-1)
+
 type ProjField :: forall (ki :: Type) -> forall (kr :: Type) -> FieldsK -> ki -> kr
 
 type family ProjField ki kr rs i where
     ProjField (Symbol, Type) (Symbol, Type)  rs  '(s, a)   = '(s, a)
     ProjField Symbol         (Symbol, Type)  rs  s         = '(s, FieldType s rs)
+    ProjField Nat            (Symbol, Type)  rs  i         = rs !! i
     ProjField (Symbol, Type) Symbol          rs  '(s, a)   = s
     ProjField Symbol         Symbol          rs  s         = s
     ProjField (Symbol, Type) [kr]            rs  '(s, a)   = ProjField [(Symbol, Type)] [kr] rs '[ '(s, a)]

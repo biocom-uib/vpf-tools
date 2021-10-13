@@ -4,6 +4,7 @@ module VPF.Formats
   , Path
   , Directory
   , Executable
+  , GZip
   , FASTA
   , SeqType(..)
   , GenBank
@@ -27,6 +28,8 @@ type Path tag = Tagged tag FilePath
 
 data Directory
 data Executable
+
+data GZip (a :: k)
 
 data FASTA (t :: SeqType)
 data SeqType = Nucleotide | Aminoacid

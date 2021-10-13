@@ -3,7 +3,6 @@ module VPF.Model.Training.DataSetup where
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (runExceptT, ExceptT (ExceptT))
 
-import Data.ByteString (ByteString)
 import Data.Text qualified as Text
 
 import Frames (FrameRec)
@@ -11,6 +10,7 @@ import Frames (FrameRec)
 import Network.HTTP.Req qualified as Req
 
 import VPF.DataSource.ICTV qualified as ICTV
+import System.IO qualified as IO
 
 
 getLatestVmr :: IO (Either String (FrameRec ICTV.VmrRevisionCols))
@@ -22,7 +22,7 @@ getLatestVmr = runExceptT do
             Just vmrs -> do
                 let latest = ICTV.findLatestVmrRevision vmrs
 
-                liftIO $ putStrLn $
+                liftIO $ IO.hPutStrLn IO.stderr $
                     "Downloading revision " ++ Text.unpack (ICTV.revisionTitle latest)
                         ++ " with date " ++ show (ICTV.revisionDate latest)
 
@@ -36,6 +36,3 @@ getLatestVmr = runExceptT do
     ExceptT $
         return $ ICTV.attemptRevisionToFrame parsedRev
 
-
-collectAccessions :: FrameRec ICTV.VmrRevisionCols -> [ByteString]
-collectAccessions = undefined

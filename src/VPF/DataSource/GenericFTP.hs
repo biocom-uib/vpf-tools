@@ -156,11 +156,17 @@ writeMetadata :: FtpFileInfos -> FilePath -> IO ()
 writeMetadata infos path = Y.encodeFile path infos
 
 
+listDownloadedFiles :: Path Directory -> IO (Either Y.ParseException [FilePath])
+listDownloadedFiles (Tagged downloadDir) = runExceptT do
+    FtpFileInfos fileInfos <- ExceptT $ readMetadata (downloadDir </> metadataFilename)
+
+    return $ map ((downloadDir </>) . toLocalRelPath) (Map.keys fileInfos)
+
+
 type LogAction a = a -> IO ()
 
-
 syncGenericFTP :: FtpSourceConfig -> LogAction String -> Path Directory -> IO (Either String Any)
-syncGenericFTP cfg log (untag -> downloadDir) =
+syncGenericFTP cfg log (Tagged downloadDir) =
     withFTP \h _welcome -> runExceptT do
         lift do
             loginResp <- FTP.login h "anonymous" "anonymous"
@@ -188,6 +194,8 @@ syncGenericFTP cfg log (untag -> downloadDir) =
         lift $ Dir.createDirectoryIfMissing True downloadDir
 
         newMetadata <- ExceptT $ retrieveMetadata cfg h
+
+        lift $ log "Retrieved current metadata"
 
         let changes :: Map FtpRelPath (These FtpFileInfo FtpFileInfo)
             changes = Map.merge

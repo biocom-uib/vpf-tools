@@ -10,13 +10,11 @@ import Data.ByteString.Char8 qualified as BS
 import Data.Semigroup (Any)
 import Data.Text (Text)
 
-import Frames (FrameRec, Rec, rcast)
+import Frames (FrameRec, Rec)
 import Frames.InCore (RecVec)
 
 import System.FilePath ((</>))
 import Text.URI.QQ (uri)
-
-import Streaming.Prelude qualified as S
 
 import VPF.DataSource.GenericFTP
 import VPF.Formats
@@ -75,17 +73,14 @@ type VirusHostDbCols =
     ]
 
 
-tryLoadVirusHostDb ::
+loadVirusHostDb ::
     ( FieldSubset Rec cols VirusHostDbCols
     , RecVec cols
     )
     => Path Directory
     -> IO (Either DSV.ParseError (FrameRec cols))
-tryLoadVirusHostDb (untag -> downloadDir) = do
-    let tsvPath :: Path (DSV "\t" VirusHostDbCols)
-        tsvPath = Tagged $ downloadDir </> "virushostdb.tsv"
-
-        tsvOpts :: DSV.ParserOptions
-        tsvOpts = (DSV.defParserOptions '\t') { DSV.hasHeader = True }
-
-    DSV.readFrameWith tsvOpts (S.map (fmap rcast)) tsvPath
+loadVirusHostDb (Tagged downloadDir) =
+    DSV.readSubframe (DSV.defParserOptions '\t') tsvPath
+  where
+    tsvPath :: Path (DSV "\t" VirusHostDbCols)
+    tsvPath = Tagged $ downloadDir </> "virushostdb.tsv"

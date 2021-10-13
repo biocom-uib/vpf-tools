@@ -16,7 +16,7 @@ import Data.Semigroup (Any (getAny))
 import Data.Text (Text)
 import Data.Text qualified as Text
 
-import Frames (Rec, FrameRec, rcast, ColumnHeaders, Record)
+import Frames (Rec, FrameRec, ColumnHeaders, Record)
 import Frames.CSV (ReadRec)
 import Frames.InCore (RecVec)
 
@@ -70,17 +70,17 @@ syncTaxonomy log (untag -> downloadDir) = runExceptT do
     return dirty
 
 
-tryLoadTaxonomyDmpFileWith ::
+loadTaxonomyDmpFileWith ::
     ( ColumnHeaders allCols
-    , FieldSubset Rec cols allCols
+    , FieldSubset Rec cols' cols
     , ReadRec allCols
-    , RecVec cols
+    , RecVec cols'
     )
     => (Stream (Of (Either DSV.ParseError (Record allCols))) IO ()
         -> Stream (Of (Either DSV.ParseError (Record cols))) IO ())
     -> Path (DSV "|" allCols)
-    -> IO (Either DSV.ParseError (FrameRec cols))
-tryLoadTaxonomyDmpFileWith f dmpPath = do
+    -> IO (Either DSV.ParseError (FrameRec cols'))
+loadTaxonomyDmpFileWith f dmpPath = do
     let err :: a
         err = error "Bad trailing delimiter in .dmp file"
 
@@ -92,7 +92,7 @@ tryLoadTaxonomyDmpFileWith f dmpPath = do
                 Text.splitOn fieldSep . fromMaybe err . Text.stripSuffix rowSuffix
             }
 
-    DSV.readFrameWith dmpOpts f dmpPath
+    DSV.readSubframeWith dmpOpts f dmpPath
   where
     rowSuffix = Text.pack "\t|"
     fieldSep = Text.pack "\t|\t"
@@ -114,16 +114,16 @@ type TaxonomyNodesCols =
     ,  '("comments",                      Text)  -- free-text comments and citations
     ]
 
-tryLoadTaxonomyNodesWith ::
-    ( FieldSubset Rec cols TaxonomyNodesCols
-    , RecVec cols
+loadTaxonomyNodesWith ::
+    ( FieldSubset Rec cols' cols
+    , RecVec cols'
     )
     => (Stream (Of (Either DSV.ParseError (Record TaxonomyNodesCols))) IO ()
       -> Stream (Of (Either DSV.ParseError (Record cols))) IO ())
     -> Path Directory
-    -> IO (Either DSV.ParseError (FrameRec cols))
-tryLoadTaxonomyNodesWith f downloadDir =
-    tryLoadTaxonomyDmpFileWith f (extractedDmpPath downloadDir "nodes")
+    -> IO (Either DSV.ParseError (FrameRec cols'))
+loadTaxonomyNodesWith f downloadDir =
+    loadTaxonomyDmpFileWith f (extractedDmpPath downloadDir "nodes")
 
 
 type TaxonomyNamesCols =
@@ -133,23 +133,23 @@ type TaxonomyNamesCols =
     ,  '("name class",  Text)  -- (synonym, common name, ...)
     ]
 
-tryLoadTaxonomyNamesWith ::
-    ( FieldSubset Rec cols TaxonomyNamesCols
-    , RecVec cols
+loadTaxonomyNamesWith ::
+    ( FieldSubset Rec cols' cols
+    , RecVec cols'
     )
     => (Stream (Of (Either DSV.ParseError (Record TaxonomyNamesCols))) IO ()
       -> Stream (Of (Either DSV.ParseError (Record cols))) IO ())
     -> Path Directory
-    -> IO (Either DSV.ParseError (FrameRec cols))
-tryLoadTaxonomyNamesWith f downloadDir =
-    tryLoadTaxonomyDmpFileWith f (extractedDmpPath downloadDir "names")
+    -> IO (Either DSV.ParseError (FrameRec cols'))
+loadTaxonomyNamesWith f downloadDir =
+    loadTaxonomyDmpFileWith f (extractedDmpPath downloadDir "names")
 
 
-tryLoadTaxonomyScientificNames ::
+loadTaxonomyScientificNames ::
     Path Directory
     -> IO (Either DSV.ParseError (FrameRec (FieldsOf TaxonomyNamesCols '["tax_id", "unique name"])))
-tryLoadTaxonomyScientificNames =
-    tryLoadTaxonomyNamesWith (S.map (fmap rcast) . S.filter isScientificName)
+loadTaxonomyScientificNames =
+    loadTaxonomyNamesWith (S.filter isScientificName)
   where
     isScientificName (Left _)    = False
     isScientificName (Right row) = F.get @"name class" row == Text.pack "scientific name"

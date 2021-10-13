@@ -184,6 +184,10 @@ putTextLines :: MonadIO m => Stream (Of Text) m r -> m r
 putTextLines = S.mapM_ (liftIO . TIO.putStrLn)
 
 
+hWriteTextLines :: MonadIO m => IO.Handle -> Stream (Of Text) m r -> m r
+hWriteTextLines h = S.mapM_ (liftIO . TIO.hPutStrLn h)
+
+
 writeTextLines :: (MonadIO m, MC.MonadMask m) => Path a -> Stream (Of Text) m r -> m r
 writeTextLines p stream =
     withFileWrite p \h ->

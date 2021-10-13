@@ -277,3 +277,17 @@ attemptRevisionToFrame revision = do
         [ (Text.toLower (vmrColumnTitle col), vmrColumnValues col)
         | col <- vmrColumns revision
         ]
+
+
+parseAccessionList :: Text -> Maybe [(Text, Text)]
+parseAccessionList cellText =
+    fmap concat $ traverse parsePair (Text.splitOn (Text.pack ";") cellText)
+  where
+    parsePair :: Text -> Maybe [(Text, Text)]
+    parsePair item =
+        case map Text.strip (Text.splitOn ":" item) of
+            []           -> Nothing
+            [acc]
+                | Text.null acc -> Just []
+                | otherwise     -> Just [(mempty, acc)]
+            label : accs -> Just $ map (label, ) accs

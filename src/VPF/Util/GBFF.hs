@@ -1,10 +1,12 @@
 {-# language GeneralizedNewtypeDeriving #-}
 {-# language OverloadedStrings #-}
 {-# language PackageImports #-}
+{-# language TemplateHaskell #-}
 {-# language TupleSections #-}
 module VPF.Util.GBFF where
 
 import Control.Applicative
+import Control.Lens (Traversal', makeLenses, makePrisms)
 import Control.Monad (guard, replicateM)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Except (runExceptT, ExceptT(ExceptT))
@@ -20,7 +22,9 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Internal qualified as BS8 (c2w)
 
+import Data.Functor.Identity (Identity, runIdentity)
 import Data.Hashable (Hashable)
+import Data.Int (Int64)
 
 import Streaming (Stream, Of, effect)
 import Streaming.ByteString (ByteStream)
@@ -49,8 +53,8 @@ newtype GenBankHeader = GenBankHeader RawLines
 
 
 data GenBankRecord = GenBankRecord
-    { genBankFields :: [GenBankField]
-    , genBankRecordSource :: ByteString
+    { _genBankFields :: [GenBankField]
+    , _genBankRecordSource :: ByteString
     }
 
 
@@ -60,6 +64,7 @@ data GenBankField
     | AccessionField  [Accession]
     | VersionField    VersionedAccession
     | DbLinkField     RawLines
+    | DbSourceField   RawLines
     | KeywordsField   RawLines
     | SourceField     RawLines [OrganismSubfield]
     | ReferenceField  RawLines [ReferenceSubfield]
@@ -67,8 +72,8 @@ data GenBankField
     | PrimaryField    RawLines
     | FeaturesField   [Feature]
     | ContigField     RawLines
-    | OriginField     SequenceLines
-    | UnknownField    ByteString RawLines
+    | OriginField     [SequenceLine]
+    --  | UnknownField    ByteString RawLines
     deriving Show
 
 
@@ -89,78 +94,87 @@ data ReferenceSubfield
 
 
 data Feature = Feature
-    { featureName       :: ByteString
-    , featureLocation   :: RawLine
-    , featureQualifiers :: [FeatureQualifier]
+    { _featureName       :: ByteString
+    , _featureLocation   :: RawLine
+    , _featureQualifiers :: [FeatureQualifier]
     }
     deriving Show
 
-data FeatureQualifier = FeatureQualifier ByteString (Maybe QualifierValue)
+data FeatureQualifier = FeatureQualifier
+    { _qualifierName :: ByteString
+    , _qualifierValue :: Maybe QualifierValue
+    }
     deriving Show
 
-data QualifierValue = FreeText [ByteString] | LiteralText ByteString | Numeral Int
+data QualifierValue = FreeText [ByteString] | LiteralText ByteString | Numeral !Int
     deriving Show
 
-newtype SequenceLines = SequenceLines RawLines
+data SequenceLine = SequenceLine
+    { _sequenceLineStart :: !Int
+    , _sequenceLineChunks :: [ByteString]
+    }
     deriving Show
 
 
-copyGenBankField :: GenBankField -> GenBankField
-copyGenBankField field =
-    case field of
-        LocusField rl         -> LocusField (copyLine rl)
-        DefinitionField rl    -> DefinitionField (copyLines (copyLines rl))
-        AccessionField acs    -> AccessionField (map copyAccession acs)
-        VersionField va       -> VersionField (copyVersionedAccession va)
-        DbLinkField rl        -> DbLinkField (copyLines rl)
-        KeywordsField rl      -> KeywordsField (copyLines rl)
-        SourceField rl oss    -> SourceField (copyLines rl) (map copyOrgSubfield oss)
-        ReferenceField rl rss -> ReferenceField (copyLines rl) (map copyRefField rss)
-        CommentField rl       -> CommentField (copyLines rl)
-        PrimaryField rl       -> PrimaryField (copyLines rl)
-        FeaturesField feas    -> FeaturesField (map copyFeature feas)
-        ContigField rl        -> ContigField (copyLines rl)
-        OriginField sl        -> OriginField (copySequenceLines sl)
-        UnknownField bs rl    -> UnknownField (BS.copy bs) (copyLines rl)
+makePrisms ''RawLine
+makePrisms ''RawLines
+makePrisms ''Accession
+makePrisms ''VersionedAccession
+makePrisms ''GenBankHeader
+makeLenses ''GenBankRecord
+makePrisms ''GenBankField
+makePrisms ''OrganismSubfield
+makePrisms ''ReferenceSubfield
+makeLenses ''Feature
+makeLenses ''FeatureQualifier
+makePrisms ''QualifierValue
+makeLenses ''SequenceLine
+
+
+genBankFieldStrings :: forall f. Applicative f => (ByteString -> f ByteString) -> GenBankField -> f GenBankField
+genBankFieldStrings f = \case
+    LocusField rl         -> LocusField <$> _RawLine f rl
+    DefinitionField rl    -> DefinitionField <$> lineStrings f rl
+    AccessionField acs    -> AccessionField <$> (traverse._Accession) f acs
+    VersionField va       -> VersionField <$> _VersionedAccession f va
+    DbLinkField rl        -> DbLinkField <$> lineStrings f rl
+    DbSourceField rl      -> DbSourceField <$> lineStrings f rl
+    KeywordsField rl      -> KeywordsField <$> lineStrings f rl
+    SourceField rl oss    -> SourceField <$> lineStrings f rl <*> (traverse._OrganismSubfield.lineStrings) f oss
+    ReferenceField rl rss -> ReferenceField <$> lineStrings f rl <*> (traverse.refFieldStrings) f rss
+    CommentField rl       -> CommentField <$> lineStrings f rl
+    PrimaryField rl       -> PrimaryField <$> lineStrings f rl
+    FeaturesField feas    -> FeaturesField <$> (traverse.featureStrings) f feas
+    ContigField rl        -> ContigField <$> lineStrings f rl
+    OriginField sl        -> OriginField <$> (traverse.sequenceLineChunks.traverse) f sl
+    --UnknownField bs rl    -> UnknownField <$> f bs <*> lineStrings f rl
   where
-    copyLine :: RawLine -> RawLine
-    copyLine (RawLine bs) = RawLine (BS.copy bs)
+    lineStrings :: Traversal' RawLines ByteString
+    lineStrings = _RawLines.traverse
 
-    copyLines :: RawLines -> RawLines
-    copyLines (RawLines bss) = RawLines (map BS.copy bss)
+    refFieldStrings :: Traversal' ReferenceSubfield ByteString
+    refFieldStrings f = \case
+        ReferenceAuthors rl    -> ReferenceAuthors <$> lineStrings f rl
+        ReferenceConsortium rl -> ReferenceConsortium <$> lineStrings f rl
+        ReferenceTitle rl      -> ReferenceTitle <$> lineStrings f rl
+        ReferenceJournal rl    -> ReferenceJournal <$> lineStrings f rl
+        ReferencePubMed rl     -> ReferencePubMed <$> lineStrings f rl
+        ReferenceRemark rl     -> ReferenceRemark <$> lineStrings f rl
+        ReferenceMedline rl    -> ReferenceMedline <$> lineStrings f rl
 
-    copyAccession :: Accession -> Accession
-    copyAccession (Accession bs) = Accession (BS.copy bs)
+    featureStrings :: Traversal' Feature ByteString
+    featureStrings f = \case
+        Feature name loc quals -> Feature <$> f name <*> _RawLine f loc <*> (traverse.qualStrings) f quals
 
-    copyVersionedAccession :: VersionedAccession -> VersionedAccession
-    copyVersionedAccession (VersionedAccession bs) = VersionedAccession (BS.copy bs)
+    qualStrings :: Traversal' FeatureQualifier ByteString
+    qualStrings f = \case
+        FeatureQualifier qual val -> FeatureQualifier <$> f qual <*> (traverse.qualValStrings) f val
 
-    copyOrgSubfield :: OrganismSubfield -> OrganismSubfield
-    copyOrgSubfield (OrganismSubfield rl) = OrganismSubfield (copyLines rl)
-
-    copyRefField :: ReferenceSubfield -> ReferenceSubfield
-    copyRefField (ReferenceAuthors rl)    = ReferenceAuthors (copyLines rl)
-    copyRefField (ReferenceConsortium rl) = ReferenceConsortium (copyLines rl)
-    copyRefField (ReferenceTitle rl)      = ReferenceTitle (copyLines rl)
-    copyRefField (ReferenceJournal rl)    = ReferenceJournal (copyLines rl)
-    copyRefField (ReferencePubMed rl)     = ReferencePubMed (copyLines rl)
-    copyRefField (ReferenceRemark rl)     = ReferenceRemark (copyLines rl)
-    copyRefField (ReferenceMedline rl)    = ReferenceMedline (copyLines rl)
-
-    copyFeature :: Feature -> Feature
-    copyFeature (Feature name loc quals) =
-        Feature (BS.copy name) (copyLine loc) (map copyQual quals)
-
-    copyQual :: FeatureQualifier -> FeatureQualifier
-    copyQual (FeatureQualifier qual val) = FeatureQualifier (BS.copy qual) (fmap copyQualVal val)
-
-    copyQualVal :: QualifierValue -> QualifierValue
-    copyQualVal (FreeText bss)   = FreeText (map BS.copy bss)
-    copyQualVal (LiteralText bs) = LiteralText (BS.copy bs)
-    copyQualVal n@(Numeral _)    = n
-
-    copySequenceLines :: SequenceLines -> SequenceLines
-    copySequenceLines (SequenceLines rl) = SequenceLines (copyLines rl)
+    qualValStrings :: Traversal' QualifierValue ByteString
+    qualValStrings f = \case
+        FreeText bss   -> FreeText <$> traverse f bss
+        LiteralText bs -> LiteralText <$> f bs
+        n@(Numeral _)  -> pure n
 
 -- USAGE
 
@@ -171,13 +185,28 @@ data ParseError m r = ParseError
     , parseLeftovers     :: ByteStream m r
     }
 
+type ParseError_ = ParseError Identity ()
+
 
 instance Show (ParseError m r) where
     show err = unlines $
         [ "Parse error at file " ++ parseErrorFilename err ++ ": " ++ parseErrorMessage err
         , "Context:"
         ]
-        ++ parseErrorContexts err
+        ++ map ('\t':) (parseErrorContexts err)
+
+
+parseErrorWithLeftoversPeek :: Monad m => Int64 -> ParseError m r -> m (ParseError n ())
+parseErrorWithLeftoversPeek peekSize e = do
+    peek <- BSS.toStrict_ (BSS.take peekSize (parseLeftovers e))
+    return e { parseLeftovers = BSS.fromStrict peek }
+
+
+showParseErrorWithLeftovers :: ParseError Identity r -> String
+showParseErrorWithLeftovers e = unlines
+    [ show e
+    , "Leftovers: " ++ BS8.unpack (runIdentity (BSS.toStrict_ (parseLeftovers e)))
+    ]
 
 
 parseGenBankFileWith ::
@@ -310,6 +339,7 @@ fieldP = do
         "ACCESSION"  -> accessionP
         "VERSION"    -> versionP
         "DBLINK"     -> dblinkP
+        "DBSOURCE"   -> dbsourceP
         "KEYWORDS"   -> keywordsP
         "SOURCE"     -> sourceP
         "REFERENCE"  -> referenceP
@@ -390,6 +420,11 @@ versionP = VersionField . VersionedAccession <$> restOfLine
 dblinkP :: A.Parser GenBankField
 dblinkP = DbLinkField <$> restOfField
     A.<?> "DBLINK field"
+
+
+dbsourceP :: A.Parser GenBankField
+dbsourceP = DbSourceField <$> restOfField
+    A.<?> "DBSOURCE field"
 
 
 keywordsP :: A.Parser GenBankField
@@ -504,9 +539,17 @@ contigP = ContigField <$> restOfField
 originP :: A.Parser GenBankField
 originP = (A.<?> "ORIGIN field") do
     _ <- restOfLine
-    seqLines <- A.many' $ A8.char ' ' *> restOfLine
 
-    return (OriginField (SequenceLines (RawLines seqLines)))
+    seqLines <- A.many' do
+        A8.char ' ' *> A8.skipWhile (== ' ')
+        startIndex <- A8.decimal
+        A8.char ' ' *> A8.skipWhile (== ' ')
+        chunks <- A8.takeWhile1 (not . A8.isSpace) `A8.sepBy1'` A8.char ' '
+        A8.skipWhile (== ' ')
+        A8.endOfLine
+        return (SequenceLine startIndex chunks)
+
+    return (OriginField seqLines)
 
 
 -- unknownP :: ByteString -> A.Parser GenBankField

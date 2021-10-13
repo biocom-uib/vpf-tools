@@ -12,8 +12,10 @@ module VPF.Frames.DSV
   , parseEitherRow
   , parseEitherRows
   , fromEitherRowStreamAoS
-  , readFrame
+  , readSubframeWith
   , readFrameWith
+  , readSubframe
+  , readFrame
 
   , WriterOptions(..)
   , defWriterOptions
@@ -40,10 +42,10 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Typeable (Typeable)
 
-import Data.Vinyl (ElField, RecMapMethod, RecordToList, rtraverse)
+import Data.Vinyl (ElField, RecMapMethod, RecordToList, rtraverse, rcast)
 import Data.Vinyl.Functor (Compose(..))
 
-import Frames (ColumnHeaders(..), FrameRec, Record)
+import Frames (ColumnHeaders(..), FrameRec, Record, Rec)
 import Frames.InCore (RecVec)
 import Frames.CSV     qualified as CSV
 import Frames.ShowCSV qualified as CSV
@@ -52,6 +54,7 @@ import Streaming (Stream, Of)
 import Streaming.Prelude qualified as S
 
 import VPF.Frames.InCore (fromRowStreamAoS)
+import VPF.Frames.Types (FieldSubset)
 import VPF.Formats (Path, DSV)
 import VPF.Util.FS qualified as FS
 
@@ -226,7 +229,7 @@ readColumnMap opts fp = liftIO $ runResourceT do
 -}
 
 
-readFrameWith ::
+readFrameWith :: forall cols' cols sep.
     ( KnownSymbol sep, ColumnHeaders cols
     , CSV.ReadRec cols, RecVec cols'
     )
@@ -243,7 +246,32 @@ readFrameWith opts f fp =
             >>> fromEitherRowStreamAoS
 
 
-readFrame ::
+readSubframeWith :: forall cols'' cols' cols sep.
+    ( KnownSymbol sep, ColumnHeaders cols
+    , CSV.ReadRec cols, RecVec cols''
+    , FieldSubset Rec cols'' cols'
+    )
+    => ParserOptions
+    -> (Stream (Of (Either ParseError (Record cols))) IO ()
+        -> Stream (Of (Either ParseError (Record cols'))) IO ())
+    -> Path (DSV sep cols)
+    -> IO (Either ParseError (FrameRec cols''))
+readSubframeWith opts f =
+  readFrameWith opts (S.map (fmap rcast) . f)
+
+
+readSubframe :: forall cols' cols sep.
+    ( KnownSymbol sep, ColumnHeaders cols
+    , CSV.ReadRec cols, RecVec cols'
+    , FieldSubset Rec cols' cols
+    )
+    => ParserOptions
+    -> Path (DSV sep cols)
+    -> IO (Either ParseError (FrameRec cols'))
+readSubframe opts = readSubframeWith opts id
+
+
+readFrame :: forall cols sep.
     ( KnownSymbol sep, ColumnHeaders cols
     , CSV.ReadRec cols, RecVec cols
     )
@@ -286,15 +314,15 @@ streamFromFrame :: (Foldable f, Monad m) => f (Record cols) -> Stream (Of (Recor
 streamFromFrame = S.each
 
 
-streamDSVLines :: forall cols m.
+streamDSVLines :: forall cols m r.
     ( RecMapMethod CSV.ShowCSV ElField cols
     , RecordToList cols
     , ColumnHeaders cols
     , Monad m
     )
     => WriterOptions
-    -> Stream (Of (Record cols)) m ()
-    -> Stream (Of Text) m ()
+    -> Stream (Of (Record cols)) m r
+    -> Stream (Of Text) m r
 streamDSVLines opts records =
     if writeHeader opts then
         S.cons (headerToDSV @cols Proxy sep) encodedRows
