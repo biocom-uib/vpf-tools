@@ -17,6 +17,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.Foldable
 import Data.HashMap.Strict (HashMap)
+import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HashSet
 import Data.List.NonEmpty (NonEmpty ((:|)))
@@ -376,6 +377,7 @@ type AllAccessionStatsCols =
 
 type AccessionStatsCols prefix =
     '[ '(prefix `AppendSymbol` "num_accessions",        Int)
+    '[ '(prefix `AppendSymbol` "num_proteins",          Int)
     ,  '(prefix `AppendSymbol` "accession_keys",        Text)
     ,  '(prefix `AppendSymbol` "found_accessions",      Int)
     ,  '(prefix `AppendSymbol` "found_accessions_tpa",  Int)
@@ -420,7 +422,7 @@ checkMissingAccessions = do
         & DSV.streamDSVLines @AllAccessionStatsCols (DSV.defWriterOptions '\t')
         & putTextLines
   where
-    accessionSet :: MappingPaths -> IO (Either DSV.ParseError (HashSet.HashSet Text))
+    accessionSet :: MappingPaths -> IO (Either DSV.ParseError (HashSet Text))
     accessionSet paths = runExceptT do
         alias <- ExceptT $
             DSV.readSubframe @'[ '("alias_accession", Text)] (DSV.defParserOptions '\t')
@@ -430,7 +432,7 @@ checkMissingAccessions = do
             toListOf (folded . F.field @"alias_accession") alias
 
 
-    noProtsSet :: MappingPaths -> IO (Either DSV.ParseError (HashSet.HashSet Text))
+    noProtsSet :: MappingPaths -> IO (Either DSV.ParseError (HashSet Text))
     noProtsSet paths = runExceptT do
         genomes <- ExceptT $
             DSV.readSubframe @'[ '("genome", Text)] (DSV.defParserOptions '\t')
@@ -438,6 +440,15 @@ checkMissingAccessions = do
 
         return $ HashSet.fromList $
             toListOf (folded . F.field @"genome") genomes
+
+
+    proteinMap :: MappingPaths -> IO (Either DSV.ParseError (HashMap Text Text)
+    proteinMap paths = runExceptT do
+        mapping <- ExceptT $
+            DSV.readFrame (DSV.defParserOptions '\t') (protsMapping paths)
+
+        return $ HashMap.fromList
+            [(genome, prot) | V.ElField genome :& V.ElField prot :& V.RNil <- toList mapping]
 
 
     --fieldStats :: KnownSymbol prefix => Text -> HashSet Text -> HashSet Text -> Maybe (Record (AccessionStatsCols prefix))
