@@ -76,8 +76,8 @@ loadTaxonomyDmpFileWith ::
     , ReadRec allCols
     , RecVec cols'
     )
-    => (Stream (Of (Either DSV.ParseError (Record allCols))) IO ()
-        -> Stream (Of (Either DSV.ParseError (Record cols))) IO ())
+    => (Stream (Of (Record allCols)) IO (Either DSV.ParseError ())
+        -> Stream (Of (Record cols)) IO (Either DSV.ParseError ()))
     -> Path (DSV "|" allCols)
     -> IO (Either DSV.ParseError (FrameRec cols'))
 loadTaxonomyDmpFileWith f dmpPath = do
@@ -118,8 +118,8 @@ loadTaxonomyNodesWith ::
     ( FieldSubset Rec cols' cols
     , RecVec cols'
     )
-    => (Stream (Of (Either DSV.ParseError (Record TaxonomyNodesCols))) IO ()
-      -> Stream (Of (Either DSV.ParseError (Record cols))) IO ())
+    => (Stream (Of (Record TaxonomyNodesCols)) IO (Either DSV.ParseError ())
+      -> Stream (Of (Record cols)) IO (Either DSV.ParseError ()))
     -> Path Directory
     -> IO (Either DSV.ParseError (FrameRec cols'))
 loadTaxonomyNodesWith f downloadDir =
@@ -137,8 +137,8 @@ loadTaxonomyNamesWith ::
     ( FieldSubset Rec cols' cols
     , RecVec cols'
     )
-    => (Stream (Of (Either DSV.ParseError (Record TaxonomyNamesCols))) IO ()
-      -> Stream (Of (Either DSV.ParseError (Record cols))) IO ())
+    => (Stream (Of (Record TaxonomyNamesCols)) IO (Either DSV.ParseError ())
+      -> Stream (Of (Record cols)) IO (Either DSV.ParseError ()))
     -> Path Directory
     -> IO (Either DSV.ParseError (FrameRec cols'))
 loadTaxonomyNamesWith f downloadDir =
@@ -151,6 +151,5 @@ loadTaxonomyScientificNames ::
 loadTaxonomyScientificNames =
     loadTaxonomyNamesWith (S.filter isScientificName)
   where
-    isScientificName (Left _)    = False
-    isScientificName (Right row) = F.get @"name class" row == Text.pack "scientific name"
+    isScientificName row = F.get @"name class" row == Text.pack "scientific name"
 

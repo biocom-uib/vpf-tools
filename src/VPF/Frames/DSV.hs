@@ -12,6 +12,8 @@ module VPF.Frames.DSV
   , parseEitherRow
   , parseEitherRows
   , fromEitherRowStreamAoS
+  , parsedRowStream
+  , fromRowStreamSoA
   , readSubframeWith
   , readFrameWith
   , readSubframe
@@ -31,7 +33,7 @@ import GHC.Generics (Generic)
 import GHC.TypeLits (KnownSymbol, symbolVal)
 
 import Control.Category ((>>>))
-import Control.Monad.Catch (Exception, MonadThrow(throwM), MonadCatch, try)
+import Control.Monad.Catch (Exception, MonadCatch, try)
 import Control.Monad.Primitive (PrimMonad)
 
 import Data.List (intercalate)
@@ -50,13 +52,14 @@ import Frames.InCore (RecVec)
 import Frames.CSV     qualified as CSV
 import Frames.ShowCSV qualified as CSV
 
-import Streaming (Stream, Of)
+import Streaming (Stream, Of(..))
 import Streaming.Prelude qualified as S
 
-import VPF.Frames.InCore (fromRowStreamAoS)
+import VPF.Frames.InCore (fromRowStreamAoS, fromRowStreamSoA)
 import VPF.Frames.Types (FieldSubset)
 import VPF.Formats (Path, DSV)
 import VPF.Util.FS qualified as FS
+import VPF.Util.Streaming
 
 
 type RowTokenizer = Text -> [Text]
@@ -136,22 +139,36 @@ parseEitherRows opts fp =
         in  ParseCtx (untag fp) sep colNames
 
 
-throwLeftsM ::
-    (Exception e, MonadThrow m)
-    => Stream (Of (Either e a)) m ()
-    -> Stream (Of a) m ()
-throwLeftsM = S.mapM (either throwM return)
+parsedRowStream ::
+    ( KnownSymbol sep
+    , ColumnHeaders cols
+    , CSV.ReadRec cols
+    , Monad m
+    )
+    => ParserOptions
+    -> Path (DSV sep cols)
+    -> Stream (Of Text) m ()
+    -> Stream (Of (Record cols)) m (Either ParseError ())
+parsedRowStream opts fp = stopStreamOnFirstError . parseEitherRows opts fp
 
 
 fromEitherRowStreamAoS ::
-    ( RecVec cols
-    , MonadCatch m
+    ( MonadCatch m
     , PrimMonad m
     )
     => Stream (Of (Either ParseError (Record cols))) m ()
     -> m (Either ParseError (FrameRec cols))
 fromEitherRowStreamAoS =
-    try . fromRowStreamAoS . throwLeftsM
+    try . fromRowStreamAoS . throwStreamLefts
+
+
+fromParsedRowStreamSoA ::
+    ( RecVec cols
+    , PrimMonad m
+    )
+    => Stream (Of (Record cols)) m (Either e ())
+    -> m (Either e (FrameRec cols))
+fromParsedRowStreamSoA = fmap wrapEitherOf . fromRowStreamSoA 128
 
 
 {-
@@ -234,16 +251,16 @@ readFrameWith :: forall cols' cols sep.
     , CSV.ReadRec cols, RecVec cols'
     )
     => ParserOptions
-    -> (Stream (Of (Either ParseError (Record cols))) IO ()
-        -> Stream (Of (Either ParseError (Record cols'))) IO ())
+    -> (Stream (Of (Record cols)) IO (Either ParseError ())
+        -> Stream (Of (Record cols')) IO (Either ParseError ()))
     -> Path (DSV sep cols)
     -> IO (Either ParseError (FrameRec cols'))
 readFrameWith opts f fp =
     FS.withFileRead fp $
         FS.hStreamTextLines
-            >>> parseEitherRows opts fp
+            >>> parsedRowStream opts fp
             >>> f
-            >>> fromEitherRowStreamAoS
+            >>> fromParsedRowStreamSoA
 
 
 readSubframeWith :: forall cols'' cols' cols sep.
@@ -252,12 +269,12 @@ readSubframeWith :: forall cols'' cols' cols sep.
     , FieldSubset Rec cols'' cols'
     )
     => ParserOptions
-    -> (Stream (Of (Either ParseError (Record cols))) IO ()
-        -> Stream (Of (Either ParseError (Record cols'))) IO ())
+    -> (Stream (Of (Record cols)) IO (Either ParseError ())
+        -> Stream (Of (Record cols')) IO (Either ParseError ()))
     -> Path (DSV sep cols)
     -> IO (Either ParseError (FrameRec cols''))
 readSubframeWith opts f =
-  readFrameWith opts (S.map (fmap rcast) . f)
+  readFrameWith opts (S.map rcast . f)
 
 
 readSubframe :: forall cols' cols sep.

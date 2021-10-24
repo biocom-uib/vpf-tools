@@ -34,6 +34,7 @@ module VPF.Frames.InCore
   , toColVecsN
   , toColVecs
   , fromColVecs
+  , fromRowStreamSoA
   , colVecs
   , copySoA
 
@@ -229,6 +230,18 @@ toColVecs df = toColVecsN (frameLength df) df
 fromColVecs :: IC.RecVec cols => ColVecs cols -> FrameRec cols
 fromColVecs (ColVecs n cols) = IC.toAoS n (IC.produceRec Proxy cols )
 {-# inline fromColVecs #-}
+
+
+fromRowStreamSoA ::
+    ( PrimMonad m
+    , IC.RecVec cols
+    )
+    => Int
+    -> Stream (Of (Record cols)) m r
+    -> m (Of (FrameRec cols) r)
+fromRowStreamSoA initialCapacity =
+    fmap (S.mapOf fromColVecs) . L.impurely S.foldM (colVecsFoldM initialCapacity)
+{-# inline fromRowStreamSoA #-}
 
 
 colVecs :: (IC.RecVec cols, IC.RecVec cols')

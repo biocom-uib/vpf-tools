@@ -24,6 +24,7 @@ import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
+import Data.Vinyl (Rec(..), (=:))
 import Data.Vinyl qualified as V
 import Data.Vinyl.TypeLevel qualified as V
 
@@ -43,8 +44,9 @@ import VPF.Frames.Dplyr qualified as F
 import VPF.Frames.DSV qualified as DSV
 import VPF.Frames.Types (Record, FrameRec)
 import VPF.Model.Training.DataSetup
-import VPF.Util.GBFF qualified as GBFF
 import VPF.Util.FS
+import VPF.Util.GBFF qualified as GBFF
+import VPF.Util.Streaming
 
 
 wrapError :: Of a (Either e ()) -> Either e a
@@ -296,8 +298,8 @@ tpaMappingPaths = MappingPaths
     }
 
 
-generateAllMappings :: IO ()
-generateAllMappings =
+_generateAllMappings :: IO ()
+_generateAllMappings =
     ResourceT.runResourceT do
         e <- runExceptT do
             ExceptT $
@@ -377,7 +379,7 @@ type AllAccessionStatsCols =
 
 type AccessionStatsCols prefix =
     '[ '(prefix `AppendSymbol` "num_accessions",        Int)
-    '[ '(prefix `AppendSymbol` "num_proteins",          Int)
+    ,  '(prefix `AppendSymbol` "num_proteins",          Int)
     ,  '(prefix `AppendSymbol` "accession_keys",        Text)
     ,  '(prefix `AppendSymbol` "found_accessions",      Int)
     ,  '(prefix `AppendSymbol` "found_accessions_tpa",  Int)
@@ -389,11 +391,13 @@ type AccessionStatsCols prefix =
 checkMissingAccessions :: IO ()
 checkMissingAccessions = do
     !refseqAccs <- rightOrDie =<< accessionSet refSeqMappingPaths
+    !refseqProts <- rightOrDie =<< proteinMap refSeqMappingPaths
     !rsNoProts <- rightOrDie =<< noProtsSet refSeqMappingPaths
 
     IO.hPutStrLn IO.stderr "loaded refseq accessions"
 
     !genbankRelAccs <- rightOrDie =<< accessionSet genBankReleaseMappingPaths
+    !genbankRelProts <- rightOrDie =<< proteinMap genBankReleaseMappingPaths
     !gbNoProts <- rightOrDie =<< noProtsSet genBankReleaseMappingPaths
     !gbDeleted <- rightOrDie =<< runExceptT do
         gbdel <- ExceptT $ GenBank.loadNewlyDeletedAccessionsList genBankDownloadDir
@@ -402,18 +406,35 @@ checkMissingAccessions = do
     IO.hPutStrLn IO.stderr "loaded genbank accessions"
 
     !tpaAccs <- rightOrDie =<< accessionSet tpaMappingPaths
+    !tpaProts <- rightOrDie =<< proteinMap tpaMappingPaths
     !tpaNoProts <- rightOrDie =<< noProtsSet tpaMappingPaths
+
+    let !genbankProts = HashMap.unionWith HashSet.union genbankRelProts tpaProts
 
     IO.hPutStrLn IO.stderr "loaded TPA accessions"
 
     vmr <- rightOrDie =<< getLatestVmr
 
     S.each (F.select @'["virus_name", "genbank_accession", "refseq_accession"] vmr)
-        & S.zipWith (\i rec -> (i, rec, rec)) (S.enumFrom 1)
-        & S.map (_3 %~ \rec ->
-            liftA2 V.rappend
-                (fieldStats (F.get @"genbank_accession" rec) (genbankRelAccs, gbNoProts) (tpaAccs, tpaNoProts) gbDeleted)
-                (fieldStats (F.get @"refseq_accession" rec)  (refseqAccs,     rsNoProts) (tpaAccs, tpaNoProts) HashSet.empty))
+        & S.zipWith (\i rec -> (i, rec, rec)) (S.enumFrom (1 :: Int))
+
+        & S.map (_3 %~ \rec -> do
+            gb <- renameFieldStats @"" @"genbank_" <$>
+                fieldStats
+                    (F.get @"genbank_accession" rec)
+                    (genbankRelAccs, genbankProts, gbNoProts)
+                    (tpaAccs, tpaNoProts)
+                    gbDeleted
+
+            rs <- renameFieldStats @"" @"refseq_" <$>
+                fieldStats
+                    (F.get @"refseq_accession" rec)
+                    (refseqAccs, refseqProts, rsNoProts)
+                    (tpaAccs, tpaNoProts)
+                    HashSet.empty
+
+            return (V.rappend gb rs))
+
         & S.mapMaybeM (\case
             (i, rec, Nothing) -> do
                 IO.hPutStrLn IO.stderr $ "Error parsing accessions at ICTV line " ++ show i ++ ": " ++ show rec
@@ -439,43 +460,71 @@ checkMissingAccessions = do
                 (noProtsListPath paths)
 
         return $ HashSet.fromList $
-            toListOf (folded . F.field @"genome") genomes
+            (toListOf (folded . F.field @"genome") genomes)
 
 
-    proteinMap :: MappingPaths -> IO (Either DSV.ParseError (HashMap Text Text)
-    proteinMap paths = runExceptT do
-        mapping <- ExceptT $
-            DSV.readFrame (DSV.defParserOptions '\t') (protsMapping paths)
+    proteinMap :: MappingPaths -> IO (Either DSV.ParseError (HashMap Text (HashSet Text)))
+    proteinMap paths = do
+        let insertOrAppend :: Text -> Text -> HashMap Text (HashSet Text) -> HashMap Text (HashSet Text)
+            insertOrAppend prot = HashMap.alter \case
+                Nothing    -> Just (HashSet.singleton prot)
+                Just prots -> Just (HashSet.insert prot prots)
 
-        return $ HashMap.fromList
-            [(genome, prot) | V.ElField genome :& V.ElField prot :& V.RNil <- toList mapping]
+        withFileRead (protsMappingPath paths) $
+            hStreamTextLines
+                >>> DSV.parsedRowStream (DSV.defParserOptions '\t') (protsMappingPath paths)
+                >>> S.fold (\m rec -> insertOrAppend (F.get @"protein" rec) (F.get @"genome" rec) m)
+                        HashMap.empty
+                        id
+                >>> fmap wrapEitherOf
 
 
-    --fieldStats :: KnownSymbol prefix => Text -> HashSet Text -> HashSet Text -> Maybe (Record (AccessionStatsCols prefix))
-    fieldStats field (known,knownNoProts) (tpa,tpaNoProts) deleted = do
+    renameFieldStats ::
+        ( V.StripFieldNames (AccessionStatsCols prefix)
+        , V.StripFieldNames (AccessionStatsCols prefix')
+        )
+        => Record (AccessionStatsCols prefix)
+        -> Record (AccessionStatsCols prefix')
+    renameFieldStats = V.withNames . V.stripNames
+
+
+    fieldStats ::
+        Text
+        -> (HashSet Text, HashMap Text (HashSet Text), HashSet Text)
+        -> (HashSet Text, HashSet Text)
+        -> HashSet Text
+        -> Maybe (Record (AccessionStatsCols ""))
+    fieldStats field (known, protMap, knownNoProts) (tpa, tpaNoProts) deleted = do
         (keys, accs) <- unzip <$> ICTV.parseAccessionList field
 
         let numAccs = length accs
 
             upd acc
-                | HashSet.member acc known   = F.field @2 +~ 1
-                    >>> if HashSet.member acc knownNoProts then F.field @6 +~ 1 else id
-                | HashSet.member acc tpa     = F.field @3 +~ 1
-                    >>> if HashSet.member acc tpaNoProts then F.field @6 +~ 1 else id
-                | HashSet.member acc deleted = F.field @4 +~ 1
-                | otherwise                  = F.field @5 +~ 1
+                | HashSet.member acc known   = F.field @"found_accessions" +~ 1
+                    >>> if HashSet.member acc knownNoProts then F.field @"num_noprot_accessions" +~ 1 else id
+                | HashSet.member acc tpa     = F.field @"found_accessions_tpa" +~ 1
+                    >>> if HashSet.member acc tpaNoProts then F.field @"num_noprot_accessions" +~ 1 else id
+                | HashSet.member acc deleted = F.field @"deleted_accessions" +~ 1
+                | otherwise                  = F.field @"unknown_accessions" +~ 1
+
+            updProts acc =
+                case HashMap.lookup acc protMap of
+                    Nothing    -> id
+                    Just prots -> F.field @"num_proteins" %~ HashSet.union prots
 
             init = V.fieldRec
-                ( F.elfield # numAccs
-                , F.elfield # Text.intercalate (Text.singleton ',') (filter (not . Text.null) keys)
-                , F.elfield # 0
-                , F.elfield # 0
-                , F.elfield # 0
-                , F.elfield # 0
-                , F.elfield # 0
+                ( #num_accessions        =: numAccs
+                , #num_proteins          =: HashSet.empty
+                , #accession_keys        =: Text.intercalate (Text.singleton ',') (filter (not . Text.null) keys)
+                , #found_accessions      =: 0
+                , #found_accessions_tpa  =: 0
+                , #deleted_accessions    =: 0
+                , #unknown_accessions    =: 0
+                , #num_noprot_accessions =: 0
                 )
 
-        return $ foldl' (flip upd) init accs
+        return $ foldl' (\stats acc -> updProts acc (upd acc stats)) init accs
+            & F.field @"num_proteins" %~ HashSet.size
 
 
 main :: IO ()
