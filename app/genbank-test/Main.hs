@@ -16,6 +16,7 @@ import Control.Monad.Trans.Resource qualified as ResourceT
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.Foldable
+import Data.Graph.Inductive qualified as FGL
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet (HashSet)
@@ -39,6 +40,7 @@ import System.IO qualified as IO
 import VPF.DataSource.ICTV qualified as ICTV
 import VPF.DataSource.NCBI.GenBank qualified as GenBank
 import VPF.DataSource.NCBI.RefSeq qualified as RefSeq
+import VPF.DataSource.NCBI.Taxonomy qualified as Taxonomy
 import VPF.Formats
 import VPF.Frames.Dplyr qualified as F
 import VPF.Frames.DSV qualified as DSV
@@ -78,7 +80,7 @@ refSeqDownloadDir = Tagged "./downloads/refseq"
 
 refSeqEntries ::
     ResourceT.MonadResource m
-    => RefSeq.RefSeqSourceConfig
+    => RefSeq.RefSeqDownloadList
     -> Stream (Of (FilePath, [GBFF.GenBankField])) m (Either GBFF.ParseError_ ())
 refSeqEntries cfg = cleanupErrors $ runExceptT do
     fileList <- liftIO $ (>>= rightOrDie) $
@@ -99,7 +101,7 @@ genBankDownloadDir = Tagged "./downloads/genbank"
 
 genBankEntries ::
     ResourceT.MonadResource m
-    => GenBank.GenBankSourceConfig
+    => GenBank.GenBankDownloadList
     -> Stream (Of (FilePath, [GBFF.GenBankField])) m (Either GBFF.ParseError_ ())
 genBankEntries cfg = cleanupErrors $ runExceptT do
     fileList <- liftIO $ (>>= rightOrDie) $
@@ -118,7 +120,7 @@ _countAccessionsMain :: IO ()
 _countAccessionsMain = do
     res <- ResourceT.runResourceT $
         runExceptT do
-            refseq <- ExceptT $ collectAccessions (refSeqEntries RefSeq.refSeqViralGenomicConfig)
+            refseq <- ExceptT $ collectAccessions (refSeqEntries RefSeq.refSeqViralGenomicList)
             gb <- ExceptT $ collectAccessions (genBankEntries GenBank.genBankViralConfig)
 
             return (refseq, gb)
@@ -135,7 +137,7 @@ _findNonredundantProtsMain :: IO ()
 _findNonredundantProtsMain = do
     res <- ResourceT.runResourceT $ runExceptT do
         ExceptT $
-            refSeqEntries RefSeq.refSeqViralProteinsConfig
+            refSeqEntries RefSeq.refSeqViralProteinsList
                 & S.map snd
                 & S.filter
                     (anyOf (traverse . GBFF.genBankFieldStrings) containsNonredundant)
@@ -304,7 +306,7 @@ _generateAllMappings =
         e <- runExceptT do
             ExceptT $
                 writeMappings
-                    (refSeqEntries RefSeq.refSeqViralGenomicConfig)
+                    (refSeqEntries RefSeq.refSeqViralGenomicList)
                     refSeqMappingPaths
 
             -- ExceptT $
@@ -527,5 +529,18 @@ checkMissingAccessions = do
             & F.field @"num_proteins" %~ HashSet.size
 
 
+verifyTaxonomy :: IO ()
+verifyTaxonomy = do
+    let downloadDir = Tagged "./downloads/taxonomy/"
+    -- _ <- rightOrDie =<< Taxonomy.syncTaxonomy (IO.hPutStrLn IO.stderr) downloadDir
+
+    !g <- rightOrDie =<< fmap (Taxonomy.taxonomyGr . Taxonomy.buildTaxonomyGraph) <$>
+        Taxonomy.loadTaxonomyNodesWith id downloadDir
+
+    IO.hPutStrLn IO.stderr "Loaded taxonomy graph"
+
+    print $ Taxonomy.checkTaxonomyTree g
+
+
 main :: IO ()
-main = checkMissingAccessions
+main = verifyTaxonomy

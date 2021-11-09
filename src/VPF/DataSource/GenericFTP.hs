@@ -8,12 +8,14 @@ import GHC.Exts (IsString)
 
 import Conduit
 
+import Control.Applicative (liftA2)
 import Control.Exception qualified as Exception
 import Control.Lens (iforM_)
 import Control.Monad.Trans.Except (ExceptT(ExceptT), runExceptT, withExceptT)
 import Control.Monad.Trans.Writer.Strict (execWriterT, tell)
 
 import Data.Foldable
+import Data.List (union)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
@@ -47,17 +49,26 @@ toLocalRelPath :: FtpRelPath -> FilePath
 toLocalRelPath = joinPath . Posix.splitDirectories . ftpRelPath
 
 
+newtype DownloadList = DownloadList
+    { runFtpDownloadList :: FTP.Handle -> IO (Either String [FtpRelPath])
+    }
+
+instance Semigroup DownloadList where
+    DownloadList dl1 <> DownloadList dl2 =
+        DownloadList (liftA2 (liftA2 (liftA2 union)) dl1 dl2)
+
+
 data FtpSourceConfig = FtpSourceConfig
     { ftpSecure :: Bool
     , ftpHost :: String
     , ftpPort :: Int
     , ftpLogin :: (String, String)
     , ftpBasePath :: FilePath
-    , ftpDownloadList :: FTP.Handle -> IO (Either String [FtpRelPath])
+    , ftpDownloadList :: DownloadList
     }
 
 
-ftpSourceConfigFromURI :: URI.URI -> TExpQ ((FTP.Handle -> IO (Either String [FtpRelPath])) -> FtpSourceConfig)
+ftpSourceConfigFromURI :: URI.URI -> TExpQ (DownloadList -> FtpSourceConfig)
 ftpSourceConfigFromURI uri = do
     let secure =
           case URI.unRText <$> URI.uriScheme uri of
@@ -131,7 +142,7 @@ metadataFilename = "vpf-metadata.yaml"
 retrieveMetadata :: FtpSourceConfig -> FTP.Handle -> IO (Either String FtpFileInfos)
 retrieveMetadata cfg h = runExceptT do
     paths <- withExceptT ("error preparing file list: " ++) $
-        ExceptT $ ftpDownloadList cfg h
+        ExceptT $ runFtpDownloadList (ftpDownloadList cfg) h
 
     infos <- lift $ sourceToList $
         forM_ paths \path -> do

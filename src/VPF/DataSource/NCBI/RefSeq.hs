@@ -1,6 +1,4 @@
 {-# language GeneralizedNewtypeDeriving #-}
-{-# language QuasiQuotes #-}
-{-# language TemplateHaskell #-}
 {-# language TupleSections #-}
 {-# language ViewPatterns #-}
 module VPF.DataSource.NCBI.RefSeq where
@@ -37,7 +35,6 @@ import System.Directory qualified as Dir
 import System.IO qualified as IO
 
 import Text.Regex.PCRE qualified as PCRE
-import Text.URI.QQ (uri)
 
 import VPF.DataSource.GenericFTP
 import VPF.Frames.Dplyr qualified as F
@@ -45,31 +42,31 @@ import VPF.Frames.DSV qualified as DSV
 import VPF.Frames.Types (FieldSubset)
 import VPF.Formats
 import VPF.Util.FS qualified as FS
+import VPF.DataSource.NCBI (ncbiSourceConfig)
 
 
-data RefSeqSourceConfig = RefSeqSourceConfig
+data RefSeqDownloadList = RefSeqDownloadList
     { refSeqDirectories :: [String]
     , refSeqSeqFormats  :: [ByteString]
     }
 
 
-unionRefSeqSourceConfigs :: RefSeqSourceConfig -> RefSeqSourceConfig -> RefSeqSourceConfig
-unionRefSeqSourceConfigs (RefSeqSourceConfig dirs1 formats1) (RefSeqSourceConfig dirs2 formats2) =
-    RefSeqSourceConfig (union dirs1 dirs2) (union formats1 formats2)
+instance Semigroup RefSeqDownloadList where
+    RefSeqDownloadList dirs1 formats1 <> RefSeqDownloadList dirs2 formats2 =
+        RefSeqDownloadList (union dirs1 dirs2) (union formats1 formats2)
 
 
-refSeqFtpSourceConfig :: RefSeqSourceConfig -> FtpSourceConfig
+refSeqFtpSourceConfig :: RefSeqDownloadList -> FtpSourceConfig
 refSeqFtpSourceConfig cfg =
-    $$(ftpSourceConfigFromURI [uri|ftp://ftp.ncbi.nlm.nih.gov/refseq/release/|]) \h ->
-        buildDownloadList h cfg
+    (ncbiSourceConfig (refSeqDownloadList cfg)) { ftpBasePath = "/refseq/release" }
 
 
-refSeqViralGenomicConfig :: RefSeqSourceConfig
-refSeqViralGenomicConfig = RefSeqSourceConfig ["viral"] [BS8.pack "genomic.gbff"]
+refSeqViralGenomicList :: RefSeqDownloadList
+refSeqViralGenomicList = RefSeqDownloadList ["viral"] [BS8.pack "genomic.gbff"]
 
 
-refSeqViralProteinsConfig :: RefSeqSourceConfig
-refSeqViralProteinsConfig = RefSeqSourceConfig ["viral"] [BS8.pack "protein.gpff"]
+refSeqViralProteinsList :: RefSeqDownloadList
+refSeqViralProteinsList = RefSeqDownloadList ["viral"] [BS8.pack "protein.gpff"]
 
 
 refSeqFileRegex :: PCRE.Regex
@@ -96,7 +93,7 @@ matchRefSeqCatalog filename = do
 
 
 -- expecting base name
-fileMatchesCfg :: RefSeqSourceConfig -> ByteString -> Bool
+fileMatchesCfg :: RefSeqDownloadList -> ByteString -> Bool
 fileMatchesCfg cfg filename =
     case PCRE.matchM refSeqFileRegex filename of
         Just mr | [_dir, _increment, format, compression] <- PCRE.mrSubList mr ->
@@ -105,8 +102,8 @@ fileMatchesCfg cfg filename =
         _ -> False
 
 
-buildDownloadList :: FTP.Handle -> RefSeqSourceConfig -> IO (Either String [FtpRelPath])
-buildDownloadList h cfg = runExceptT do
+refSeqDownloadList :: RefSeqDownloadList -> DownloadList
+refSeqDownloadList cfg = DownloadList \h -> runExceptT do
     catalogDirList <- map (BS8.pack . FTP.mrFilename) <$> FTP.mlsd h "release-catalog"
 
     let catalogs = filter (isJust . matchRefSeqCatalog) catalogDirList
@@ -133,7 +130,7 @@ buildDownloadList h cfg = runExceptT do
     return (catalogPath : fileList)
 
 
-syncRefSeq :: RefSeqSourceConfig -> LogAction String -> Path Directory -> IO (Either String Any)
+syncRefSeq :: RefSeqDownloadList -> LogAction String -> Path Directory -> IO (Either String Any)
 syncRefSeq = syncGenericFTP . refSeqFtpSourceConfig
 
 
@@ -152,7 +149,7 @@ loadRefSeqCatalog ::
     ( RecVec cols
     , FieldSubset Rec cols CatalogCols
     )
-    => RefSeqSourceConfig
+    => RefSeqDownloadList
     -> Path Directory
     -> IO (Either DSV.ParseError (FrameRec cols))
 loadRefSeqCatalog cfg (untag -> downloadDir) = do
@@ -184,7 +181,7 @@ loadRefSeqCatalog cfg (untag -> downloadDir) = do
 
 
 listRefSeqSeqFiles ::
-    RefSeqSourceConfig
+    RefSeqDownloadList
     -> Path Directory
     -> IO (Either Y.ParseException [Path (GZip GenBank)])
 listRefSeqSeqFiles cfg downloadDir = runExceptT do

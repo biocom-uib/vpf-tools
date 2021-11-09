@@ -32,6 +32,7 @@ dependencies:
 - directory
 - exceptions
 - feed
+- fgl
 - filepath
 - foldl
 - ftp-client

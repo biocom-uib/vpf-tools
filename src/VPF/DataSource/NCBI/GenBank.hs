@@ -1,7 +1,16 @@
-{-# language QuasiQuotes #-}
-{-# language TemplateHaskell #-}
 {-# language ViewPatterns #-}
-module VPF.DataSource.NCBI.GenBank where
+module VPF.DataSource.NCBI.GenBank
+  ( GenBankDownloadList(..)
+  , genBankSourceConfig
+  , genBankViralConfig
+  , genBankReleaseViralConfig
+  , genBankTpaOnlyConfig
+  , tpaExtraFiles
+  , tpaExtraFilesLocal
+  , syncGenBank
+  , loadNewlyDeletedAccessionsList
+  , listGenBankSeqFiles
+  ) where
 
 import GHC.TypeLits (Symbol)
 
@@ -30,27 +39,25 @@ import Streaming.Zip qualified as SZ
 import System.FilePath ((</>), takeFileName)
 import System.FilePath.Posix qualified as Posix
 
-import Text.URI.QQ (uri)
-
 import VPF.DataSource.GenericFTP
+import VPF.DataSource.NCBI
 import VPF.Formats
 import VPF.Frames.DSV qualified as DSV
 
 
-data GenBankSourceConfig = GenBankSourceConfig
+data GenBankDownloadList = GenBankDownloadList
     { genBankReleaseFileMatch :: String -> Bool
     , genBankIncludeTPA :: Bool
     }
 
 
-genBankSourceConfig :: GenBankSourceConfig -> FtpSourceConfig
-genBankSourceConfig cfg =
-    $$(ftpSourceConfigFromURI [uri|ftp://ftp.ncbi.nlm.nih.gov/|]) \h ->
-        buildDownloadList h cfg
+genBankSourceConfig :: GenBankDownloadList -> FtpSourceConfig
+genBankSourceConfig cfg = ncbiSourceConfig $
+    DownloadList \h -> buildDownloadList h cfg
 
 
-genBankViralConfig :: GenBankSourceConfig
-genBankViralConfig = GenBankSourceConfig
+genBankViralConfig :: GenBankDownloadList
+genBankViralConfig = GenBankDownloadList
     { genBankReleaseFileMatch = \name ->
         ("gbvrl" `isPrefixOf` name || "gbphg" `isPrefixOf` name)
             && ".seq.gz" `isSuffixOf` name
@@ -58,12 +65,12 @@ genBankViralConfig = GenBankSourceConfig
     }
 
 
-genBankReleaseViralConfig :: GenBankSourceConfig
+genBankReleaseViralConfig :: GenBankDownloadList
 genBankReleaseViralConfig = genBankViralConfig { genBankIncludeTPA = False }
 
 
-genBankTpaOnlyConfig :: GenBankSourceConfig
-genBankTpaOnlyConfig = GenBankSourceConfig (const False) True
+genBankTpaOnlyConfig :: GenBankDownloadList
+genBankTpaOnlyConfig = GenBankDownloadList (const False) True
 
 
 tpaExtraFiles :: [FtpRelPath]
@@ -74,7 +81,7 @@ tpaExtraFilesLocal :: [FilePath]
 tpaExtraFilesLocal = map toLocalRelPath tpaExtraFiles
 
 
-buildDownloadList :: FTP.Handle -> GenBankSourceConfig -> IO (Either String [FtpRelPath])
+buildDownloadList :: FTP.Handle -> GenBankDownloadList -> IO (Either String [FtpRelPath])
 buildDownloadList h cfg = runExceptT do
     fileNameList <- lift $ map FTP.mrFilename <$> FTP.mlsd h "genbank/"
     let fileList = map ("genbank" Posix.</>) fileNameList
@@ -88,7 +95,7 @@ buildDownloadList h cfg = runExceptT do
     return (coerce ([releaseNumberFile, deletedEntriesFile] `union` selectedFiles) ++ tpa)
 
 
-syncGenBank :: GenBankSourceConfig -> LogAction String -> Path Directory -> IO (Either String Any)
+syncGenBank :: GenBankDownloadList -> LogAction String -> Path Directory -> IO (Either String Any)
 syncGenBank = syncGenericFTP . genBankSourceConfig
 
 
@@ -113,7 +120,7 @@ loadNewlyDeletedAccessionsList (Tagged downloadDir) =
 
 
 listGenBankSeqFiles ::
-    GenBankSourceConfig
+    GenBankDownloadList
     -> Path Directory
     -> IO (Either Y.ParseException [Path (GZip GenBank)])
 listGenBankSeqFiles cfg downloadDir = runExceptT do

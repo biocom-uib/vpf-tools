@@ -24,7 +24,7 @@ import VPF.Frames.Types (FieldSubset)
 
 virusHostDbFtpSourceConfig :: FtpSourceConfig
 virusHostDbFtpSourceConfig =
-    $$(ftpSourceConfigFromURI [uri|ftp://ftp.genome.jp/pub/db/virushostdb/|]) \_h ->
+    $$(ftpSourceConfigFromURI [uri|ftp://ftp.genome.jp/pub/db/virushostdb/|]) $ DownloadList \_h ->
         return $ Right
             [ "README"
             , "non-segmented_virus_list.tsv"
