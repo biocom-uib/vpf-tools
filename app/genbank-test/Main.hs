@@ -25,6 +25,7 @@ import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
+import Data.Text.IO qualified as Text
 import Data.Vinyl (Rec(..), (=:))
 import Data.Vinyl qualified as V
 import Data.Vinyl.TypeLevel qualified as V
@@ -532,14 +533,23 @@ checkMissingAccessions = do
 verifyTaxonomy :: IO ()
 verifyTaxonomy = do
     let downloadDir = Tagged "./downloads/taxonomy/"
-    -- _ <- rightOrDie =<< Taxonomy.syncTaxonomy (IO.hPutStrLn IO.stderr) downloadDir
 
-    !g <- rightOrDie =<< fmap (Taxonomy.taxonomyGr . Taxonomy.buildTaxonomyGraph) <$>
-        Taxonomy.loadTaxonomyNodesWith id downloadDir
+    -- _ <- rightOrDie =<< Taxonomy.syncTaxonomy (IO.hPutStrLn IO.stderr) downloadDir
+    taxdb <- rightOrDie =<<
+        Taxonomy.loadFullTaxonomy (Taxonomy.onlyScientificNames Taxonomy.listWithTaxNameClass) True downloadDir
 
     IO.hPutStrLn IO.stderr "Loaded taxonomy graph"
 
-    print $ Taxonomy.checkTaxonomyTree g
+    print $ Taxonomy.checkTaxonomyTree (Taxonomy.taxonomyGraph taxdb)
+
+    vmr <- rightOrDie =<< getLatestVmr
+
+    S.each (vmrTaxNames vmr)
+        & S.map (\name -> (name, name))
+        & S.map (_2 %~ Taxonomy.findTaxIdsForName taxdb False)
+        & S.map (_2 %~ Text.intercalate (Text.pack ";") . map (Text.pack . show . fst))
+        & S.map (\(name, taxids) -> Text.intercalate (Text.pack "\t") [name, taxids])
+        & S.mapM_ Text.putStrLn
 
 
 main :: IO ()
