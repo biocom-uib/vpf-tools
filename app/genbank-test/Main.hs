@@ -1,6 +1,8 @@
 {-# language OverloadedLabels #-}
+{-# language OverloadedLists #-}
 {-# language TupleSections #-}
 
+import GHC.Exts as GHC (IsList(..))
 import GHC.TypeLits (AppendSymbol, KnownSymbol)
 
 import Control.Applicative (liftA2)
@@ -15,7 +17,7 @@ import Control.Monad.Trans.Resource qualified as ResourceT
 
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
-import Data.Foldable
+import Data.Foldable as Foldable
 import Data.Graph.Inductive qualified as FGL
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
@@ -536,7 +538,7 @@ verifyTaxonomy = do
 
     -- _ <- rightOrDie =<< Taxonomy.syncTaxonomy (IO.hPutStrLn IO.stderr) downloadDir
     taxdb <- rightOrDie =<<
-        Taxonomy.loadFullTaxonomy (Taxonomy.onlyScientificNames Taxonomy.listWithTaxNameClass) True downloadDir
+        Taxonomy.loadFullTaxonomy (Taxonomy.onlyScientificNames Taxonomy.listWithTaxNameClass) downloadDir
 
     IO.hPutStrLn IO.stderr "Loaded taxonomy graph"
 
@@ -546,9 +548,16 @@ verifyTaxonomy = do
 
     S.each (vmrTaxNames vmr)
         & S.map (\name -> (name, name))
-        & S.map (_2 %~ Taxonomy.findTaxIdsForName taxdb False)
-        & S.map (_2 %~ Text.intercalate (Text.pack ";") . map (Text.pack . show . fst))
-        & S.map (\(name, taxids) -> Text.intercalate (Text.pack "\t") [name, taxids])
+        & S.map (_2 %~ GHC.toList . Taxonomy.findTaxIdsForName taxdb False)
+        & S.mapMaybe (_2 %%~ preview (_head . _1))
+        & S.map (_2 %~ \taxid ->
+            [ parentName <> Text.pack " (" <> parentRank <> Text.pack ")"
+            | parentTax       <- Taxonomy.taxIdLineage taxdb taxid
+            , (parentName, _) <- take 1 $ GHC.toList $ Taxonomy.findNamesForTaxId taxdb parentTax
+            , Just parentRank <- [Taxonomy.taxIdRank taxdb parentTax]
+            ])
+        & S.map (_2 %~ Text.intercalate (Text.pack ";"))
+        & S.map (\(name, lineage) -> Text.intercalate (Text.pack "\t") [name, lineage])
         & S.mapM_ Text.putStrLn
 
 

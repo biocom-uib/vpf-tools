@@ -1,22 +1,27 @@
+{-# language DeriveFunctor #-}
 {-# language GeneralizedNewtypeDeriving #-}
+{-# language OverloadedLists #-}
 {-# language StrictData #-}
 {-# language TemplateHaskell #-}
+{-# language UndecidableInstances #-}
 {-# language ViewPatterns #-}
 module VPF.DataSource.NCBI.Taxonomy where
 
 import Codec.Archive.Tar qualified as Tar
 import Codec.Compression.GZip qualified as GZ
 
-import Control.Applicative (Alternative(..))
+import Control.Applicative (liftA2)
 import Control.Foldl qualified as L
+import Control.Lens (Fold)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Except (runExceptT, ExceptT(ExceptT))
 import Control.Monad.Trans.Resource qualified as ResourceT
 
 import Data.ByteString.Lazy qualified as LBS
-import Data.Foldable
 import Data.Function ((&))
+import Data.Functor.Contravariant (phantom)
 import Data.Graph.Inductive qualified as FGL
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
@@ -32,6 +37,8 @@ import Frames (Rec, FrameRec, ColumnHeaders, Record)
 import Frames.CSV (ReadRec)
 import Frames.InCore (RecVec)
 
+import GHC.Exts (IsList(..))
+
 import Streaming (Stream, Of)
 import Streaming.Prelude qualified as S
 
@@ -43,8 +50,8 @@ import VPF.DataSource.GenericFTP
 import VPF.DataSource.NCBI
 import VPF.Formats
 import VPF.Frames.DSV qualified as DSV
-import VPF.Frames.Dplyr.Row qualified as F
 import VPF.Frames.Types (FieldSubset, FieldsOf)
+import VPF.Util.Foldl qualified as L
 import VPF.Util.FS qualified as FS
 import VPF.Util.Streaming qualified as S
 
@@ -125,14 +132,15 @@ streamTaxonomyDmpFile ::
     => Path (DSV "|" allCols)
     -> Stream (Of (Record cols)) m (Either DSV.ParseError ())
 streamTaxonomyDmpFile dmpPath = do
-    (releaseKey, h) <- ResourceT.liftResourceT $
-        ResourceT.allocate (IO.openFile (untage dmpPath) IO.ReadMode) IO.hClose
+    (releaseKey, h) <- lift $ ResourceT.liftResourceT $
+        ResourceT.allocate (IO.openFile (untag dmpPath) IO.ReadMode) IO.hClose
 
     r <- FS.hStreamTextLines h
-        & DSV.parsedRowStream
+        & DSV.parsedRowStream dmpParserOpts dmpPath
         & S.map V.rcast
 
-    ResourceT.liftResourceT $ ResourceT.release releaseKey
+    lift $ ResourceT.liftResourceT $
+        ResourceT.release releaseKey
 
     return r
 
@@ -168,19 +176,15 @@ data TaxonomyGraph = TaxonomyGraph
 taxonomyGraphFold :: forall cols.
     cols ~ FieldsOf TaxonomyNodesCols '["tax_id", "parent tax_id", "rank"]
     => L.Fold (Record cols) TaxonomyGraph
-taxonomyGraphFold df =
+taxonomyGraphFold =
     let ranksFold :: L.Fold (Record cols) (IntMap Text)
-        ranksFold = L.premap recRankAssoc $
-            L.Fold IntMap.insert mempty id
+        ranksFold = L.premap recRankAssoc L.intMap
 
         unodesFold :: L.Fold (Record cols) [FGL.UNode]
-        unodesFold = L.premap recUNodes $
-            L.Fold (foldl' IntMap.insert) mempty IntMap.toList
+        unodesFold = IntMap.toList <$> L.handles recUNodes L.intMap
 
         uedgesFold :: L.Fold (Record cols) [FGL.UEdge]
-        uedgesFold = L.premap recUEdge $
-            L.filtered (not . isLoop) $
-                L.Fold IntMap.insert mempty IntMap.toList
+        uedgesFold = L.premap recUEdge $ L.handles (L.filtered (not . isLoop)) L.list
 
         ugrFold :: L.Fold (Record cols) FGL.UGr
         ugrFold = liftA2 FGL.mkGraph unodesFold uedgesFold
@@ -190,7 +194,7 @@ taxonomyGraphFold df =
                 { taxonomyRanks = ranks
                 , taxonomyGr    = gr
                 , taxonomyRoot  =
-                    case FGL.match 1 g of
+                    case FGL.match 1 gr of
                         (Just ([], _, (), _:_), _) -> 1
                         _                          -> error "taxonomyGraphFold: root is not 1!"
                 })
@@ -205,8 +209,8 @@ taxonomyGraphFold df =
     recUEdge :: Record cols -> FGL.UEdge
     recUEdge (V.Field taxid V.:& V.Field ptaxid V.:& _) = (ptaxid, taxid, ())
 
-    recUNodes :: FGL.UEdge -> [FGL.UNode]
-    recUNodes (V.Field taxid V.:& V.Field ptaxid V.:& _) = [(ptaxid, ()), (taxid, ())]
+    recUNodes :: Fold (Record cols) FGL.UNode
+    recUNodes f (V.Field taxid V.:& V.Field ptaxid V.:& _) = phantom $ f (ptaxid, ()) *> f (taxid, ())
 
     recRankAssoc :: Record cols -> (Int, Text)
     recRankAssoc (V.Field taxid V.:& _ V.:& V.Field rank V.:& V.RNil) = (taxid, rank)
@@ -226,16 +230,7 @@ type TaxonomyNamesCols =
 
 
 taxonomyNamesPath :: Path Directory -> Path (DSV "|" TaxonomyNamesCols)
-taxonomyNamesPath downloaddir = extractedDmpPath downloadDir "names"
-
-
-loadTaxonomyScientificNames ::
-    Path Directory
-    -> IO (Either DSV.ParseError (FrameRec (FieldsOf TaxonomyNamesCols '["tax_id", "unique name"])))
-loadTaxonomyScientificNames =
-    loadTaxonomyNamesWith (S.filter isScientificName)
-  where
-    isScientificName row = F.get @"name class" row == Text.pack "scientific name"
+taxonomyNamesPath downloadDir = extractedDmpPath downloadDir "names"
 
 
 data TaxNameClass = TaxNameClass { uniqueNameInClass :: Text, taxNameClass :: Text }
@@ -245,26 +240,25 @@ data TaxNameClass = TaxNameClass { uniqueNameInClass :: Text, taxNameClass :: Te
 taxIdToNameMapFold :: forall a.
     L.Fold (Text, TaxNameClass) a
     -> L.Fold (Record TaxonomyNamesCols) (IntMap a)
-taxIdToNameMapFold (L.Fold g z p) = L.Fold f mempty id
+taxIdToNameMapFold (L.Fold g z (p :: x -> a)) = L.Fold (flip f) mempty (IntMap.map p)
   where
-    f :: Record TaxonomyNamesCols -> IntMap [a] -> IntMap [a]
+    f :: Record TaxonomyNamesCols -> IntMap x -> IntMap x
     f (V.Field taxid V.:& V.Field name V.:& V.Field uniqueName V.:& V.Field nameClass V.:& V.RNil) =
         flip IntMap.alter taxid \case
-            Nothing -> Just (p (g z (name, TaxNameClass uniqueName nameClass)))
-            Just a  -> Just (p (g a (name, TaxNameClass uniqueName nameClass)))
+            Nothing -> Just (g z (name, TaxNameClass uniqueName nameClass))
+            Just a  -> Just (g a (name, TaxNameClass uniqueName nameClass))
 
 
 nameToTaxIdMapFold :: forall a.
     L.Fold (Int, TaxNameClass) a
-    -> FrameRec TaxonomyNamesCols
-    -> HashMap Text [a]
-nameToTaxIdMapFold (L.Fold g z p) = foldr f mempty  -- foldr to preserve order with (:)
+    -> L.Fold (Record TaxonomyNamesCols) (HashMap Text a)
+nameToTaxIdMapFold (L.Fold g z (p :: x -> a)) = L.Fold (flip f) mempty (HashMap.map p)
   where
-    f :: Record TaxonomyNamesCols -> HashMap Text [a] -> HashMap Text [a]
+    f :: Record TaxonomyNamesCols -> HashMap Text x -> HashMap Text x
     f (V.Field taxid V.:& V.Field name V.:& V.Field uniqueName V.:& V.Field nameClass V.:& V.RNil) =
         flip HashMap.alter name \case
-            Nothing -> Just (p (g z (taxid, TaxNameClass uniqueName nameClass)))
-            Just a  -> Just (p (g a (taxid, TaxNameClass uniqueName nameClass)))
+            Nothing -> Just (g z (taxid, TaxNameClass uniqueName nameClass))
+            Just a  -> Just (g a (taxid, TaxNameClass uniqueName nameClass))
 
 
 type TaxonomyMergedIdsCols =
@@ -278,8 +272,9 @@ taxonomyMergedIdsPath downloadDir = extractedDmpPath downloadDir "merged"
 
 
 mergedIdsMapFold :: L.Fold (Record TaxonomyMergedIdsCols) (IntMap Int)
-mergedIdsMapFold df =
-    L.premap recAssoc $ L.Fold IntMap.insert mempty id
+mergedIdsMapFold =
+    L.premap recAssoc $
+        L.Fold (flip $ uncurry IntMap.insert) mempty id
   where
     recAssoc :: Record TaxonomyMergedIdsCols -> (Int, Int)
     recAssoc (V.Field old V.:& V.Field new V.:& _) = (old, new)
@@ -295,16 +290,20 @@ data Taxonomy f = Taxonomy
 
 newtype ListWithTaxNameClass a = ListWithTaxNameClass [(a, TaxNameClass)]
     deriving newtype (Eq, Ord, Show, Semigroup, Monoid)
+    deriving stock Functor
 
 
-instance Alternative ListWithTaxNameClass where
-    empty = ListWithTaxNameClass empty
+instance IsList (ListWithTaxNameClass a) where
+    type Item (ListWithTaxNameClass a) = (a, TaxNameClass)
+    fromList = ListWithTaxNameClass
+    toList (ListWithTaxNameClass xs) = xs
 
-    ListWithTaxNameClass l1 <|> ListWithTaxNameClass l2 = ListWithTaxNameClass (l1 <|> l2)
 
 
 onlyScientificNames :: L.Fold (a, TaxNameClass) r -> L.Fold (a, TaxNameClass) r
-onlyScientificNames = L.filtered \(_, TaxNameClass _ cls) -> cls == "scientific name"
+onlyScientificNames =
+    L.handles $
+        L.filtered \(_, TaxNameClass _ cls) -> cls == Text.pack "scientific name"
 
 
 listWithTaxNameClass :: L.Fold (a, TaxNameClass) (ListWithTaxNameClass a)
@@ -313,7 +312,6 @@ listWithTaxNameClass = ListWithTaxNameClass <$> L.list
 
 loadFullTaxonomy ::
     (forall a. L.Fold (a, TaxNameClass) (f a))
-    -> Bool
     -> Path Directory
     -> IO (Either DSV.ParseError (Taxonomy f))
 loadFullTaxonomy fold downloadDir = ResourceT.runResourceT $ runExceptT do
@@ -324,7 +322,7 @@ loadFullTaxonomy fold downloadDir = ResourceT.runResourceT $ runExceptT do
 
     (!taxid2name, !name2taxid) <- ExceptT $
         streamTaxonomyDmpFile (taxonomyNamesPath downloadDir)
-            & L.purely S.fold (liftA2 (,) taxIdToNameMapFold nameToTaxIdMapFold)
+            & L.purely S.fold (liftA2 (,) (taxIdToNameMapFold fold) (nameToTaxIdMapFold fold))
             & fmap S.wrapEitherOf
 
     !merged <- ExceptT $
@@ -342,7 +340,7 @@ loadFullTaxonomy fold downloadDir = ResourceT.runResourceT $ runExceptT do
 
 taxIdLineage :: Taxonomy f -> Int -> [Int]
 taxIdLineage taxdb taxid =
-    case FGL.rdfs [taxid] (taxonomyGr (taxonomyGraph taxdb)) of
+    case FGL.dfs [taxid] (taxonomyGr (taxonomyGraph taxdb)) of
         h:t | h == taxonomyRoot (taxonomyGraph taxdb) -> t
         l                                             -> l
 
@@ -351,15 +349,15 @@ taxIdRank :: Taxonomy f -> Int -> Maybe Text
 taxIdRank taxdb taxid = IntMap.lookup taxid (taxonomyRanks (taxonomyGraph taxdb))
 
 
-findTaxIdsForName :: Taxonomy ListWithTaxNameClass -> Bool -> Text -> [(Int, TaxNameClass)]
+findTaxIdsForName :: Taxonomy ListWithTaxNameClass -> Bool -> Text -> ListWithTaxNameClass Int
 findTaxIdsForName taxdb includeOld name
-    | includeOld = res
-    | otherwise  = [tup | tup@(taxid, _) <- res, not (IntMap.member taxid (taxonomyMergedIds taxdb))]
+    | includeOld = ListWithTaxNameClass res
+    | otherwise  = ListWithTaxNameClass [tup | tup@(taxid, _) <- res, not (IntMap.member taxid (taxonomyMergedIds taxdb))]
   where
     res :: [(Int, TaxNameClass)]
-    ListWithTaxNameClass res = fromMaybe empty $ HashMap.lookup name (taxonomyNameToTaxIdMap taxdb)
+    res = toList $ fromMaybe mempty $ HashMap.lookup name (taxonomyNameToTaxIdMap taxdb)
 
 
-findNamesForTaxId :: Alternative f => Taxonomy f -> Int -> f Text
+findNamesForTaxId :: Monoid (f Text) => Taxonomy f -> Int -> f Text
 findNamesForTaxId taxdb taxid =
-    fromMaybe empty (IntMap.lookup taxid (taxonomyTaxIdToNameMap taxdb))
+    fromMaybe mempty (IntMap.lookup taxid (taxonomyTaxIdToNameMap taxdb))
