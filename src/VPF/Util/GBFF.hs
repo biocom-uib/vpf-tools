@@ -2,7 +2,6 @@
 {-# language OverloadedStrings #-}
 {-# language PackageImports #-}
 {-# language TemplateHaskell #-}
-{-# language TupleSections #-}
 module VPF.Util.GBFF where
 
 import Control.Applicative

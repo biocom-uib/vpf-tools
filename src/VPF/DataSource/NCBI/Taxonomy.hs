@@ -188,21 +188,22 @@ taxonomyGraphFold =
 
         ugrFold :: L.Fold (Record cols) FGL.UGr
         ugrFold = liftA2 FGL.mkGraph unodesFold uedgesFold
+
+        toTaxonomyGraph :: IntMap Text -> FGL.UGr -> TaxonomyGraph
+        toTaxonomyGraph ranks gr = TaxonomyGraph
+            { taxonomyRanks = ranks
+            , taxonomyGr    = gr
+            , taxonomyRoot  = assertedRoot gr
+            }
     in
-        liftA2 (\ranks gr ->
-            TaxonomyGraph
-                { taxonomyRanks = ranks
-                , taxonomyGr    = gr
-                , taxonomyRoot  =
-                    case FGL.match 1 gr of
-                        (Just ([], _, (), _:_), _) -> 1
-                        _                          -> error "taxonomyGraphFold: root is not 1!"
-                })
-            ranksFold
-            ugrFold
-
-
+        liftA2 toTaxonomyGraph ranksFold ugrFold
   where
+    assertedRoot :: FGL.UGr -> FGL.Node
+    assertedRoot gr =
+        case FGL.match 1 gr of
+            (Just ([], _, (), _:_), _) -> 1
+            _                          -> error "taxonomyGraphFold: root is not 1!"
+
     isLoop :: FGL.UEdge -> Bool
     isLoop (u, v, _) = u == v
 
@@ -233,32 +234,27 @@ taxonomyNamesPath :: Path Directory -> Path (DSV "|" TaxonomyNamesCols)
 taxonomyNamesPath downloadDir = extractedDmpPath downloadDir "names"
 
 
-data TaxNameClass = TaxNameClass { uniqueNameInClass :: Text, taxNameClass :: Text }
+data TaxNameClass = TaxNameClass
+    { uniqueNameInClass :: {-# unpack #-} Text
+    , taxNameClass      :: {-# unpack #-} Text
+    }
     deriving (Eq, Ord, Show)
 
 
-taxIdToNameMapFold :: forall a.
-    L.Fold (Text, TaxNameClass) a
-    -> L.Fold (Record TaxonomyNamesCols) (IntMap a)
-taxIdToNameMapFold (L.Fold g z (p :: x -> a)) = L.Fold (flip f) mempty (IntMap.map p)
+taxIdToNameMapFold :: L.Fold (Text, TaxNameClass) a -> L.Fold (Record TaxonomyNamesCols) (IntMap a)
+taxIdToNameMapFold = L.premap recAssoc . L.foldByKeyIntMap
   where
-    f :: Record TaxonomyNamesCols -> IntMap x -> IntMap x
-    f (V.Field taxid V.:& V.Field name V.:& V.Field uniqueName V.:& V.Field nameClass V.:& V.RNil) =
-        flip IntMap.alter taxid \case
-            Nothing -> Just (g z (name, TaxNameClass uniqueName nameClass))
-            Just a  -> Just (g a (name, TaxNameClass uniqueName nameClass))
+    recAssoc :: Record TaxonomyNamesCols -> (Int, (Text, TaxNameClass))
+    recAssoc (V.Field taxid V.:& V.Field name V.:& V.Field uniqueName V.:& V.Field nameClass V.:& V.RNil) =
+        (taxid, (name, ) $! TaxNameClass uniqueName nameClass)
 
 
-nameToTaxIdMapFold :: forall a.
-    L.Fold (Int, TaxNameClass) a
-    -> L.Fold (Record TaxonomyNamesCols) (HashMap Text a)
-nameToTaxIdMapFold (L.Fold g z (p :: x -> a)) = L.Fold (flip f) mempty (HashMap.map p)
+nameToTaxIdMapFold :: L.Fold (Int, TaxNameClass) a -> L.Fold (Record TaxonomyNamesCols) (HashMap Text a)
+nameToTaxIdMapFold = L.premap recAssoc . L.foldByKeyHashMap
   where
-    f :: Record TaxonomyNamesCols -> HashMap Text x -> HashMap Text x
-    f (V.Field taxid V.:& V.Field name V.:& V.Field uniqueName V.:& V.Field nameClass V.:& V.RNil) =
-        flip HashMap.alter name \case
-            Nothing -> Just (g z (taxid, TaxNameClass uniqueName nameClass))
-            Just a  -> Just (g a (taxid, TaxNameClass uniqueName nameClass))
+    recAssoc :: Record TaxonomyNamesCols -> (Text, (Int, TaxNameClass))
+    recAssoc (V.Field taxid V.:& V.Field name V.:& V.Field uniqueName V.:& V.Field nameClass V.:& V.RNil) =
+        (name, (taxid, ) $! TaxNameClass uniqueName nameClass)
 
 
 type TaxonomyMergedIdsCols =
@@ -272,9 +268,7 @@ taxonomyMergedIdsPath downloadDir = extractedDmpPath downloadDir "merged"
 
 
 mergedIdsMapFold :: L.Fold (Record TaxonomyMergedIdsCols) (IntMap Int)
-mergedIdsMapFold =
-    L.premap recAssoc $
-        L.Fold (flip $ uncurry IntMap.insert) mempty id
+mergedIdsMapFold = L.premap recAssoc L.intMap
   where
     recAssoc :: Record TaxonomyMergedIdsCols -> (Int, Int)
     recAssoc (V.Field old V.:& V.Field new V.:& _) = (old, new)
@@ -297,7 +291,6 @@ instance IsList (ListWithTaxNameClass a) where
     type Item (ListWithTaxNameClass a) = (a, TaxNameClass)
     fromList = ListWithTaxNameClass
     toList (ListWithTaxNameClass xs) = xs
-
 
 
 onlyScientificNames :: L.Fold (a, TaxNameClass) r -> L.Fold (a, TaxNameClass) r

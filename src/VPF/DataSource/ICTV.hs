@@ -3,7 +3,6 @@
 {-# language QuasiQuotes #-}
 {-# language RecordWildCards #-}
 {-# language Strict #-}
-{-# language TupleSections #-}
 module VPF.DataSource.ICTV where
 
 import Prelude hiding (last)

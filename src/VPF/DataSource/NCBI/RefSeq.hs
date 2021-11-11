@@ -1,5 +1,4 @@
 {-# language GeneralizedNewtypeDeriving #-}
-{-# language TupleSections #-}
 {-# language ViewPatterns #-}
 module VPF.DataSource.NCBI.RefSeq where
 
