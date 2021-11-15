@@ -32,12 +32,12 @@ dependencies:
 - directory
 - exceptions
 - feed
-- fgl
 - filepath
 - foldl
 - ftp-client
 - ftp-client-conduit
 - fused-effects
+- haggle
 - hashable
 - kan-extensions
 - lens
@@ -76,6 +76,7 @@ dependencies:
 - unordered-containers
 - vector
 - vector-algorithms
+- vector-th-unbox
 - vinyl
 - xlsx
 - yaml

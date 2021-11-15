@@ -5,7 +5,29 @@
 {-# language TemplateHaskell #-}
 {-# language UndecidableInstances #-}
 {-# language ViewPatterns #-}
-module VPF.DataSource.NCBI.Taxonomy where
+module VPF.DataSource.NCBI.Taxonomy
+  ( TaxonomySourceConfig
+  , syncTaxonomy
+  , loadTaxonomyDmpFileWith
+  , streamTaxonomyDmpFile
+  , TaxonomyNodesCols
+  , taxonomyNodesPath
+  , TaxonomyNamesCols
+  , taxonomyNamesPath
+  , TaxonomyMergedIdsCols
+  , taxonomyMergedIdsPath
+  , Taxonomy(..)
+  , TaxNameClass(..)
+  , ListWithTaxNameClass
+  , onlyScientificNames
+  , listWithTaxNameClass
+  , loadFullTaxonomy
+  , taxIdVertex
+  , taxIdLineage
+  , taxIdRank
+  , findTaxIdsForName
+  , findNamesForTaxId
+  ) where
 
 import Codec.Archive.Tar qualified as Tar
 import Codec.Compression.GZip qualified as GZ
@@ -22,7 +44,8 @@ import Control.Monad.Trans.Resource qualified as ResourceT
 import Data.ByteString.Lazy qualified as LBS
 import Data.Function ((&))
 import Data.Functor.Contravariant (phantom)
-import Data.Graph.Inductive qualified as FGL
+import Data.Graph.Haggle qualified as G
+import Data.Graph.Haggle.Algorithms.DFS qualified as G
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HashMap
 import Data.IntMap.Strict (IntMap)
@@ -31,6 +54,8 @@ import Data.Maybe (fromMaybe)
 import Data.Semigroup (Any (getAny))
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Vector.Unboxed qualified as VU
+import Data.Vector.Unboxed.Deriving qualified as VU (derivingUnbox)
 import Data.Vinyl qualified as V
 
 import Frames (Rec, FrameRec, ColumnHeaders, Record)
@@ -46,6 +71,8 @@ import System.Directory qualified as Dir
 import System.FilePath ((</>))
 import System.IO qualified as IO
 
+import Unsafe.Coerce (unsafeCoerce)
+
 import VPF.DataSource.GenericFTP
 import VPF.DataSource.NCBI
 import VPF.Formats
@@ -54,6 +81,12 @@ import VPF.Frames.Types (FieldSubset, FieldsOf)
 import VPF.Util.Foldl qualified as L
 import VPF.Util.FS qualified as FS
 import VPF.Util.Streaming qualified as S
+
+
+$(VU.derivingUnbox "Vertex"
+    [t| G.Vertex -> Int |]
+    [| unsafeCoerce |]
+    [| unsafeCoerce |])
 
 
 taxonomySourceConfig :: FtpSourceConfig
@@ -167,27 +200,47 @@ taxonomyNodesPath downloadDir = extractedDmpPath downloadDir "nodes"
 
 
 data TaxonomyGraph = TaxonomyGraph
-    { taxonomyRanks :: IntMap Text
-    , taxonomyGr    :: FGL.UGr
-    , taxonomyRoot  :: ~FGL.Node
     }
 
 
-taxonomyGraphFold :: forall cols.
+ranksMapFold :: forall cols.
     cols ~ FieldsOf TaxonomyNodesCols '["tax_id", "parent tax_id", "rank"]
-    => L.Fold (Record cols) TaxonomyGraph
-taxonomyGraphFold =
-    let ranksFold :: L.Fold (Record cols) (IntMap Text)
-        ranksFold = L.premap recRankAssoc L.intMap
+    => L.Fold (Record cols) (IntMap Text)
+ranksMapFold = L.premap recAssoc L.intMap
+  where
+    recRankAssoc :: Record cols -> (Int, Text)
+    recRankAssoc (V.Field taxid V.:& _ V.:& V.Field rank V.:& V.RNil) = (taxid, rank)
 
-        unodesFold :: L.Fold (Record cols) [FGL.UNode]
-        unodesFold = IntMap.toList <$> L.handles recUNodes L.intMap
 
-        uedgesFold :: L.Fold (Record cols) [FGL.UEdge]
-        uedgesFold = L.premap recUEdge $ L.handles (L.filtered (not . isLoop)) L.list
+data TaxonomyMGraph m = TaxonomyMGraph
+    (IntMap G.Vertex)
+    (G.VertexLabeledMGraph (G.MSimpleBiDigraph m) Int m)
 
-        ugrFold :: L.Fold (Record cols) FGL.UGr
-        ugrFold = liftA2 FGL.mkGraph unodesFold uedgesFold
+
+data TaxonomyGraph = TaxonomyGraph
+    (IntMap G.Vertex)
+    (G.VertexLabeledGraph G.SimpleBiDigraph Int
+
+
+graphFold :: forall cols s.
+    cols ~ FieldsOf TaxonomyNodesCols '["tax_id", "parent tax_id", "rank"]
+    => L.FoldM (ST s) (Record cols) TaxonomyGraph
+graphFold =
+    L.FoldM (G.newVertexLabeledGraph G.newSimpleBiDigraph) addEdge return
+  where
+    addEdge ::
+        TaxonomyMGraph (ST s)
+        -> Record cols
+        -> ST s (TaxonomyMGraph (ST s))
+    addEdge (TaxonomyMGraph vm g) rec = do
+        let (src, dst) = recEdge rec
+
+        srcv <- G.addLabeledVertex g src
+        dstv <- case IntMap.lookup dst vm of
+            Just v -> return v
+            Nothing -> G.addLabeledVertex g dst
+
+        G.addEdge srcv
 
         toTaxonomyGraph :: IntMap Text -> FGL.UGr -> TaxonomyGraph
         toTaxonomyGraph ranks gr = TaxonomyGraph
@@ -198,28 +251,22 @@ taxonomyGraphFold =
     in
         liftA2 toTaxonomyGraph ranksFold ugrFold
   where
-    assertedRoot :: FGL.UGr -> FGL.Node
-    assertedRoot gr =
-        case FGL.match 1 gr of
-            (Just ([], _, (), _:_), _) -> 1
-            _                          -> error "taxonomyGraphFold: root is not 1!"
+    isLoop
+    isLoop :: (Int, Int) -> Bool
+    isLoop (u, v) = u == v
 
-    isLoop :: FGL.UEdge -> Bool
-    isLoop (u, v, _) = u == v
-
-    recUEdge :: Record cols -> FGL.UEdge
-    recUEdge (V.Field taxid V.:& V.Field ptaxid V.:& _) = (ptaxid, taxid, ())
-
-    recUNodes :: Fold (Record cols) FGL.UNode
-    recUNodes f (V.Field taxid V.:& V.Field ptaxid V.:& _) = phantom $ f (ptaxid, ()) *> f (taxid, ())
-
-    recRankAssoc :: Record cols -> (Int, Text)
-    recRankAssoc (V.Field taxid V.:& _ V.:& V.Field rank V.:& V.RNil) = (taxid, rank)
+    recEdge :: Record cols -> (Int, Int)
+    recEdge (V.Field taxid V.:& V.Field ptaxid V.:& _) = (ptaxid, taxid)
 
 
-checkTaxonomyTree :: TaxonomyGraph -> Bool
-checkTaxonomyTree (TaxonomyGraph _ g _) =
-    FGL.isConnected g && FGL.noNodes g == length (FGL.labEdges g) + 1
+findLabeledRoot ::
+    G.VertexLabeledGraph G.SimpleBiDigraph Int
+    -> VU.Vector G.Vertex
+    -> Maybe (Int, G.Vertex)
+findLabeledRoot g vs =
+    case FGL.match 1 gr of
+        (Just ([], _, (), _:_), _) -> Just undefined
+        _                          -> Nothing
 
 
 type TaxonomyNamesCols =
@@ -267,15 +314,33 @@ taxonomyMergedIdsPath :: Path Directory -> Path (DSV "|" TaxonomyMergedIdsCols)
 taxonomyMergedIdsPath downloadDir = extractedDmpPath downloadDir "merged"
 
 
+mergedIdsToVertexMapFold ::
+    IntMap G.Vertex
+    -> L.Fold (Record TaxonomyMergedIdsCols) (IntMap G.Vertex)
+mergedIdsToVertexMapFold init = L.Fold step init id
+  where
+    step :: IntMap G.Vertex -> Record (Int, Int) -> IntMap G.Vertex
+    step m (V.Field old V.:& V.Field new V.:& V.RNil) =
+        case IntMap.lookup new m of
+            Nothing -> m
+            Just v  -> IntMap.insert old v m
+
+
 mergedIdsMapFold :: L.Fold (Record TaxonomyMergedIdsCols) (IntMap Int)
 mergedIdsMapFold = L.premap recAssoc L.intMap
   where
     recAssoc :: Record TaxonomyMergedIdsCols -> (Int, Int)
-    recAssoc (V.Field old V.:& V.Field new V.:& _) = (old, new)
+    recAssoc (V.Field old V.:& V.Field new V.:& V.RNil) = (old, new)
 
+
+
+-- In-memory Taxonomy DB
 
 data Taxonomy f = Taxonomy
-    { taxonomyGraph          :: TaxonomyGraph
+    { taxonomyGraph          :: G.VertexLabeledMGraph G.MSimpleBiDigraph Int
+    , taxonomyTaxidToVertex  :: IntMap G.Vertex
+    , taxonomyRoot           :: (Int, G.Vertex)
+    , taxonomyRanks          :: IntMap Text
     , taxonomyTaxIdToNameMap :: IntMap (f Text)
     , taxonomyNameToTaxIdMap :: HashMap Text (f Int)
     , taxonomyMergedIds      :: IntMap Int
@@ -295,8 +360,7 @@ instance IsList (ListWithTaxNameClass a) where
 
 onlyScientificNames :: L.Fold (a, TaxNameClass) r -> L.Fold (a, TaxNameClass) r
 onlyScientificNames =
-    L.handles $
-        L.filtered \(_, TaxNameClass _ cls) -> cls == Text.pack "scientific name"
+    L.prefilter \(_, TaxNameClass _ cls) -> cls == Text.pack "scientific name"
 
 
 listWithTaxNameClass :: L.Fold (a, TaxNameClass) (ListWithTaxNameClass a)
@@ -310,7 +374,7 @@ loadFullTaxonomy ::
 loadFullTaxonomy fold downloadDir = ResourceT.runResourceT $ runExceptT do
     !graph <- ExceptT $
         streamTaxonomyDmpFile (taxonomyNodesPath downloadDir)
-            & L.purely S.fold taxonomyGraphFold
+            & L.purely S.fold graphFold
             & fmap S.wrapEitherOf
 
     (!taxid2name, !name2taxid) <- ExceptT $
@@ -331,15 +395,39 @@ loadFullTaxonomy fold downloadDir = ResourceT.runResourceT $ runExceptT do
         }
 
 
+-- Taxonomy Queries
+
+checkTaxonomyTree :: Taxonomy f -> Bool
+checkTaxonomyTree taxdb =
+    G.isConnected g && G.numNodes g == G.numEdges g + 1
+  where
+    g = taxonomyGraph taxdb
+
+
+taxIdVertex :: Taxonomy f -> Maybe G.Vertex
+taxidVertex taxdb taxid =
+    IntMap.lookup taxid (taxonomyTaxidToVertexMap tg)
+
+
 taxIdLineage :: Taxonomy f -> Int -> [Int]
 taxIdLineage taxdb taxid =
-    case FGL.dfs [taxid] (taxonomyGr (taxonomyGraph taxdb)) of
-        h:t | h == taxonomyRoot (taxonomyGraph taxdb) -> t
-        l                                             -> l
+    case G.dfs [taxid] g of
+        h:t | h == root -> t
+        l               -> l
+  where
+    g = taxonomyGr (taxonomyGraph taxdb)
+    root = taxonomyRoot (taxonomyGraph taxdb)
 
 
 taxIdRank :: Taxonomy f -> Int -> Maybe Text
-taxIdRank taxdb taxid = IntMap.lookup taxid (taxonomyRanks (taxonomyGraph taxdb))
+taxIdRank taxdb taxid =
+    case IntMap.lookup taxid ranks of
+        Nothing
+            | Just newTaxid <- IntMap.lookup taxid (taxonomyMergedIds taxdb)
+            -> IntMap.lookup newTaxid ranks
+        r -> r
+  where
+    ranks = taxonomyRanks (taxonomyGraph taxdb)
 
 
 findTaxIdsForName :: Taxonomy ListWithTaxNameClass -> Bool -> Text -> ListWithTaxNameClass Int
