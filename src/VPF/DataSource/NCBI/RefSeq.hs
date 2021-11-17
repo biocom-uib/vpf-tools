@@ -1,8 +1,21 @@
 {-# language GeneralizedNewtypeDeriving #-}
 {-# language ViewPatterns #-}
-module VPF.DataSource.NCBI.RefSeq where
+module VPF.DataSource.NCBI.RefSeq
+    ( RefSeqDownloadList(..)
+    , refSeqFtpSourceConfig
+    , refSeqViralGenomicList
+    , refSeqViralProteinsList
+    , matchRefSeqCatalog
+    , seqFileMatchesCfg
+    , buildDownloadList
+    , syncRefSeq
+    , CatalogCols
+    , loadRefSeqCatalog
+    , listRefSeqSeqFiles
+    ) where
 
-import Control.Monad (forM)
+import Control.Monad (when, forM_)
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Except (runExceptT, throwE, ExceptT(ExceptT))
 
@@ -13,7 +26,6 @@ import Data.Coerce (coerce)
 import Data.Function ((&))
 import Data.Maybe (isJust)
 import Data.List (isInfixOf, union, sort)
-import Data.Semigroup (Any)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Vinyl (rcast)
@@ -36,36 +48,36 @@ import System.IO qualified as IO
 import Text.Regex.PCRE qualified as PCRE
 
 import VPF.DataSource.GenericFTP
+import VPF.DataSource.NCBI (ncbiSourceConfig)
 import VPF.Frames.Dplyr qualified as F
 import VPF.Frames.DSV qualified as DSV
 import VPF.Frames.Types (FieldSubset)
 import VPF.Formats
 import VPF.Util.FS qualified as FS
-import VPF.DataSource.NCBI (ncbiSourceConfig)
 
 
 data RefSeqDownloadList = RefSeqDownloadList
-    { refSeqDirectories :: [String]
-    , refSeqSeqFormats  :: [ByteString]
+    { refSeqIncludeCatalog :: Bool
+    , refSeqDirectories    :: [String]
+    , refSeqSeqFormats     :: [ByteString]
     }
 
 
 instance Semigroup RefSeqDownloadList where
-    RefSeqDownloadList dirs1 formats1 <> RefSeqDownloadList dirs2 formats2 =
-        RefSeqDownloadList (union dirs1 dirs2) (union formats1 formats2)
+    RefSeqDownloadList c1 dirs1 formats1 <> RefSeqDownloadList c2 dirs2 formats2 =
+        RefSeqDownloadList (c1 || c2) (union dirs1 dirs2) (union formats1 formats2)
 
 
 refSeqFtpSourceConfig :: RefSeqDownloadList -> FtpSourceConfig
-refSeqFtpSourceConfig cfg =
-    (ncbiSourceConfig (refSeqDownloadList cfg)) { ftpBasePath = "/refseq/release" }
+refSeqFtpSourceConfig cfg = ncbiSourceConfig (buildDownloadList cfg)
 
 
 refSeqViralGenomicList :: RefSeqDownloadList
-refSeqViralGenomicList = RefSeqDownloadList ["viral"] [BS8.pack "genomic.gbff"]
+refSeqViralGenomicList = RefSeqDownloadList False ["viral"] [BS8.pack "genomic.gbff"]
 
 
 refSeqViralProteinsList :: RefSeqDownloadList
-refSeqViralProteinsList = RefSeqDownloadList ["viral"] [BS8.pack "protein.gpff"]
+refSeqViralProteinsList = RefSeqDownloadList False ["viral"] [BS8.pack "protein.gpff"]
 
 
 refSeqFileRegex :: PCRE.Regex
@@ -81,6 +93,11 @@ refSeqCatalogRegex =
     PCRE.makeRegex "RefSeq-release([0-9]+)\\.catalog\\.gz"
 
 
+refSeqFilesInstalledRegex :: PCRE.Regex
+refSeqFilesInstalledRegex =
+    PCRE.makeRegex "release([0-9]+)\\.files.installed"
+
+
 -- returns version number (if matched)
 matchRefSeqCatalog :: PCRE.RegexLike PCRE.Regex source => source -> Maybe source
 matchRefSeqCatalog filename = do
@@ -91,9 +108,19 @@ matchRefSeqCatalog filename = do
         _            -> Nothing
 
 
+-- returns version number (if matched)
+matchRefSeqFilesInstalled :: PCRE.RegexLike PCRE.Regex source => source -> Maybe source
+matchRefSeqFilesInstalled filename = do
+    mr <- PCRE.matchM refSeqFilesInstalledRegex filename
+
+    case PCRE.mrSubList mr of
+        [releaseNum] -> Just releaseNum
+        _            -> Nothing
+
+
 -- expecting base name
-fileMatchesCfg :: RefSeqDownloadList -> ByteString -> Bool
-fileMatchesCfg cfg filename =
+seqFileMatchesCfg :: RefSeqDownloadList -> ByteString -> Bool
+seqFileMatchesCfg cfg filename =
     case PCRE.matchM refSeqFileRegex filename of
         Just mr | [_dir, _increment, format, compression] <- PCRE.mrSubList mr ->
             and [format `elem` refSeqSeqFormats cfg, compression == BS8.pack "gz"]
@@ -101,35 +128,48 @@ fileMatchesCfg cfg filename =
         _ -> False
 
 
-refSeqDownloadList :: RefSeqDownloadList -> DownloadList
-refSeqDownloadList cfg = DownloadList \h -> runExceptT do
-    catalogDirList <- map (BS8.pack . FTP.mrFilename) <$> FTP.mlsd h "release-catalog"
+buildDownloadList :: RefSeqDownloadList -> DownloadList
+buildDownloadList cfg = DownloadList \h -> runExceptT $ S.toList_ do
+    S.yield (FtpRelPath (basePath Posix.</> "RELEASE_NUMBER"), NoChecksum)
 
-    let catalogs = filter (isJust . matchRefSeqCatalog) catalogDirList
+    catalogDirList <- liftIO $ mlsd h (basePath Posix.</> "release-catalog")
 
-    catalogPath <-
-        case catalogs of
+    when (refSeqIncludeCatalog cfg) do
+        case filter (isJust . matchRefSeqCatalog) catalogDirList of
+            [] -> lift $ throwE "no catalogs found"
+
             [catalog] ->
-                return $ FtpRelPath ("release-catalog" Posix.</> BS8.unpack catalog)
+                S.yield (FtpRelPath (basePath Posix.</> "release-catalog" Posix.</> BS8.unpack catalog), NoChecksum)
 
-            [] -> throwE "no catalogs found"
-            _  -> throwE ("multiple catalogs found: " ++ show catalogs)
+            catalogs  -> lift $ throwE ("multiple catalogs found: " ++ show catalogs)
+
+    crcs <-
+        case filter (isJust . matchRefSeqFilesInstalled) catalogDirList of
+            [filesInstalled] -> liftIO $
+                parseChecksums CRC <$>
+                    FTP.retr h (basePath Posix.</> "release-catalog" Posix.</> BS8.unpack filesInstalled)
+
+            _ -> mempty
+
+    forM_ (refSeqDirectories cfg) \dir -> do
+        let absDir = basePath Posix.</> dir
+
+        files <- liftIO $ mlsd h absDir
+
+        case filter (seqFileMatchesCfg cfg) files of
+            [] ->
+                lift $ throwE ("no files matched in directory " ++ show dir)
+            matches -> do
+                forM_ matches \match ->
+                    S.yield (FtpRelPath (absDir Posix.</> BS8.unpack match), findChecksumFor match crcs)
+  where
+    basePath = "refseq/release"
+
+    mlsd :: FTP.Handle -> String -> IO [ByteString]
+    mlsd h dir = map (BS8.pack . FTP.mrFilename) <$> FTP.mlsd h (basePath Posix.</> dir)
 
 
-    fileList <- fmap concat $
-        forM (refSeqDirectories cfg) \dir -> do
-            files <- lift $ map (BS8.pack . FTP.mrFilename) <$> FTP.mlsd h dir
-
-            let toRelPath file = FtpRelPath (dir Posix.</> BS8.unpack file)
-
-            case [toRelPath file | file <- files, fileMatchesCfg cfg file] of
-                []       -> throwE ("no files matched in directory " ++ show dir)
-                matches  -> return matches
-
-    return (catalogPath : fileList)
-
-
-syncRefSeq :: RefSeqDownloadList -> LogAction String -> Path Directory -> IO (Either String Any)
+syncRefSeq :: RefSeqDownloadList -> LogAction String -> Path Directory -> IO (Either String [ChangelogEntry])
 syncRefSeq = syncGenericFTP . refSeqFtpSourceConfig
 
 
@@ -163,12 +203,12 @@ loadRefSeqCatalog cfg (untag -> downloadDir) = do
         BSS.fromHandle h
             & SZ.gunzip
             & FS.toTextLines
-            & DSV.parseEitherRows
+            & DSV.parsedRowStream
                 (DSV.defParserOptions '\t') { DSV.hasHeader = False }
                 catalogPath
-            & S.filter (either (const True) checkReleaseDir)
-            & S.map (fmap rcast)
-            & DSV.fromEitherRowStreamAoS
+            & S.filter checkReleaseDir
+            & S.map rcast
+            & DSV.fromParsedRowStreamSoA
   where
     cfgReleaseDirsText :: [Text]
     cfgReleaseDirsText = map Text.pack (refSeqDirectories cfg)
@@ -186,9 +226,9 @@ listRefSeqSeqFiles ::
 listRefSeqSeqFiles cfg downloadDir = runExceptT do
     files <- ExceptT $ listDownloadedFiles downloadDir
 
-    return $ coerce $ filter fileMatch (sort files)
+    return $ coerce $ filter (filenameMatch . takeFileName) (sort files)
   where
-    fileMatch :: String -> Bool
-    fileMatch fp =
-        (isInfixOf ".gbff." fp || isInfixOf ".gpff." fp)
-            && fileMatchesCfg cfg (BS8.pack (takeFileName fp))
+    filenameMatch :: String -> Bool
+    filenameMatch fname =
+        (isInfixOf ".gbff." fname || isInfixOf ".gpff." fname)
+            && seqFileMatchesCfg cfg (BS8.pack fname)

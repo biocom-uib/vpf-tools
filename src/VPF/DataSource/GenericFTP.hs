@@ -1,7 +1,9 @@
+{-# language DeriveAnyClass #-}
+{-# language DeriveGeneric #-}
 {-# language GeneralizedNewtypeDeriving #-}
 {-# language Strict #-}
 {-# language TemplateHaskell #-}
-{-# LANGUAGE ViewPatterns #-}
+{-# language ViewPatterns #-}
 module VPF.DataSource.GenericFTP where
 
 import GHC.Exts (IsString)
@@ -10,21 +12,25 @@ import Conduit
 
 import Control.Applicative (liftA2)
 import Control.Exception qualified as Exception
+import Control.Foldl qualified as L
 import Control.Lens (iforM_)
 import Control.Monad.Trans.Except (ExceptT(ExceptT), runExceptT, withExceptT)
 import Control.Monad.Trans.Writer.Strict (execWriterT, tell)
 
+import Data.ByteString (ByteString)
+import Data.ByteString.Char8 qualified as BS8
 import Data.Foldable
-import Data.List (union)
+import Data.List (unionBy)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
-import Data.Monoid (Any(..))
+import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.These
 import Data.Text qualified as Text
-
 import Data.Yaml.Aeson qualified as Y
+
+import GHC.Generics (Generic)
 
 import Language.Haskell.TH
 
@@ -39,6 +45,7 @@ import Text.URI qualified as URI
 import Text.Read (readMaybe)
 
 import VPF.Formats
+import VPF.Util.Hash (Checksum(..), checksumToFoldM)
 
 
 newtype FtpRelPath = FtpRelPath { ftpRelPath :: FilePath }
@@ -49,13 +56,16 @@ toLocalRelPath :: FtpRelPath -> FilePath
 toLocalRelPath = joinPath . Posix.splitDirectories . ftpRelPath
 
 
+
 newtype DownloadList = DownloadList
-    { runFtpDownloadList :: FTP.Handle -> IO (Either String [FtpRelPath])
+    { runFtpDownloadList :: FTP.Handle -> IO (Either String [(FtpRelPath, Checksum)])
     }
 
 instance Semigroup DownloadList where
     DownloadList dl1 <> DownloadList dl2 =
         DownloadList (liftA2 (liftA2 (liftA2 union)) dl1 dl2)
+      where
+          union = unionBy (\(f1, _) (f2, _) -> f1 == f2)
 
 
 data FtpSourceConfig = FtpSourceConfig
@@ -109,10 +119,12 @@ ftpSourceConfigFromURI uri = do
     [|| FtpSourceConfig secure host port login basePath ||]
 
 
-newtype FtpFileInfo = FtpFileInfo
-    { getFtpFileInfo :: Map String String
+data FtpFileInfo = FtpFileInfo
+    { ftpFileFacts    :: Map String String
+    , ftpFileChecksum :: Checksum
     }
-    deriving (Show, Y.FromJSON, Y.ToJSON)
+    deriving stock (Generic, Show)
+    deriving anyclass (Y.FromJSON, Y.ToJSON)
 
 
 newtype FtpFileInfos = FtpFileInfos
@@ -145,18 +157,34 @@ retrieveMetadata cfg h = runExceptT do
         ExceptT $ runFtpDownloadList (ftpDownloadList cfg) h
 
     infos <- lift $ sourceToList $
-        forM_ paths \path -> do
-            resp <- liftIO $ FTP.mlst h (ftpRelPath path)
-            yield (path, FtpFileInfo (FTP.mrFacts resp))
+        forM_ paths \(path, checksum) -> do
+            info <- liftIO $ FTP.mrFacts <$> FTP.mlst h (ftpRelPath path)
+
+            yield (path, FtpFileInfo info checksum)
 
     return (FtpFileInfos (Map.fromList infos))
 
 
-streamRetrToFile :: FTP.Handle -> FilePath -> FilePath -> IO ()
-streamRetrToFile h remotePath downloadPath = do
-    runResourceT . runConduit $
-        FTPConduit.retr h remotePath
-            .| sinkFileCautious downloadPath
+streamRetrToFileAndFoldM :: FTP.Handle -> L.FoldM IO ByteString a -> FilePath -> FilePath -> IO a
+streamRetrToFileAndFoldM h (L.FoldM step init end) remotePath downloadPath = do
+    z <- init
+    x <- Conduit.withSinkFileCautious downloadPath \sink ->
+        Conduit.runConduit $
+            FTPConduit.retr h remotePath
+                Conduit..| Conduit.passthroughSink sink return
+                Conduit..| Conduit.foldMC step z
+    end x
+
+
+data ChecksumError =
+
+
+streamRetrToFileAndCheck :: FTP.Handle -> Checksum -> FilePath -> FilePath -> IO ()
+streamRetrToFileAndCheck h cksum remotePath downloadPath = do
+    check <- streamRetrToFileAndFoldM h (checksumToFoldM cksum) remotePath downloadPath
+    when (not check) $
+        Exception.throwIO (
+
 
 
 readMetadata :: FilePath -> IO (Either Y.ParseException FtpFileInfos)
@@ -176,7 +204,33 @@ listDownloadedFiles (Tagged downloadDir) = runExceptT do
 
 type LogAction a = a -> IO ()
 
-syncGenericFTP :: FtpSourceConfig -> LogAction String -> Path Directory -> IO (Either String Any)
+data ChangelogEntry = Deleted FilePath | Updated FilePath | Added FilePath
+
+changelogEntryPath :: ChangelogEntry -> FilePath
+changelogEntryPath = \case
+    Deleted fp -> fp
+    Updated fp -> fp
+    Added fp   -> fp
+
+
+parseChecksums :: (ByteString -> Checksum) -> ByteString -> Map ByteString Checksum
+parseChecksums con contents =
+    Map.fromList $
+        [(name, con checksum) | [checksum, name] <- map BS8.words (BS8.lines contents)]
+
+
+parseChecksumsFor :: ByteString -> (ByteString -> Checksum) -> ByteString -> Checksum
+parseChecksumsFor name con contents =
+    case [checksum | [checksum, name'] <- map BS8.words (BS8.lines contents), name' == name] of
+        [s] -> con s
+        _   -> NoChecksum
+
+
+findChecksumFor :: ByteString -> Map ByteString Checksum -> Checksum
+findChecksumFor name = fromMaybe NoChecksum . Map.lookup name
+
+
+syncGenericFTP :: FtpSourceConfig -> LogAction String -> Path Directory -> IO (Either String [ChangelogEntry])
 syncGenericFTP cfg log (Tagged downloadDir) =
     withFTP \h _welcome -> runExceptT do
         lift do
@@ -216,7 +270,7 @@ syncGenericFTP cfg log (Tagged downloadDir) =
                 (getFtpFileInfos oldMetadata)
                 (getFtpFileInfos newMetadata)
 
-        (dirty, excs) <- lift . execWriterT $
+        (changes, excs) <- lift . execWriterT $
             iforM_ changes \relPath change -> do
                 let remotePath = ftpRelPath relPath
                     localPath = downloadDir </> toLocalRelPath relPath
@@ -226,41 +280,44 @@ syncGenericFTP cfg log (Tagged downloadDir) =
                         liftIO do
                             log $ "Deleting file " ++ localPath
                             Dir.removeFile localPath
-                        tell (Any True, [])
+                        tell ([Deleted localPath], [])
 
-                    That _new -> do
+                    That new -> do
                         result <- liftIO do
                             log $ "Retrieving file " ++ remotePath
                             Dir.createDirectoryIfMissing True (takeDirectory localPath)
 
-                            Exception.try @Exception.IOException $
-                                streamRetrToFile h remotePath localPath
+                            Exception.try @Exception.IOException do
+                                streamRetrToFileAndCheck h (ftpFileChecksum new) remotePath localPath
 
                         case result of
-                            Left e   -> tell (Any True, [(relPath, e)])
-                            Right () -> tell (Any True, [])
+                            Right () -> tell ([Added localPath], [])
+                            Left e   -> tell ([Added localPath], [(relPath, e)])
 
-                    These (FtpFileInfo old) (FtpFileInfo new)
-                        | Just oldMod <- readMaybe @Int =<< Map.lookup "modify" old
-                        , Just newMod <- readMaybe @Int =<< Map.lookup "modify" new
+                    These (FtpFileInfo oldFacts _) (FtpFileInfo newFacts _)
+                        | Just oldMod <- readMaybe @Int =<< Map.lookup "modify" oldFacts
+                        , Just newMod <- readMaybe @Int =<< Map.lookup "modify" newFacts
                         , oldMod >= newMod
                         ->
                             return ()
 
-                    _ -> do
+                    These _old new -> do
                         result <- liftIO do
                             log $ "Updating " ++ remotePath
                             Dir.removeFile localPath
 
-                            Exception.try @Exception.IOException $
-                                streamRetrToFile h remotePath localPath
+                            Exception.try @Exception.IOException do
+                                streamRetrToFileAndCheck h (ftpFileChecksum new) remotePath localPath
 
                         case result of
-                            Right () -> tell (Any True, [])
-                            Left e   -> tell (Any True, [(relPath, e)])
+                            Right () -> tell ([Updated localPath], [])
+                            Left e   -> tell ([Updated localPath], [(relPath, e)])
 
         lift
-            if getAny dirty then do
+            if null changes then
+                log "Already up to date."
+
+            else do
                 writeMetadata (deleteFileInfos (map fst excs) newMetadata)
                     metadataPath
 
@@ -272,10 +329,8 @@ syncGenericFTP cfg log (Tagged downloadDir) =
 
                         log "Update finished with errors."
                         Exception.throwIO exc1
-            else
-                log "Already up to date."
 
-        return dirty
+        return changes
   where
     withFTP :: (FTP.Handle -> FTP.FTPResponse -> IO a) -> IO a
     withFTP
@@ -284,4 +339,7 @@ syncGenericFTP cfg log (Tagged downloadDir) =
 
     deleteFileInfos :: [FtpRelPath] -> FtpFileInfos -> FtpFileInfos
     deleteFileInfos paths (FtpFileInfos infos) =
-        FtpFileInfos $ Map.withoutKeys infos (Set.fromList paths)
+        FtpFileInfos (Map.withoutKeys infos (Set.fromList paths))
+
+    checksum :: FilePath -> FtpFileInfo -> IO Bool
+    checksum _ _ = return True

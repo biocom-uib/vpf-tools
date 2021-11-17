@@ -7,7 +7,6 @@ module VPF.DataSource.VirusHostDB where
 
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS
-import Data.Semigroup (Any)
 import Data.Text (Text)
 
 import Frames (FrameRec, Rec)
@@ -26,12 +25,13 @@ virusHostDbFtpSourceConfig :: FtpSourceConfig
 virusHostDbFtpSourceConfig =
     $$(ftpSourceConfigFromURI [uri|ftp://ftp.genome.jp/pub/db/virushostdb/|]) $ DownloadList \_h ->
         return $ Right
-            [ "README"
-            , "non-segmented_virus_list.tsv"
-            , "segmented_virus_list.tsv"
-            , "virus_genome_type.tsv"
-            , "virushostdb.formatted.genomic.fna.gz"
-            , "virushostdb.tsv"
+            [ ("README",                               NoChecksum)
+            , ("dbrel.txt",                            NoChecksum)
+            , ("non-segmented_virus_list.tsv",         NoChecksum)
+            , ("segmented_virus_list.tsv",             NoChecksum)
+            , ("virus_genome_type.tsv",                NoChecksum)
+            , ("virushostdb.formatted.genomic.fna.gz", NoChecksum)
+            , ("virushostdb.tsv",                      NoChecksum)
             ]
 
 
@@ -51,7 +51,7 @@ parseFormattedFastaName formatted =
         _ -> Nothing
 
 
-syncVirusHostDb :: LogAction String -> Path Directory -> IO (Either String Any)
+syncVirusHostDb :: LogAction String -> Path Directory -> IO (Either String [ChangelogEntry])
 syncVirusHostDb = syncGenericFTP virusHostDbFtpSourceConfig
 
 

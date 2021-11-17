@@ -14,6 +14,7 @@ module VPF.Frames.DSV
   , fromEitherRowStreamAoS
   , parsedRowStream
   , fromRowStreamSoA
+  , fromParsedRowStreamSoA
   , readSubframeWith
   , readFrameWith
   , readSubframe

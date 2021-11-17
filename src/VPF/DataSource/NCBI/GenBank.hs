@@ -8,21 +8,22 @@ module VPF.DataSource.NCBI.GenBank
   , tpaExtraFiles
   , tpaExtraFilesLocal
   , syncGenBank
+  , GbDelCols
   , loadNewlyDeletedAccessionsList
   , listGenBankSeqFiles
   ) where
 
 import GHC.TypeLits (Symbol)
 
-import Control.Monad.Trans (lift)
+import Control.Monad (when, forM_)
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (runExceptT, ExceptT(ExceptT))
 import Control.Monad.Trans.Resource (runResourceT)
 
 import Data.Coerce (coerce)
 import Data.Function ((&))
 import Data.Kind
-import Data.List (sort, union, isPrefixOf, isSuffixOf)
-import Data.Semigroup (Any)
+import Data.List (sort, isPrefixOf, isSuffixOf)
 import Data.Text (Text)
 import Data.Text.Encoding qualified as Text
 import Data.Yaml qualified as Y
@@ -36,7 +37,7 @@ import Streaming.ByteString.Char8 qualified as BSS8
 import Streaming.Prelude qualified as S
 import Streaming.Zip qualified as SZ
 
-import System.FilePath ((</>), takeFileName)
+import System.FilePath ((</>), takeFileName, takeDirectory)
 import System.FilePath.Posix qualified as Posix
 
 import VPF.DataSource.GenericFTP
@@ -52,8 +53,7 @@ data GenBankDownloadList = GenBankDownloadList
 
 
 genBankSourceConfig :: GenBankDownloadList -> FtpSourceConfig
-genBankSourceConfig cfg = ncbiSourceConfig $
-    DownloadList \h -> buildDownloadList h cfg
+genBankSourceConfig cfg = ncbiSourceConfig (buildDownloadList cfg)
 
 
 genBankViralConfig :: GenBankDownloadList
@@ -81,21 +81,22 @@ tpaExtraFilesLocal :: [FilePath]
 tpaExtraFilesLocal = map toLocalRelPath tpaExtraFiles
 
 
-buildDownloadList :: FTP.Handle -> GenBankDownloadList -> IO (Either String [FtpRelPath])
-buildDownloadList h cfg = runExceptT do
-    fileNameList <- lift $ map FTP.mrFilename <$> FTP.mlsd h "genbank/"
-    let fileList = map ("genbank" Posix.</>) fileNameList
+buildDownloadList :: GenBankDownloadList -> DownloadList
+buildDownloadList cfg = DownloadList \h -> runExceptT $ S.toList_ do
+    fileNameList <- liftIO $ map FTP.mrFilename <$> FTP.mlsd h "genbank/"
 
-    let releaseNumberFile = "genbank/GB_Release_Number"
-        deletedEntriesFile = "genbank/gbdel.txt.gz"
-        selectedFiles = filter (genBankReleaseFileMatch cfg . Posix.takeFileName) fileList
+    S.yield (FtpRelPath "genbank/GB_Release_Number", NoChecksum)
+    S.yield (FtpRelPath "genbank/gbdel.txt.gz",      NoChecksum)
 
-        tpa = if genBankIncludeTPA cfg then tpaExtraFiles else []
+    forM_ fileNameList \fname ->
+        when (genBankReleaseFileMatch cfg fname) $
+            S.yield (FtpRelPath ("genbank" Posix.</> fname), NoChecksum)
 
-    return (coerce ([releaseNumberFile, deletedEntriesFile] `union` selectedFiles) ++ tpa)
+    when (genBankIncludeTPA cfg) $
+        S.each [(f, NoChecksum) | f <- tpaExtraFiles]
 
 
-syncGenBank :: GenBankDownloadList -> LogAction String -> Path Directory -> IO (Either String Any)
+syncGenBank :: GenBankDownloadList -> LogAction String -> Path Directory -> IO (Either String [ChangelogEntry])
 syncGenBank = syncGenericFTP . genBankSourceConfig
 
 
@@ -132,7 +133,9 @@ listGenBankSeqFiles cfg downloadDir = runExceptT do
     isGbffGz p = "seq.gz" `isSuffixOf` p || "gbff.gz" `isSuffixOf` p
 
     includeReleaseFile :: FilePath -> Bool
-    includeReleaseFile p = genBankReleaseFileMatch cfg (takeFileName p)
+    includeReleaseFile p =
+        takeDirectory p == "genbank"
+            && genBankReleaseFileMatch cfg (takeFileName p)
 
     includeFile :: FilePath -> Bool
     includeFile

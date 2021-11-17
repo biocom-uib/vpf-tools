@@ -29,6 +29,7 @@ dependencies:
 - constraints
 - containers
 - cryptonite
+- digest
 - directory
 - exceptions
 - feed
@@ -50,6 +51,7 @@ dependencies:
 - optparse-applicative
 - primitive
 - profunctors
+- ref-tf
 - reflection
 - regex-base
 - regex-pcre-builtin
@@ -78,6 +80,7 @@ dependencies:
 - vector-algorithms
 - vector-th-unbox
 - vinyl
+- witherable
 - xlsx
 - yaml
 - zlib
