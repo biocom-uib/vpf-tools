@@ -75,9 +75,11 @@ tool is designed to work with any user-provided classification files.
 
 The most recent `hmms` file containing the HMMER models of VPFs (`vpfsFile` in
 `data-index.yml`) can be downloaded from
-[IMG/VR](https://img.jgi.doe.gov//docs/final_list.hmms.gz). To use it with the
-provided `index.yaml`, extract `final_list.hmms` into the `data` directory,
-next to `index.yaml`.
+[IMG/VR](https://img.jgi.doe.gov//docs/final_list.hmms.gz) (UPDATE: the link
+appears to be broken, you can find a copy
+[here](http://bioinfo.uib.es/~recerca/VPF-Class/vpf-class-data/final_list.hmms).
+To use it with the provided `index.yaml`, extract `final_list.hmms` into the
+`data` directory, next to `index.yaml`.
 
 ## Troubleshooting
 
