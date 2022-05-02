@@ -11,7 +11,12 @@ in this framework.
 
 Usage example: Given a `.fna` file, obtain the proteins of each virus with
 `prodigal`, then perform a `hmmsearch` against the given `hmms` (VPFs) file to
-obtain a classification.
+obtain a classification. This requires a working installation of
+[HMMER](http://hmmer.org/) (version 3.x) and
+[Prodigal](https://github.com/hyattpd/Prodigal) (version 2.6). Both should be
+either available in your `$PATH` or specified using the `--hmmer-prefix` and
+the `--prodigal` flags.
+
 ```sh
 stack exec -- vpf-class --data-index ../data/index.yaml -i ../data/test.fna -o test-classified
 ```
@@ -54,6 +59,7 @@ to clone the repository and compile all targets. The first time this can take a
 while as `stack` also needs to install GHC and compile all the dependencies.
 Once it has finished, you should be able to run any of the tools from this
 directory by prefixing them with `stack exec --`, for instance,
+
 ```sh
 stack exec -- vpf-class --help
 ```
@@ -85,6 +91,16 @@ To use it with the provided `index.yaml`, extract `final_list.hmms` into the
 
 _NOTE: To work around these issues and for user convenience, we plan to provide a
 Dockerfile in future releases._
+
+- **HMMSearchNotFound**: First, make sure that you have a working installation
+of [HMMER](http://hmmer.org/). If it is not accessible from your `$PATH`, you
+can specify the path to the installation (the directory that contains `bin` and
+`share`) using the `--hmmer-prfeix` flag.
+
+- **ProdigalNotFound**: Make sure that you have
+[Prodigal](https://github.com/hyattpd/Prodigal) installed. If it is not
+accessible from your `$PATH`, you can specify the location to the executable
+using the `--prodigal` flag.
 
 - **The first step (`curl -sSL https://get.haskellstack.org/ | sh`) requires
 root access**: The default configuration in the Stack installer uses
