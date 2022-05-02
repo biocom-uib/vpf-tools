@@ -95,7 +95,7 @@ Dockerfile in future releases._
 - **HMMSearchNotFound**: First, make sure that you have a working installation
 of [HMMER](http://hmmer.org/). If it is not accessible from your `$PATH`, you
 can specify the path to the installation (the directory that contains `bin` and
-`share`) using the `--hmmer-prfeix` flag.
+`share`) using the `--hmmer-prefix` flag.
 
 - **ProdigalNotFound**: Make sure that you have
 [Prodigal](https://github.com/hyattpd/Prodigal) installed. If it is not
