@@ -12,8 +12,8 @@ in this framework.
 Usage example: Given a `.fna` file, obtain the proteins of each virus with
 `prodigal`, then perform a `hmmsearch` against the given `hmms` (VPFs) file to
 obtain a classification. This requires a working installation of
-[HMMER](http://hmmer.org/) (version 3.x) and
-[Prodigal](https://github.com/hyattpd/Prodigal) (version 2.6). Both should be
+[HMMER](http://hmmer.org/) (version 3.2+) and
+[Prodigal](https://github.com/hyattpd/Prodigal) (version 2.6.X). Both should be
 either available in your `$PATH` or specified using the `--hmmer-prefix` and
 the `--prodigal` flags.
 
