@@ -20,8 +20,6 @@ download_vpf_class_data() {
 
         touch "$VPF_DATA_PATH/last-update"
 
-        export VPF_CLASS_DATA_INDEX="$VPF_DATA_PATH/index.yaml"
-
         echo "Successfully updated VPF data files."
     fi
 }
