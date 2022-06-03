@@ -23,10 +23,11 @@ ARG DEBCONF_NONINTERACTIVE_SEEN=true
 
 RUN apt update && apt install -y ca-certificates curl hmmer prodigal
 
-VOLUME ["/opt/vpf-tools/vpf-data", "/opt/vpf-tools/input-sequences", "/opt/vpf-tools/outputs"]
+VOLUME ["/opt/vpf-tools/vpf-data"]
 
 # Update vpf-class data files if needed
 ENV VPF_DATA_AUTOUPDATE=1
+ENV VPF_CLASS_DATA_INDEX=/opt/vpf-tools/vpf-data/index.yaml
 ENV VPF_TOOLS_CHMOD=1
 
 COPY docker-entrypoint.sh /

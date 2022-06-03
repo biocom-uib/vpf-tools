@@ -12,9 +12,18 @@ download_vpf_class_data() {
         curl "$VPF_DATA_URL" | tar --overwrite --no-same-owner --strip-components=1 -xzf -;
     )
 
-    [ "$VPF_TOOLS_CHMOD" == 0 ] || chmod -R a+rwX "$VPF_DATA_PATH"/*
+    if [ $? != 0 ]
+    then
+        echo "Error downloading VPF data files."
+    else
+        [ "$VPF_TOOLS_CHMOD" == 0 ] || chmod -R a+rwX "$VPF_DATA_PATH"/*
 
-    touch "$VPF_DATA_PATH/last-update"
+        touch "$VPF_DATA_PATH/last-update"
+
+        export VPF_CLASS_DATA_INDEX="$VPF_DATA_PATH/index.yaml"
+
+        echo "Successfully updated VPF data files."
+    fi
 }
 
 
@@ -44,7 +53,7 @@ check_and_update_vpf_class_data() {
 
         if [ $? != 0 ]
         then
-            echo "Warning: Failed to test remote modification date: $VPF_DATA_URL. Overwriting"
+            echo "Warning: Failed to test remote modification date from $VPF_DATA_URL. Overwriting"
             download_vpf_class_data
 
         elif [ "$(date -d "$remote_date" +%s)" -gt "$local_date" ]

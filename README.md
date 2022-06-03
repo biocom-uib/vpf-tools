@@ -32,6 +32,8 @@ level in the `index.yaml` file. Using the provided files, one thus obtains:
 - `test-classified/host_genus.tsv`
 
 Please read to the end to find out where to obtain all the required data files.
+The `--data-files` option may be skipped if the `VPF_CLASS_DATA_INDEX`
+environment variable is set to the path of `index.yaml`.
 
 Concurrency options can be specified with `--workers` (number of
 parallel workers running `prodigal` or `hmmsearch`) and `--chunk-size` (max
@@ -43,7 +45,7 @@ number of genomes for each `prodigal`/`hmmsearch` process).
 
 We now provide a pre-configured docker image which contains all the required
 dependencies and automatically downloads supplementary data. See the detailed
-instructions [here](README_DOCKER.md).
+instructions [here](DOCKER.md).
 
 ### Method 2: Building from source
 
