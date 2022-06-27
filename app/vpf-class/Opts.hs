@@ -17,6 +17,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Yaml.Aeson as Y
 
+import System.Environment (lookupEnv)
 import qualified System.FilePath as FP
 
 import Options.Applicative
@@ -100,7 +101,7 @@ parseArgs = do
 
 
 configParserIO :: IO (Parser Config)
-configParserIO = fmap configParser defaultConcurrencyOpts
+configParserIO = configParser <$> defaultConcurrencyOpts <*> defaultFilesIndexFile
 
 
 defaultConcurrencyOpts :: IO ConcurrencyOpts
@@ -111,8 +112,13 @@ defaultConcurrencyOpts = do
     return ConcurrencyOpts {..}
 
 
-configParser :: ConcurrencyOpts -> Parser Config
-configParser defConcOpts = do
+defaultFilesIndexFile :: IO (Maybe (Path (YAML DataFilesIndex)))
+defaultFilesIndexFile = do
+    fmap Tagged <$> lookupEnv "VPF_CLASS_DATA_INDEX"
+
+
+configParser :: ConcurrencyOpts -> Maybe (Path (YAML DataFilesIndex)) -> Parser Config
+configParser defConcOpts defDataIndex = do
     prodigalPath <- fmap Tagged $ strOption $
         long "prodigal"
         <> metavar "PRODIGAL"
@@ -152,10 +158,10 @@ configParser defConcOpts = do
         <> hidden
         <> help "Generate temporary files in DIR instead of creating a temporary one"
 
-    dataFilesIndexFile <- strOption $
-        long "data-index"
-        <> metavar "DATA_INDEX"
-        <> help "YAML file containing references to all required data files"
+    dataFilesIndexFile <- option auto $
+        case defDataIndex of
+            Nothing   -> dataFilesIndexOpt
+            Just path -> dataFilesIndexOpt <> value path <> hidden <> showDefault
 
     genomesFile <- strOption $
         long "input-seqs"
@@ -181,6 +187,12 @@ configParser defConcOpts = do
 
     pure Config {..}
   where
+    dataFilesIndexOpt :: Mod OptionFields (Path (YAML DataFilesIndex))
+    dataFilesIndexOpt =
+        long "data-index"
+        <> metavar "DATA_INDEX"
+        <> help "YAML file containing references to all required data files"
+
     concOpts :: Parser ConcurrencyOpts
     concOpts = do
         numWorkers <- option auto $

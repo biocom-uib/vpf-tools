@@ -1,0 +1,5 @@
+.git/
+*~
+.stack-work*/
+stack.yaml.lock
+vpf-tools.cabal

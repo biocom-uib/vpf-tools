@@ -32,14 +32,24 @@ level in the `index.yaml` file. Using the provided files, one thus obtains:
 - `test-classified/host_genus.tsv`
 
 Please read to the end to find out where to obtain all the required data files.
+The `--data-files` option may be skipped if the `VPF_CLASS_DATA_INDEX`
+environment variable is set to the path of `index.yaml`.
 
 Concurrency options can be specified with `--workers` (number of
 parallel workers running `prodigal` or `hmmsearch`) and `--chunk-size` (max
 number of genomes for each `prodigal`/`hmmsearch` process).
 
-## Building
+## Installation
 
-Since there are still no release binaries available, you will need to install
+### Method 1: Docker
+
+We now provide a pre-configured docker image which contains all the required
+dependencies and automatically downloads supplementary data. See the detailed
+instructions [here](DOCKER.md).
+
+### Method 2: Building from source
+
+Since there are no release binaries available, you will need to install
 [stack](haskellstack.org) and compile `vpf-tools` yourself. The instructions
 are the same for both Mac OS and Linux, the tool has not been tested on
 Windows.
@@ -73,11 +83,12 @@ You can find our classification of VPFs either as a
 compressed package (including `index.yaml`)
 [here](https://bioinfo.uib.es/~recerca/VPF-Class/vpf-class-data.tar.gz).
 
-Alternatively, you can download individual data files [here](https://bioinfo.uib.es/~recerca/VPF-Class/), at the "VPF
-classification" tab. The data files that `vpf-class` requires are in the rows
-"Full data" (`modelClassesFile`) and "UViG Score samples" (`scoreSamplesFile`).
-This VPF classification has been obtained as described in the paper, but the
-tool is designed to work with any user-provided classification files.
+Alternatively, you can download individual data files
+[here](https://bioinfo.uib.es/~recerca/VPF-Class/), at the "VPF classification"
+tab. The data files that `vpf-class` requires are in the rows "Full data"
+(`modelClassesFile`) and "UViG Score samples" (`scoreSamplesFile`).  This VPF
+classification has been obtained as described in the paper, but the tool is
+designed to work with any user-provided classification files.
 
 The most recent `hmms` file containing the HMMER models of VPFs (`vpfsFile` in
 `data-index.yml`) can be downloaded from
