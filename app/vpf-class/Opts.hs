@@ -117,14 +117,18 @@ defaultFilesIndexFile = do
     fmap Tagged <$> lookupEnv "VPF_CLASS_DATA_INDEX"
 
 
+pathOption :: Mod OptionFields (Path t) -> Parser (Path t)
+pathOption = strOption
+
+
 configParser :: ConcurrencyOpts -> Maybe (Path (YAML DataFilesIndex)) -> Parser Config
 configParser defConcOpts defDataIndex = do
-    prodigalPath <- fmap Tagged $ strOption $
+    prodigalPath <- pathOption $
         long "prodigal"
         <> metavar "PRODIGAL"
         <> hidden
         <> showDefault
-        <> value "prodigal"
+        <> value (Tagged "prodigal")
         <> help "Path to the prodigal executable (or in $PATH)"
 
     prodigalProcedure <- strOption $
@@ -135,7 +139,7 @@ configParser defConcOpts defDataIndex = do
         <> value "meta"
         <> help "Prodigal procedure (-p) to use (for version 2.6.3: single or meta)"
 
-    hmmerPrefix <- optional $ strOption $
+    hmmerPrefix <- optional $ pathOption $
         long "hmmer-prefix"
         <> metavar "HMMER"
         <> hidden
@@ -151,19 +155,19 @@ configParser defConcOpts defDataIndex = do
         <> value 1e-3
         <> help "Accept hits with e-value <= THRESHOLD"
 
-    workDir <- optional $ fmap Tagged $ strOption $
+    workDir <- optional $ pathOption $
         long "work-dir"
         <> short 'd'
         <> metavar "DIR"
         <> hidden
         <> help "Generate temporary files in DIR instead of creating a temporary one"
 
-    dataFilesIndexFile <- option auto $
+    dataFilesIndexFile <- pathOption $
         case defDataIndex of
             Nothing   -> dataFilesIndexOpt
             Just path -> dataFilesIndexOpt <> value path <> hidden <> showDefault
 
-    genomesFile <- strOption $
+    genomesFile <- pathOption $
         long "input-seqs"
         <> short 'i'
         <> metavar "SEQS_FILE"
@@ -177,7 +181,7 @@ configParser defConcOpts defDataIndex = do
         <> showDefault
         <> help "PCRE regex matching the virus identifier from a gene identifier (options PCRE_ANCHORED | PCRE_UTF8)"
 
-    outputDir <- fmap Tagged $ strOption $
+    outputDir <- pathOption $
         long "output-dir"
         <> short 'o'
         <> metavar "OUTPUT_DIR"
