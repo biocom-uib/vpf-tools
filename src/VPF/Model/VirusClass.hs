@@ -438,9 +438,9 @@ distribSearchHits :: forall sigm m sign n w.
         )
     -> SearchHitsConcurrencyOpts
     -> Path HMMERModel
-    -> Producer (FA.FastaEntry Nucleotide) (SafeT IO) (Either FA.ParseError ())
+    -> Path (FASTA Nucleotide)
     -> m [(GenomeChunkKey, Path (FASTA Aminoacid), Path (HMMERTable ProtSearchHitCols))]
-distribSearchHits sdict concOpts vpfsFile genomes = do
+distribSearchHits sdict concOpts vpfsFile genomesFile = do
     nslaves <- getNumWorkers_
 
     wd <- ask @WorkDir
@@ -454,7 +454,7 @@ distribSearchHits sdict concOpts vpfsFile genomes = do
         chunkGenomeCount = P.map (first sum . unzip)
 
     genomesFilesProducer :: PA.AsyncProducer (Integer, [(_, _)]) (SafeT IO) () m () <- liftIO $
-        genomes
+        FA.fastaFileReader genomesFile
           & PA.bufferedChunks (fromIntegral $ fastaChunkSize concOpts)
           & (>-> genomesChunkWriter)
           & PA.bufferedChunks (fromIntegral $ numSearchingWorkers concOpts)
@@ -710,7 +710,7 @@ checkpointStep checkpoint =
     case checkpoint of
       ContinueSearchingHits ->
           SearchHitsStep $ \sdict concOpts vpfsFile genomesFile -> do
-              r <- distribSearchHits sdict concOpts vpfsFile (FA.fastaFileReader genomesFile)
+              r <- distribSearchHits sdict concOpts vpfsFile genomesFile
               return $ ContinueFromHitsFiles (map (L.view L._1) r)
 
       ContinueFromHitsFiles keys ->
