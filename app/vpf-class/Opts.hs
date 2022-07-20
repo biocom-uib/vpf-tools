@@ -70,6 +70,7 @@ data Config = Config
     { hmmerPrefix        :: Maybe (Path Directory)
     , prodigalPath       :: Path Executable
     , prodigalProcedure  :: String
+    , prodigalMaskNs     :: Bool
     , evalueThreshold    :: Double
     , genomesFile        :: Path (FASTA Nucleotide)
     , virusNameRegex     :: Text
@@ -138,6 +139,11 @@ configParser defConcOpts defDataIndex = do
         <> showDefault
         <> value "meta"
         <> help "Prodigal procedure (-p) to use (for version 2.6.3: single or meta)"
+
+    prodigalMaskNs <- switch $
+        long "prodigal-mask-n"
+        <> hidden
+        <> help "Mask N bases during protein prediction (prodigal option -m)"
 
     hmmerPrefix <- optional $ pathOption $
         long "hmmer-prefix"

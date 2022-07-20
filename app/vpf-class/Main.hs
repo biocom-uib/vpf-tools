@@ -231,7 +231,10 @@ loadDataFilesIndex cfg = do
 
 withProdigalCfg :: (MonadIO m, Has Die sig m) => Config -> Pr.ProdigalT m a -> m a
 withProdigalCfg cfg m = do
-    res <- Pr.runProdigalT (Opts.prodigalPath cfg) ["-p", Opts.prodigalProcedure cfg] m
+    let flags = ["-p", Opts.prodigalProcedure cfg]
+    let flags' = if Opts.prodigalMaskNs cfg then flags ++ ["-m"] else flags
+
+    res <- Pr.runProdigalT (Opts.prodigalPath cfg) flags' m
 
     case res of
       Right a -> return a
