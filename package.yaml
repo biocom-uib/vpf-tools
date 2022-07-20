@@ -1,6 +1,6 @@
 name:                vpf-tools
 version:             0.1.2
-github:              "biocom-uib/vpf"
+github:              "biocom-uib/vpf-tools"
 license:             BSD3
 author:              "Gabriel Riera"
 maintainer:          "gabriel.riera@uib.es"
