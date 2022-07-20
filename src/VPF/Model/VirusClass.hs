@@ -11,7 +11,6 @@ module VPF.Model.VirusClass where
 
 import GHC.Generics (Generic)
 
-import Control.Algebra (Has)
 import Control.Carrier.Error.Excepts (ExceptsT, runExceptsT, Errors, throwErrors)
 import Control.Distributed.SClosure
 import Control.Effect.Reader
@@ -473,7 +472,7 @@ distribSearchHits sdict concOpts vpfsFile genomes = do
             <:*> spureWith (static Dict) vpfsFile
             <:*> spureWith (static Dict) kps
 
-    progress <- liftIO $ Progress.init 0 (\nseqs -> "processsed " ++ show nseqs ++ " sequences")
+    progress <- liftIO $ Progress.init 0 (\nseqs -> "processed " ++ show nseqs ++ " sequences")
     let updateProgress n = liftIO $ Progress.update progress (+ n)
 
     rs <- withWorkers_ $ \w -> do
