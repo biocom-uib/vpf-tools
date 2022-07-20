@@ -100,9 +100,6 @@ To use it with the provided `index.yaml`, extract `final_list.hmms` into the
 
 ## Troubleshooting
 
-_NOTE: To work around these issues and for user convenience, we plan to provide a
-Dockerfile in future releases._
-
 - **HMMSearchNotFound**: First, make sure that you have a working installation
 of [HMMER](http://hmmer.org/). If it is not accessible from your `$PATH`, you
 can specify the path to the installation (the directory that contains `bin` and
