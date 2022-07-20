@@ -9,6 +9,8 @@ module Main where
 import Control.Algebra (Has)
 import Control.Carrier.Error.Excepts (Throw, ExceptsT, handleErrorCase, runLastExceptT, throwError)
 
+import qualified Control.Concurrent as Conc
+import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Control.Monad.Morph (hoist)
 import Control.Monad.Trans.Control (MonadBaseControl)
@@ -88,6 +90,9 @@ main :: IO ()
 main = do
     cfg <- Opts.parseArgs
 
+    -- waiting and joining spawns too many threads (BUG)
+    limitCapabilitiesToWorkers (Opts.numWorkers (Opts.concurrencyOpts cfg))
+
     ec <-
         dyingWithExitCode 1 $
         withCfgWorkDir cfg $
@@ -98,6 +103,17 @@ main = do
 
 
     exitWith ec
+  where
+    limitCapabilitiesToWorkers numWorkers = do
+        -- + 1 for the main thread
+        -- + 1 for garbage collection
+        let neededCapabilities = numWorkers + 2
+
+        when (numWorkers > 1) do
+            capabilities <- Conc.getNumCapabilities
+
+            when (capabilities > neededCapabilities) $
+                Conc.setNumCapabilities neededCapabilities
 
 
 mainClassify :: Config -> M ()
